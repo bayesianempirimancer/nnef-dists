@@ -1,0 +1,24 @@
+sampling:
+  num_samples: 1500
+  num_warmup: 750
+  step_size: 0.1
+  num_integration_steps: 10
+  initial_position: 0.0
+
+model:
+  hidden_sizes: [64, 64]
+  activation: tanh
+
+optim:
+  learning_rate: 0.001
+  num_epochs: 50
+  batch_size: 64
+  seed: 0
+
+grid:
+  num_train_points: 256
+  num_val_points: 64
+  eta1_range: [-2.0, 2.0]
+  eta2_range: [-1.5, -0.1]
+
+

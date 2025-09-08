@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nnef-dist"
+version = "0.0.1"
+description = "Fast variational inference with non-named exponential family distributions via neural moment maps"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "nnef-dist" }
+]
+dependencies = [
+    "jax>=0.4.28",
+    "flax>=0.8.4",
+    "optax>=0.2.3",
+    "blackjax>=1.2.3",
+    "chex>=0.1.86",
+    "numpy>=1.26",
+    "tqdm>=4.66",
+    "pyyaml>=6.0.2",
+    "einops>=0.8.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.8.0",
+    "ipykernel>=6.29.0",
+    "matplotlib>=3.8.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
