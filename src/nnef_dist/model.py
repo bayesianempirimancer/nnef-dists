@@ -25,7 +25,7 @@ def get_activation(name: str) -> Callable[[Array], Array]:
 class MomentMLP(nn.Module):
     hidden_sizes: Sequence[int]
     activation: str = "tanh"
-    output_dim: int = 2  # E[T(x)] with T=[x, x^2]
+    output_dim: int = 2  # flattened dim of E[T(x)]
 
     @nn.compact
     def __call__(self, eta: Array) -> Array:

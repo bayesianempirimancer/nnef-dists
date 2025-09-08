@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import yaml
 
 from nnef_dist.train import build_dataset, train_moment_net
+from nnef_dist.ef import ef_factory
 
 
 def main():
@@ -23,16 +24,19 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    ef = ef_factory(cfg["ef"]["name"])  # e.g., gaussian_1d
+
     train_data, val_data = build_dataset(
+        ef=ef,
         train_points=cfg["grid"]["num_train_points"],
         val_points=cfg["grid"]["num_val_points"],
-        eta1_range=tuple(cfg["grid"]["eta1_range"]),
-        eta2_range=tuple(cfg["grid"]["eta2_range"]),
+        eta_ranges=tuple(tuple(r) for r in cfg["grid"]["eta_ranges"]),
         sampler_cfg=cfg["sampling"],
         seed=cfg["optim"]["seed"],
     )
 
     state, history = train_moment_net(
+        ef=ef,
         train_data=train_data,
         val_data=val_data,
         hidden_sizes=tuple(cfg["model"]["hidden_sizes"]),

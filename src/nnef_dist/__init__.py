@@ -1,11 +1,12 @@
 """nnef_dist: Neural networks for non-named exponential family inference."""
 
-from .ef import PolynomialEF1D, log_unnormalized_density
+from .ef import ExponentialFamily, GaussianNatural1D, ef_factory
 from .model import MomentMLP
 
 __all__ = [
-    "PolynomialEF1D",
-    "log_unnormalized_density",
+    "ExponentialFamily",
+    "GaussianNatural1D",
+    "ef_factory",
     "MomentMLP",
 ]
 

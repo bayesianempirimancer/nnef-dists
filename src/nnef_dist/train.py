@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Callable
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +10,7 @@ from flax.training import train_state
 from flax.core import FrozenDict
 from jax import random
 
-from .ef import make_logdensity_fn, sufficient_statistic_poly1d
+from .ef import ExponentialFamily, GaussianNatural1D
 from .sampling import run_hmc
 from .model import MomentMLP
 
@@ -22,44 +22,53 @@ class TrainState(train_state.TrainState):
     batch_stats: FrozenDict | None = None
 
 
-def generate_eta_grid(num_points: int, eta1_range: Tuple[float, float], eta2_range: Tuple[float, float], key: Array) -> Array:
-    eta1 = random.uniform(key, (num_points,), minval=eta1_range[0], maxval=eta1_range[1])
-    # Ensure negative eta2 for integrability
-    eta2 = random.uniform(key, (num_points,), minval=eta2_range[0], maxval=eta2_range[1])
-    return jnp.stack([eta1, eta2], axis=-1)
+def generate_eta_grid(num_points: int, eta_ranges: Tuple[Tuple[float, float], ...], key: Array) -> Array:
+    dims = len(eta_ranges)
+    keys = random.split(key, dims)
+    comps = []
+    for i, (low, high) in enumerate(eta_ranges):
+        comps.append(random.uniform(keys[i], (num_points,), minval=low, maxval=high))
+    return jnp.stack(comps, axis=-1)
 
 
-def empirical_moments_from_samples(samples: Array) -> Array:
-    t = sufficient_statistic_poly1d(samples)
+def empirical_moments_from_samples(ef: ExponentialFamily, samples: Array) -> Array:
+    # samples: (N, D_flat) -> reshape to (N, x_shape)
+    x = jnp.reshape(samples, (samples.shape[0],) + ef.x_shape)
+    t = jax.vmap(ef.sufficient_statistic)(x)
     return jnp.mean(t, axis=0)
 
 
 def build_dataset(
+    ef: ExponentialFamily,
     train_points: int,
     val_points: int,
-    eta1_range: Tuple[float, float],
-    eta2_range: Tuple[float, float],
+    eta_ranges: Tuple[Tuple[float, float], ...],
     sampler_cfg: Dict,
     seed: int,
 ) -> Tuple[Dict[str, Array], Dict[str, Array]]:
     key = random.PRNGKey(seed)
     k_tr, k_val, k_pos = random.split(key, 3)
-    etas_train = generate_eta_grid(train_points, eta1_range, eta2_range, k_tr)
-    etas_val = generate_eta_grid(val_points, eta1_range, eta2_range, k_val)
+    etas_train = generate_eta_grid(train_points, eta_ranges, k_tr)
+    etas_val = generate_eta_grid(val_points, eta_ranges, k_val)
 
     def simulate(etas: Array, key: Array) -> Array:
         def one(eta, k):
-            logp = make_logdensity_fn(eta)
+            logp = ef.make_logdensity_fn(eta)
+            init_pos = sampler_cfg.get("initial_position", None)
+            if init_pos is None:
+                init_pos = jnp.zeros((ef.x_dim,))
+            else:
+                init_pos = jnp.asarray(init_pos).reshape((ef.x_dim,))
             samples = run_hmc(
                 logp,
                 num_samples=sampler_cfg["num_samples"],
                 num_warmup=sampler_cfg["num_warmup"],
                 step_size=sampler_cfg["step_size"],
                 num_integration_steps=sampler_cfg["num_integration_steps"],
-                initial_position=sampler_cfg.get("initial_position", 0.0),
+                initial_position=init_pos,
                 seed=int(k[0]),
             )
-            return empirical_moments_from_samples(samples)
+            return empirical_moments_from_samples(ef, samples)
 
         keys = random.split(key, etas.shape[0])
         ys = jax.vmap(one)(etas, keys)
@@ -70,8 +79,8 @@ def build_dataset(
     return {"eta": etas_train, "y": y_train}, {"eta": etas_val, "y": y_val}
 
 
-def create_train_state(rng: Array, model: MomentMLP, learning_rate: float) -> TrainState:
-    params = model.init(rng, jnp.zeros((1, 2)))
+def create_train_state(rng: Array, model: MomentMLP, ef: ExponentialFamily, learning_rate: float) -> TrainState:
+    params = model.init(rng, jnp.zeros((1, ef.t_dim)))
     tx = optax.adam(learning_rate)
     return TrainState.create(apply_fn=model.apply, params=params["params"], tx=tx)
 
@@ -83,6 +92,7 @@ def loss_fn(params, model: MomentMLP, batch_eta: Array, batch_target: Array) -> 
 
 
 def train_moment_net(
+    ef: ExponentialFamily,
     train_data: Dict[str, Array],
     val_data: Dict[str, Array],
     hidden_sizes: Tuple[int, ...],
@@ -93,8 +103,8 @@ def train_moment_net(
     seed: int,
 ) -> Tuple[TrainState, Dict[str, Array]]:
     rng = random.PRNGKey(seed)
-    model = MomentMLP(hidden_sizes=hidden_sizes, activation=activation)
-    state = create_train_state(rng, model, learning_rate)
+    model = MomentMLP(hidden_sizes=hidden_sizes, activation=activation, output_dim=ef.t_dim)
+    state = create_train_state(rng, model, ef, learning_rate)
 
     num_train = train_data["eta"].shape[0]
     steps_per_epoch = max(1, (num_train + batch_size - 1) // batch_size)

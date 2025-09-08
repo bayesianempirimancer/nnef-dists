@@ -15,10 +15,14 @@ optim:
   batch_size: 64
   seed: 0
 
+ef:
+  name: gaussian_1d
+
 grid:
   num_train_points: 256
   num_val_points: 64
-  eta1_range: [-2.0, 2.0]
-  eta2_range: [-1.5, -0.1]
+  eta_ranges:
+    - [-2.0, 2.0]
+    - [-1.5, -0.1]
 
 

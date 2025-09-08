@@ -16,7 +16,7 @@ This repository uses JAX/Flax for modeling and BlackJAX for HMC sampling.
 pip install -e .[dev]
 ```
 
-2. Train a simple 1D polynomial EF (Gaussian-like) moment network:
+2. Train a simple 1D Gaussian-in-natural-params EF moment network:
 
 ```bash
 python scripts/train_moment_net.py --config configs/gaussian_moment_net.yaml
@@ -27,17 +27,22 @@ Artifacts (learned parameters and metrics) will be saved under `artifacts/`.
 ## Project layout
 
 - `src/nnef_dist/`: Core library
-  - `ef.py`: Exponential-family specs and log-density helpers
-  - `sampling.py`: BlackJAX HMC sampling utilities
-  - `model.py`: Flax models for moment mapping
-  - `train.py`: Data generation and training loop
+  - `ef.py`: Generic `ExponentialFamily` interface, `GaussianNatural1D` example, and EF factory
+  - `sampling.py`: BlackJAX HMC sampling utilities (arbitrary-shaped x via flattening)
+  - `model.py`: Flax models for moment mapping (eta -> E[T(x)])
+  - `train.py`: Data generation (MCMC) and training loop
 - `scripts/`: CLI entry points
 - `configs/`: Example configuration files
 - `artifacts/`: Saved models and metrics
 
+## Defining new exponential-family distributions
+
+- Implement the `ExponentialFamily` interface in `src/nnef_dist/ef.py` (or your own module): define immutable `x_shape`, `t_shape`, and the methods `sufficient_statistic(x)` and `log_unnormalized(x, eta)`. The shapes may be arbitrary tensors, not just vectors. The trainer flattens `x` for HMC and respects your shapes when computing moments.
+- Add your EF to `ef_factory` or pass an instance programmatically.
+
 ## Notes
 
-- The example configuration models a 1D polynomial EF with `T(x) = [x, x^2]` and `eta = [eta1, eta2]` where `eta2 < 0` to ensure integrability, corresponding to a Gaussian in natural parameterization.
-- Future extensions include higher-dimensional `T(x)`, alternative base measures, and invertible bi-directional models between `eta` and `E[T]`.
+- The included example `GaussianNatural1D` uses `T(x) = [x, x^2]` with `eta = [eta1, eta2]` and `eta2 < 0` for integrability.
+- Future extensions include higher-dimensional/tensor `x` and `T(x)`, alternative base measures, and invertible bi-directional models between `eta` and `E[T]`.
 
 

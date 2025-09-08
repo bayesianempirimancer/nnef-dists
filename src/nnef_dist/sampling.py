@@ -20,16 +20,18 @@ def run_hmc(
     initial_position: Array,
     seed: int = 0,
 ) -> Array:
-    """Run HMC with BlackJAX for a one-dimensional variable.
+    """Run HMC with BlackJAX for a vectorized position.
 
-    Returns an array of shape (num_samples,) of draws after warmup.
+    initial_position: shape (D,) for flattened x.
+    Returns an array of shape (num_samples, D) of draws after warmup.
     """
     key = random.PRNGKey(seed)
-    hmc = blackjax.hmc(logdensity_fn, step_size=step_size, inverse_mass_matrix=jnp.array([1.0]))
+    dim = jnp.size(initial_position)
+    hmc = blackjax.hmc(logdensity_fn, step_size=step_size, inverse_mass_matrix=jnp.ones((dim,)))
     initial_state = hmc.init(jnp.atleast_1d(initial_position))
 
     def one_step(state, k):
-        k1, k2 = random.split(k)
+        k1, _ = random.split(k)
         state, _ = hmc.step(k1, state, num_integration_steps)
         return state, state.position
 
@@ -42,6 +44,6 @@ def run_hmc(
     # Sampling
     keys = random.split(key, num_samples)
     state, positions = jax.lax.scan(one_step, state, keys)
-    return jnp.squeeze(positions)
+    return jnp.asarray(positions)
 
 
