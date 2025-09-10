@@ -17,6 +17,8 @@ optim:
 
 ef:
   name: gaussian_1d
+  # For multivariate_normal, you could add:
+  # x_shape: [3]  # 3-dimensional vectors
 
 grid:
   num_train_points: 256

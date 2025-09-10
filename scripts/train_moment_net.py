@@ -24,7 +24,9 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ef = ef_factory(cfg["ef"]["name"])  # e.g., gaussian_1d
+    ef_params = cfg["ef"].copy()
+    ef_name = ef_params.pop("name")
+    ef = ef_factory(ef_name, **ef_params)  # e.g., gaussian_1d or mv_normal with x_shape
 
     train_data, val_data = build_dataset(
         ef=ef,

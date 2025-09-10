@@ -34,8 +34,12 @@ def generate_eta_grid(num_points: int, eta_ranges: Tuple[Tuple[float, float], ..
 def empirical_moments_from_samples(ef: ExponentialFamily, samples: Array) -> Array:
     # samples: (N, D_flat) -> reshape to (N, x_shape)
     x = jnp.reshape(samples, (samples.shape[0],) + ef.x_shape)
-    t = jax.vmap(ef.sufficient_statistic)(x)
-    return jnp.mean(t, axis=0)
+    stats = jax.vmap(ef.compute_stats)(x)
+    # Flatten per-sample stats dict then average
+    def flatten_one(d):
+        return ef.flatten_stats_or_eta(d)
+    flat = jax.vmap(flatten_one)(stats)
+    return jnp.mean(flat, axis=0)
 
 
 def build_dataset(
@@ -59,6 +63,7 @@ def build_dataset(
                 init_pos = jnp.zeros((ef.x_dim,))
             else:
                 init_pos = jnp.asarray(init_pos).reshape((ef.x_dim,))
+            # Use the key directly instead of converting to int
             samples = run_hmc(
                 logp,
                 num_samples=sampler_cfg["num_samples"],
@@ -66,7 +71,7 @@ def build_dataset(
                 step_size=sampler_cfg["step_size"],
                 num_integration_steps=sampler_cfg["num_integration_steps"],
                 initial_position=init_pos,
-                seed=int(k[0]),
+                seed=k,  # Pass the key directly
             )
             return empirical_moments_from_samples(ef, samples)
 
@@ -80,7 +85,7 @@ def build_dataset(
 
 
 def create_train_state(rng: Array, model: MomentMLP, ef: ExponentialFamily, learning_rate: float) -> TrainState:
-    params = model.init(rng, jnp.zeros((1, ef.t_dim)))
+    params = model.init(rng, jnp.zeros((1, ef.eta_dim)))
     tx = optax.adam(learning_rate)
     return TrainState.create(apply_fn=model.apply, params=params["params"], tx=tx)
 
@@ -103,7 +108,7 @@ def train_moment_net(
     seed: int,
 ) -> Tuple[TrainState, Dict[str, Array]]:
     rng = random.PRNGKey(seed)
-    model = MomentMLP(hidden_sizes=hidden_sizes, activation=activation, output_dim=ef.t_dim)
+    model = MomentMLP(hidden_sizes=hidden_sizes, activation=activation, output_dim=ef.eta_dim)
     state = create_train_state(rng, model, ef, learning_rate)
 
     num_train = train_data["eta"].shape[0]
