@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nnef-dist"
+name = "nnef-dists"
 version = "0.0.1"
 description = "Fast variational inference with non-named exponential family distributions via neural moment maps"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    { name = "nnef-dist" }
+    { name = "nnef-dists" }
 ]
 dependencies = [
     "jax>=0.4.28",
