@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Add src to path so we can import without installing
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import jax.numpy as jnp
 import yaml
@@ -52,8 +56,16 @@ def main():
     # Save params and history
     params_file = out_dir / "params.json"
     hist_file = out_dir / "history.json"
+    
+    # Convert Flax params dict to serializable format
+    def convert_params(params):
+        if isinstance(params, dict):
+            return {k: convert_params(v) for k, v in params.items()}
+        else:
+            return jnp.array(params).tolist()
+    
     with params_file.open("w") as f:
-        json.dump({"params": jnp.array(state.params).tolist()}, f)
+        json.dump({"params": convert_params(state.params)}, f)
     with hist_file.open("w") as f:
         json.dump(history, f, indent=2)
 
