@@ -68,4 +68,9 @@ Thumbs.db
 # Project artifacts
 artifacts/
 
+# Data files and logs
+data/
+*.log
+*.pkl
+
 

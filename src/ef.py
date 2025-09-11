@@ -115,6 +115,9 @@ def ef_factory(name: str, **kwargs) -> ExponentialFamily:
         return GaussianNatural1D()
     elif n in {"mv_normal", "multivariate_normal"}:
         x_shape = kwargs.get("x_shape", (2,))  # default 2D
+        # Convert list to tuple if needed
+        if isinstance(x_shape, list):
+            x_shape = tuple(x_shape)
         return MultivariateNormal(x_shape=x_shape)
     raise ValueError(f"Unknown EF name: {name}")
 
@@ -125,11 +128,11 @@ class GaussianNatural1D(ExponentialFamily):
     log p(x | eta) ∝ eta1 * x + eta2 * x^2  (base measure constant 0)
     Integrability requires eta2 < 0.
     """
-    x_shape: Tuple[int, ...] = ()
+    x_shape: Tuple[int, ...] = (1,)
 
     @cached_property
     def stat_specs(self) -> Dict[str, Tuple[int, ...]]:
-        return {"x": (), "x2": ()}
+        return {"x": (1,), "x2": (1,)}
 
     def compute_stats(self, x: Array) -> Dict[str, Array]:
         return {"x": x, "x2": x ** 2}

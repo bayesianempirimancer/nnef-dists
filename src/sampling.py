@@ -10,7 +10,6 @@ from jax import random
 
 Array = jax.Array
 
-
 def run_hmc(
     logdensity_fn: Callable[[Array], Array],
     num_samples: int,
