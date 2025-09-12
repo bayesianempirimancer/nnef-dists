@@ -7,19 +7,19 @@ grid:
   num_train_points: 2000
   num_val_points: 500
   eta_ranges:
-    - [-20.0, 20.0]    # eta1 (linear terms) - 3D vector, can be any real values
-    - [-40.0, -1.0]    # eta2 (matrix terms) - 3x3 matrix, must be symmetric negative definite
+    - [-4.0, 4.0]    # eta1 (linear terms) - 3D vector, can be any real values
+    - [-4.0, -0.04]    # eta2 (matrix terms) - 3x3 matrix, must be symmetric negative definite
 
 sampling:
-  num_samples: 2000     # Number of HMC samples per eta (1000 * 2 eta)
-  num_warmup: 400       # Warmup samples
+  num_samples: 4000     # Number of HMC samples per eta (1000 * 2 eta)
+  num_warmup: 1000       # Warmup samples
   step_size: 0.08        # Smaller step size for higher dimensions
   num_integration_steps: 12  # More integration steps for stability
 
 optim:
-  hidden_sizes: [128, 64, 32]  # Larger network for higher dimensional input
+  hidden_sizes: [128, 64, 64, 32]  # Larger network for higher dimensional input
   activation: "tanh"           # Activation function
-  learning_rate: 0.0008        # Slightly lower learning rate
-  num_epochs: 120              # More epochs for complex mapping
-  batch_size: 32               # Smaller batch size for higher dimensional data
+  learning_rate: 0.002        # Slightly lower learning rate
+  num_epochs: 500              # More epochs for complex mapping
+  batch_size: 64               # Smaller batch size for higher dimensional data
   seed: 42                     # Random seed
