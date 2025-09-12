@@ -26,7 +26,7 @@ Artifacts (learned parameters and metrics) will be saved under `artifacts/`.
 
 ## Project layout
 
-- `src/nnef_dist/`: Core library
+- `src/`: Core library
   - `ef.py`: Generic `ExponentialFamily` interface, `GaussianNatural1D` example, and EF factory
   - `sampling.py`: BlackJAX HMC sampling utilities (arbitrary-shaped x via flattening)
   - `model.py`: Flax models for moment mapping (eta -> E[T(x)])
