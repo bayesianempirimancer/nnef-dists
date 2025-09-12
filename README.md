@@ -59,7 +59,7 @@ Artifacts (learned parameters, training history, and plots) will be saved under 
 - `scripts/`: Training and visualization scripts
   - `train_large_1d.py`: Training script for 1D Gaussian models
   - `train_large_3d.py`: Training script for 3D multivariate Gaussian models
-  - `plot_results.py`: Plotting utilities for 1D results
+  - `plot_1d_results.py`: Plotting utilities for 1D results
   - `plot_3d_results.py`: Specialized plotting for 3D multivariate results
   - `matrix_utils.py`: JAX utilities for matrix operations
   - `test_training.py`: Test script for small-scale training
