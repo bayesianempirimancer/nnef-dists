@@ -14,7 +14,7 @@ from src.ef import ef_factory
 from src.model import nat2statMLP
 from src.train import train_moment_net
 from src.data_utils import load_training_data
-from plot_results import plot_gaussian_1d_results
+from plot_1d_results import plot_gaussian_1d_results
 
 def test_training():
     """Test the training routine with the small Gaussian 1D dataset."""
