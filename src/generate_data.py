@@ -70,7 +70,7 @@ def generate_multivariate_eta_grid(
     
     # Generate matrix terms (eta2) - must be symmetric negative definite
     keys = random.split(k2, num_points)
-    eta2_matrices = jnp.stack([generate_negative_definite_matrix(d, keys[i]) for i in range(num_points)])
+    eta2_matrices = jnp.stack([generate_negative_definite_matrix(d, keys[i], min_eigenval=eta_ranges[1][0], max_eigenval=eta_ranges[1][1]) for i in range(num_points)])
     
     # Flatten the matrices and combine with linear terms
     eta2_flat = eta2_matrices.reshape(num_points, d * d)

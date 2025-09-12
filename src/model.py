@@ -5,7 +5,7 @@ from typing import Sequence, Callable, Tuple
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from ef import ExponentialFamily, MultivariateNormal
+from src.ef import ExponentialFamily, MultivariateNormal
 
 Array = jax.Array
 

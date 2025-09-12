@@ -10,8 +10,8 @@ from flax.training import train_state
 from flax.core import FrozenDict
 from jax import random
 
-from ef import ExponentialFamily, GaussianNatural1D
-from model import nat2statMLP
+from src.ef import ExponentialFamily, GaussianNatural1D
+from src.model import nat2statMLP
 
 Array = jax.Array
 

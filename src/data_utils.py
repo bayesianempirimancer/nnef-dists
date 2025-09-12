@@ -1,14 +1,10 @@
 """Utilities for loading and working with training data."""
 
-import json
 import pickle
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
-import jax
-import jax.numpy as jnp
-from jax import random, Array
-from sampling import run_hmc
+from jax import Array
 
 def load_training_data(data_file: str) -> Tuple[Dict[str, Array], Dict[str, Array], str]:
     """
