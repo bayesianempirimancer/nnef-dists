@@ -21,6 +21,13 @@ def get_activation(name: str) -> Callable[[Array], Array]:
         return nn.swish
     raise ValueError(f"Unknown activation: {name}")
 
+class nat2statFlow(nn.Module):
+    """
+    Natural parameters to sufficient statistics flow.
+    Maps natural parameters (eta) to sufficient statistics (moments).
+    Uses a flow based model with diffusion training protocols ala the NoProp algorithm.
+    """
+    pass # TODO: Implement
 
 class nat2statMLP(nn.Module):
     """

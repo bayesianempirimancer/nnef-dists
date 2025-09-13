@@ -16,11 +16,7 @@ dependencies = [
     "flax>=0.8.4",
     "optax>=0.2.3",
     "blackjax>=1.2.3",
-    "chex>=0.1.86",
-    "numpy>=1.26",
-    "tqdm>=4.66",
-    "pyyaml>=6.0.2",
-    "einops>=0.8.0"
+    "matplotlib>=3.8.0"
 ]
 
 [project.optional-dependencies]
@@ -28,8 +24,7 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.5.0",
     "mypy>=1.8.0",
-    "ipykernel>=6.29.0",
-    "matplotlib>=3.8.0"
+    "ipykernel>=6.29.0"
 ]
 
 [tool.setuptools]

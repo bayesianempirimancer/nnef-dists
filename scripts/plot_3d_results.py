@@ -8,7 +8,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pickle
-import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for headless environments
 import matplotlib.pyplot as plt
@@ -51,7 +50,7 @@ def plot_3d_multivariate_results(data_file, history_file, save_dir="artifacts/pl
     sigma_true = y_true_val[:, 3:9]  # Covariance elements: [sigma_00, sigma_01, sigma_02, sigma_11, sigma_12, sigma_22]
     
     # Convert covariance vector back to matrices for easier comparison
-    sigma_matrices_true = np.zeros((sigma_true.shape[0], 3, 3))
+    sigma_matrices_true = jnp.zeros((sigma_true.shape[0], 3, 3))
     for i in range(sigma_true.shape[0]):
         sigma_matrices_true[i, 0, 0] = sigma_true[i, 0]  # sigma_00
         sigma_matrices_true[i, 0, 1] = sigma_matrices_true[i, 1, 0] = sigma_true[i, 1]  # sigma_01
@@ -218,7 +217,7 @@ def plot_3d_multivariate_results(data_file, history_file, save_dir="artifacts/pl
     
     # Plot 8: Covariance matrix heatmap (average error)
     ax8 = plt.subplot(3, 3, 8)
-    error_matrix = np.zeros((3, 3))
+    error_matrix = jnp.zeros((3, 3))
     for i in range(3):
         for j in range(3):
             if i <= j:  # Upper triangle
