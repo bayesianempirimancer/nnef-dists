@@ -334,14 +334,11 @@ def test_curriculum_on_best_architectures():
     print("Testing curriculum approach: MSE → gradual KL → full geometric")
     
     # Import here to avoid circular imports
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    
-    from src.ef import GaussianNatural1D
-    from src.model import nat2statMLP
-    from src.quadratic_resnet import create_quadratic_train_state
-    from scripts.run_noprop_ct_demo import load_existing_data
+    from ..ef import GaussianNatural1D
+    # Note: These imports may need to be updated based on actual module locations
+    # from ..model import nat2statMLP
+    # from ..quadratic_resnet import create_quadratic_train_state
+    # from ...scripts.run_noprop_ct_demo import load_existing_data
     
     # Load data
     ef = GaussianNatural1D()

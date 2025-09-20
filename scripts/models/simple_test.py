@@ -7,13 +7,12 @@ This script tests a few key models to ensure they work correctly.
 
 import sys
 from pathlib import Path
-import numpy as np
+import jax
 import jax.numpy as jnp
 from jax import random
-import matplotlib.pyplot as plt
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
+# Add project root to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 def generate_simple_test_data(n_samples=200, seed=42):
     """Generate simple 3D Gaussian test data."""
@@ -53,7 +52,7 @@ def test_mlp_logZ():
         print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
         
         # Test if we can import the model
-        from models.mlp_logZ import MLPLogNormalizerNetwork, MLPLogNormalizerTrainer
+        from src.models.mlp_logZ import MLPLogNormalizerNetwork, MLPLogNormalizerTrainer
         
         # Create a simple config
         class SimpleConfig:
@@ -107,7 +106,7 @@ def test_standard_mlp_ET():
         eta_data, ground_truth = generate_simple_test_data(n_samples=200, seed=42)
         
         # Test if we can import the model
-        from models.standard_mlp_ET import StandardMLPNetwork, StandardMLPTrainer
+        from src.models.mlp_ET import MLPNetwork, MLPTrainer
         
         # Create a simple config
         class SimpleConfig:
@@ -126,7 +125,7 @@ def test_standard_mlp_ET():
         config = SimpleConfig()
         
         # Create model
-        model = StandardMLPNetwork(config=config.network)
+        model = MLPNetwork(config=config.network)
         
         # Initialize parameters
         rng = random.PRNGKey(42)

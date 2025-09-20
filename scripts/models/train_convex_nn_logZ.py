@@ -19,8 +19,8 @@ from jax import random
 import optax
 import flax.linen as nn
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
+# Add project root to path  
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Simple data generation function
 def generate_simple_test_data(n_samples=400, seed=42):

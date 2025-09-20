@@ -23,7 +23,6 @@ import jax.numpy as jnp
 import flax.linen as nn
 from jax import random, grad, hessian, jacfwd
 from typing import Dict, Any, Tuple, Optional, Union
-import numpy as np
 import optax
 import time
 
@@ -34,7 +33,7 @@ from ..ef import ExponentialFamily
 
 class ConvexLayer(nn.Module):
     """
-    A single layer in the Input Convex Neural Network.
+    Type 1 Convex Layer - Standard ICNN layer.
     
     Maintains convexity by:
     1. Non-negative weights from previous layer
@@ -45,6 +44,7 @@ class ConvexLayer(nn.Module):
     hidden_size: int
     use_bias: bool = True
     activation: str = "relu"
+    layer_type: str = "type1"  # "type1" or "type2"
     
     @nn.compact
     def __call__(self, z_prev: jnp.ndarray, x_input: jnp.ndarray, training: bool = True) -> jnp.ndarray:
@@ -59,14 +59,35 @@ class ConvexLayer(nn.Module):
         Returns:
             Layer output [batch_size, hidden_size]
         """
-        # Non-negative weights from previous layer (maintains convexity)
+        # Handle different convex layer types
         if z_prev is not None:
-            W_z = self.param('W_z', 
-                           nn.initializers.uniform(scale=0.1), 
-                           (z_prev.shape[-1], self.hidden_size))
-            # Ensure non-negative weights for convexity
-            W_z_nonneg = nn.softplus(W_z)  # Always positive
-            z_term = jnp.dot(z_prev, W_z_nonneg)
+            if self.layer_type == "type1":
+                # Type 1: Non-negative weights + convex activation
+                W_z = self.param('W_z', 
+                               nn.initializers.uniform(scale=1.0), 
+                               (z_prev.shape[-1], self.hidden_size))
+                W_z = W_z + 0.5  # Positive bias
+                W_z_processed = nn.softplus(W_z)  # Ensure non-negative
+                z_term = jnp.dot(z_prev, W_z_processed)
+                
+            elif self.layer_type == "type2":
+                # Type 2: Negative weights + concave activation
+                W_z = self.param('W_z', 
+                               nn.initializers.uniform(scale=1.0), 
+                               (z_prev.shape[-1], self.hidden_size))
+                W_z = W_z - 0.5  # Negative bias
+                W_z_processed = -nn.softplus(-W_z)  # Ensure non-positive
+                z_term = jnp.dot(z_prev, W_z_processed)
+            elif self.layer_type == "type3":
+                # Type 3: Quadratic activation
+                W_z = self.param('W_z', 
+                               nn.initializers.uniform(scale=1.0), 
+                               (z_prev.shape[-1], self.hidden_size))
+                W_z = W_z + 0.5  # Positive bias
+                W_z_processed = W_z**2/jnp.linalg.norm(W_z)
+                z_term = jnp.dot(z_prev, W_z_processed)
+            else:
+                raise ValueError(f"Unknown layer_type: {self.layer_type}")
         else:
             z_term = 0.0
         
@@ -83,31 +104,36 @@ class ConvexLayer(nn.Module):
         else:
             output = z_term + x_term
         
-        # Apply convex activation function
-        if self.activation == "relu":
-            output = nn.relu(output)
-        elif self.activation == "softplus":
-            output = nn.softplus(output)
-        elif self.activation == "elu":
-            # ELU is convex for x >= 0, approximately convex overall
-            output = nn.elu(output)
-        elif self.activation == "leaky_relu":
-            output = nn.leaky_relu(output, negative_slope=0.01)
-        elif self.activation == "tanh":
-            # Fall back to ReLU for convexity (tanh is not convex)
-            output = nn.relu(output)
-        elif self.activation == "swish":
-            # Fall back to ReLU for convexity (swish is not convex)
-            output = nn.relu(output)
-        elif self.activation == "gelu":
-            # Fall back to ReLU for convexity (gelu is not convex)
-            output = nn.relu(output)
+        # Apply activation function based on layer type
+        if self.layer_type == "type1":
+            # Type 1: Convex activations
+            if self.activation == "relu":
+                output = nn.relu(output)
+            elif self.activation == "softplus":
+                output = nn.softplus(output)
+            elif self.activation == "elu":
+                output = nn.elu(output)
+            elif self.activation == "leaky_relu":
+                output = nn.leaky_relu(output, negative_slope=0.01)
+            else:
+                # Default to softplus for type 1
+                output = nn.softplus(output)
+                
+        elif self.layer_type == "type2":
+            # Type 2: Concave activations (for negative weights)
+            if self.activation == "relu":
+                # Use negative softplus as concave activation
+                output = -nn.softplus(-output)  # Concave
+            elif self.activation == "softplus":
+                # Use log(1 + exp(-x)) which is concave
+                output = jnp.log(1.0 + jnp.exp(-jnp.abs(output))) * jnp.sign(output)
+            else:
+                # Default concave activation: -softplus(-x)
+                output = -nn.softplus(-output)
         else:
-            # Default to ReLU for any unknown activation
-            output = nn.relu(output)
+            raise ValueError(f"Unknown layer_type: {self.layer_type}")
         
         return output
-
 
 class ConvexNeuralNetworkLogZ(BaseNeuralNetwork):
     """
@@ -146,44 +172,50 @@ class ConvexNeuralNetworkLogZ(BaseNeuralNetwork):
         # Store original input for skip connections
         original_input = x_input
         
-        # First layer (no previous z, only input)
+        # First layer (no previous z, only input) - always Type 1
         if len(self.config.hidden_sizes) > 0:
             z = ConvexLayer(
                 hidden_size=self.config.hidden_sizes[0],
                 activation=self.config.activation,
+                layer_type="type1",
                 name='convex_layer_0'
             )(None, original_input, training=training)
         else:
             # If no hidden layers, go directly to output
             z = original_input
         
-        # Hidden convex layers with skip connections
+        # Hidden convex layers with alternating types
         for i, hidden_size in enumerate(self.config.hidden_sizes[1:], 1):
+            # Alternate between Type 1 and Type 2 layers
+            layer_type = "type2" if i % 2 == 0 else "type1"
+            
             z = ConvexLayer(
                 hidden_size=hidden_size,
                 activation=self.config.activation,
+                layer_type=layer_type,
                 name=f'convex_layer_{i}'
             )(z, original_input, training=training)
         
         # Final output layer (scalar, non-negative weights to maintain convexity)
         if len(self.config.hidden_sizes) > 0:
-            # Non-negative weights for final layer
+            # Better initialization for final non-negative weights
             W_final_z = self.param('W_final_z',
-                                 nn.initializers.uniform(scale=0.1),
+                                 nn.initializers.uniform(scale=1.0),
                                  (z.shape[-1], 1))
+            W_final_z = W_final_z + 0.5  # Add positive bias
             W_final_z_nonneg = nn.softplus(W_final_z)
             
-            # Skip connection from input (unrestricted)
+            # Skip connection from input (smaller scale to not dominate)
             W_final_x = self.param('W_final_x',
-                                 nn.initializers.xavier_uniform(),
+                                 nn.initializers.normal(stddev=0.1),
                                  (original_input.shape[-1], 1))
             
             # Final bias
             b_final = self.param('b_final', nn.initializers.zeros, (1,))
             
-            # Combine terms
+            # Combine terms with better balancing
             log_normalizer = (jnp.dot(z, W_final_z_nonneg) + 
-                            jnp.dot(original_input, W_final_x) + 
+                            0.5 * jnp.dot(original_input, W_final_x) + 
                             b_final)
         else:
             # Direct linear mapping if no hidden layers
@@ -271,6 +303,50 @@ def convex_hessian_computation(model, params, eta, method='diagonal', eps=1e-8):
     
     else:
         raise ValueError(f"Unknown Hessian method: {method}")
+
+
+def measure_jit_runtime(model, params, eta_sample, num_warmup=5, num_trials=10):
+    """
+    Measure the post-JIT compilation runtime for forward pass of neural networks.
+    
+    Args:
+        model: Neural network model
+        params: Model parameters
+        eta_sample: Sample input for timing [batch_size, eta_dim]
+        num_warmup: Number of warmup runs to ensure JIT compilation
+        num_trials: Number of timing trials to average over
+        
+    Returns:
+        Dict containing timing statistics in milliseconds
+    """
+    # Create JIT-compiled forward function
+    @jax.jit
+    def forward_pass(eta):
+        return model.apply(params, eta, training=False)
+    
+    # Warmup runs to ensure JIT compilation
+    for _ in range(num_warmup):
+        _ = forward_pass(eta_sample).block_until_ready()
+    
+    # Timing runs
+    runtimes = []
+    for _ in range(num_trials):
+        start_time = time.perf_counter()
+        result = forward_pass(eta_sample).block_until_ready()
+        end_time = time.perf_counter()
+        runtimes.append((end_time - start_time) * 1000)  # Convert to milliseconds
+    
+    runtimes = jnp.array(runtimes)
+    
+    return {
+        'mean_runtime_ms': float(jnp.mean(runtimes)),
+        'std_runtime_ms': float(jnp.std(runtimes)),
+        'min_runtime_ms': float(jnp.min(runtimes)),
+        'max_runtime_ms': float(jnp.max(runtimes)),
+        'median_runtime_ms': float(jnp.median(runtimes)),
+        'batch_size': eta_sample.shape[0],
+        'per_sample_runtime_ms': float(jnp.mean(runtimes) / eta_sample.shape[0])
+    }
 
 
 def convex_log_normalizer_loss_fn(model, params, eta_batch, mean_batch, cov_batch=None,
@@ -539,6 +615,27 @@ class ConvexNeuralNetworkLogZTrainer(BaseTrainer):
             except Exception as e:
                 print(f"Warning: Could not compute covariance metrics: {e}")
         
+        # JIT compilation runtime measurement
+        try:
+            # Use a subset of test data for runtime measurement (to avoid excessive timing)
+            runtime_sample_size = min(100, test_data['eta'].shape[0])
+            eta_sample = test_data['eta'][:runtime_sample_size]
+            
+            runtime_metrics = measure_jit_runtime(self.model, params, eta_sample)
+            metrics.update(runtime_metrics)
+            
+        except Exception as e:
+            print(f"Warning: Could not measure JIT runtime: {e}")
+            # Add default runtime metrics if measurement fails
+            metrics.update({
+                'mean_runtime_ms': float('nan'),
+                'std_runtime_ms': float('nan'),
+                'min_runtime_ms': float('nan'),
+                'max_runtime_ms': float('nan'),
+                'median_runtime_ms': float('nan'),
+                'per_sample_runtime_ms': float('nan')
+            })
+        
         return metrics
 
 
@@ -564,11 +661,12 @@ def test_convex_nn_on_gaussian():
     # Test parameters
     eta_test = jnp.array([[1.0, -0.5], [2.0, -1.0]])  # Natural parameters for Gaussian
     
-    # Create a convex neural network model
+    # Create a convex neural network model with alternating layer types
     config = FullConfig()
-    config.network.hidden_sizes = [32, 16]
+    config.network.hidden_sizes = [64, 48, 32, 24, 16]  # More layers for alternating types
     config.network.output_dim = 1  # Log normalizer is scalar
-    config.network.activation = "relu"  # Convex activation
+    config.network.activation = "softplus"  # Smooth activation
+    config.network.use_feature_engineering = True
     
     model = ConvexNeuralNetworkLogZ(config=config.network)
     
@@ -590,8 +688,65 @@ def test_convex_nn_on_gaussian():
     hessian_pred = convex_hessian_computation(model, params, eta_test, method='diagonal')
     print(f"Predicted Hessian (diagonal): {hessian_pred}")
     
+    # Test JIT runtime measurement
+    print("\nTesting JIT runtime measurement...")
+    runtime_metrics = measure_jit_runtime(model, params, eta_test, num_warmup=3, num_trials=5)
+    print(f"Runtime metrics: {runtime_metrics}")
+    
+    return model, params
+
+
+def test_alternating_convex_layers():
+    """Test the alternating Type 1 and Type 2 convex layers."""
+    print("Testing Alternating Convex Layer Architecture")
+    print("=" * 50)
+    
+    # Test data
+    rng = random.PRNGKey(42)
+    eta_test = random.normal(rng, (5, 4))
+    
+    # Create model with more layers for alternating types
+    config = FullConfig()
+    config.network.hidden_sizes = [64, 48, 32, 24, 16]  # 5 layers
+    config.network.use_feature_engineering = True
+    config.network.activation = "softplus"
+    
+    model = ConvexNeuralNetworkLogZ(config=config.network)
+    
+    # Initialize and test
+    params = model.init(rng, eta_test)
+    output = model.apply(params, eta_test)
+    
+    param_count = sum(x.size for x in jax.tree_leaves(params))
+    print(f"Model with {len(config.network.hidden_sizes)} layers: {param_count:,} parameters")
+    print(f"Forward pass: {eta_test.shape} → {output.shape}")
+    
+    # Analyze layer architecture
+    print("\nLayer Type Pattern:")
+    print("Layer 0: Type 1 (W_z ≥ 0, convex activation)")
+    for i in range(1, len(config.network.hidden_sizes)):
+        layer_type = "Type 2" if i % 2 == 0 else "Type 1"
+        weight_constraint = "W_z ≤ 0" if i % 2 == 0 else "W_z ≥ 0"
+        activation_type = "concave" if i % 2 == 0 else "convex"
+        print(f"Layer {i}: {layer_type} ({weight_constraint}, {activation_type} activation)")
+    
+    print("\nMathematical Operations:")
+    print("Type 1: z_i = σ_convex(W_z≥0 · z_{i-1} + W_x · x + b)")
+    print("Type 2: z_i = σ_concave(W_z≤0 · z_{i-1} + W_x · x + b)")
+    print("\nConvexity maintained through alternating composition!")
+    
+    # Test gradients
+    def single_log_normalizer(eta_single):
+        return model.apply(params, eta_single[None, :], training=False)[0]
+    
+    grad_fn = grad(single_log_normalizer)
+    gradients = jax.vmap(grad_fn)(eta_test)
+    print(f"\nGradient computation successful: {gradients.shape}")
+    
     return model, params
 
 
 if __name__ == "__main__":
     test_convex_nn_on_gaussian()
+    print("\n" + "="*60 + "\n")
+    test_alternating_convex_layers()

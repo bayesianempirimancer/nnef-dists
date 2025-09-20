@@ -9,16 +9,15 @@ import pickle
 from pathlib import Path
 from typing import Tuple
 
-# Add src to path so we can import without installing
-sys.path.insert(0, str(Path(__file__).parent))
+# Use relative imports since we're in the src/ directory
 
 import jax
 import jax.numpy as jnp
 import yaml
 from jax import random
 
-from ef import ef_factory, ExponentialFamily
-from sampling import run_hmc
+from .ef import ef_factory, ExponentialFamily
+from .sampling import run_hmc
 
 Array = jax.Array
 

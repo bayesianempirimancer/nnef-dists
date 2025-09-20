@@ -19,7 +19,6 @@ import jax.numpy as jnp
 import flax.linen as nn
 from jax import random, grad, hessian, jacfwd
 from typing import Dict, Any, Tuple, Optional, Union, List
-import numpy as np
 import optax
 import time
 
