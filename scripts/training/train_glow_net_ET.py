@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Training script for Deep Flow Network model.
+Training script for Glow Network ET model.
 
-This script trains, evaluates, and plots results for a Deep Flow Network
-on the natural parameter to statistics mapping task.
+This script trains, evaluates, and plots results for a Glow Network ET
+(normalizing flow with affine coupling) on the natural parameter to statistics mapping task.
 """
 
 import sys
@@ -16,8 +16,8 @@ import jax.numpy as jnp
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.config import get_flow_config, FullConfig
-from src.models.deep_flow import create_model_and_trainer
-from src.data_utils import load_3d_gaussian_data, compute_ground_truth_3d_tril
+from src.models.glow_net_ET import create_glow_et_model_and_trainer
+from src.utils.data_utils import load_3d_gaussian_data, compute_ground_truth_3d_tril
 from plotting.model_comparison import create_comprehensive_report
 
 

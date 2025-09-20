@@ -6,7 +6,7 @@ from typing import Dict, Tuple, Optional
 import jax.numpy as jnp
 
 from jax import Array
-from .ef import MultivariateNormal_tril
+from ..ef import MultivariateNormal_tril
 
 def load_training_data(data_file: str) -> Tuple[Dict[str, Array], Dict[str, Array], str]:
     """

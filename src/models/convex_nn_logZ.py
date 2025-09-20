@@ -21,14 +21,12 @@ Theoretical foundation:
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from jax import random, grad, hessian, jacfwd
 from typing import Dict, Any, Tuple, Optional, Union
-import optax
-import time
 
 from ..base_model import BaseNeuralNetwork, BaseTrainer
 from ..config import FullConfig
 from ..ef import ExponentialFamily
+from .logZ_Net import LogZNetwork, LogZTrainer
 
 
 class ConvexLayer(nn.Module):
@@ -47,7 +45,7 @@ class ConvexLayer(nn.Module):
     layer_type: str = "type1"  # "type1" or "type2"
     
     @nn.compact
-    def __call__(self, z_prev: jnp.ndarray, x_input: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def __call__(self, z_prev: jnp.ndarray, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """
         Forward pass through convex layer.
         
@@ -78,14 +76,7 @@ class ConvexLayer(nn.Module):
                 W_z = W_z - 0.5  # Negative bias
                 W_z_processed = -nn.softplus(-W_z)  # Ensure non-positive
                 z_term = jnp.dot(z_prev, W_z_processed)
-            elif self.layer_type == "type3":
-                # Type 3: Quadratic activation
-                W_z = self.param('W_z', 
-                               nn.initializers.uniform(scale=1.0), 
-                               (z_prev.shape[-1], self.hidden_size))
-                W_z = W_z + 0.5  # Positive bias
-                W_z_processed = W_z**2/jnp.linalg.norm(W_z)
-                z_term = jnp.dot(z_prev, W_z_processed)
+
             else:
                 raise ValueError(f"Unknown layer_type: {self.layer_type}")
         else:
@@ -94,15 +85,15 @@ class ConvexLayer(nn.Module):
         # Skip connection from input (unrestricted weights)
         W_x = self.param('W_x',
                         nn.initializers.xavier_uniform(),
-                        (x_input.shape[-1], self.hidden_size))
-        x_term = jnp.dot(x_input, W_x)
+                        (x.shape[-1], self.hidden_size))
+        x = jnp.dot(x, W_x)
         
         # Bias term
         if self.use_bias:
             b = self.param('b', nn.initializers.zeros, (self.hidden_size,))
-            output = z_term + x_term + b
+            output = z_term + x + b
         else:
-            output = z_term + x_term
+            output = z_term + x
         
         # Apply activation function based on layer type
         if self.layer_type == "type1":
@@ -115,6 +106,9 @@ class ConvexLayer(nn.Module):
                 output = nn.elu(output)
             elif self.activation == "leaky_relu":
                 output = nn.leaky_relu(output, negative_slope=0.01)
+            elif self.activation == "linear":
+                # No activation (linear output)
+                pass
             else:
                 # Default to softplus for type 1
                 output = nn.softplus(output)
@@ -130,45 +124,42 @@ class ConvexLayer(nn.Module):
             else:
                 # Default concave activation: -softplus(-x)
                 output = -nn.softplus(-output)
+                
         else:
             raise ValueError(f"Unknown layer_type: {self.layer_type}")
         
         return output
 
-class ConvexNeuralNetworkLogZ(BaseNeuralNetwork):
+
+class ConvexNeuralNetwork(nn.Module):
     """
-    Input Convex Neural Network for learning log normalizer A(η).
+    Generic Input Convex Neural Network (ICNN) implementation.
     
-    Architecture ensures that the output is convex with respect to input η,
-    which is essential for the log normalizer of exponential families.
+    This network ensures convexity through:
+    - Non-negative weights between hidden layers (via softplus)
+    - Skip connections from input to all layers
+    - Alternating convex/concave layer types
+    - Proper composition of convex functions
     
-    Architecture:
-    1. Input layer with unrestricted weights
-    2. Multiple convex layers with non-negative weights and skip connections
-    3. Final output layer with non-negative weights (scalar output)
+    Can be used for any task requiring convex neural networks,
+    not just log normalizers.
     """
+    
+    config: Any
+    output_dim: int = 1
     
     @nn.compact
-    def __call__(self, eta: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def __call__(self, x_input: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """
         Forward pass through convex neural network.
         
         Args:
-            eta: Natural parameters [batch_size, eta_dim]
+            x_input: Input features [batch_size, input_dim]
             training: Whether in training mode
             
         Returns:
-            Log normalizer values [batch_size,]
+            Network output [batch_size, output_dim]
         """
-        # Apply feature engineering if enabled - use convex_only features for convex networks
-        if hasattr(self.config, 'use_feature_engineering') and self.config.use_feature_engineering:
-            from ..eta_features import compute_eta_features
-            x_input = compute_eta_features(eta, method='convex_only')
-        else:
-            x_input = eta
-            
-        batch_size = eta.shape[0]
-        
         # Store original input for skip connections
         original_input = x_input
         
@@ -196,557 +187,63 @@ class ConvexNeuralNetworkLogZ(BaseNeuralNetwork):
                 name=f'convex_layer_{i}'
             )(z, original_input, training=training)
         
-        # Final output layer (scalar, non-negative weights to maintain convexity)
-        if len(self.config.hidden_sizes) > 0:
-            # Better initialization for final non-negative weights
-            W_final_z = self.param('W_final_z',
-                                 nn.initializers.uniform(scale=1.0),
-                                 (z.shape[-1], 1))
-            W_final_z = W_final_z + 0.5  # Add positive bias
-            W_final_z_nonneg = nn.softplus(W_final_z)
-            
-            # Skip connection from input (smaller scale to not dominate)
-            W_final_x = self.param('W_final_x',
-                                 nn.initializers.normal(stddev=0.1),
-                                 (original_input.shape[-1], 1))
-            
-            # Final bias
-            b_final = self.param('b_final', nn.initializers.zeros, (1,))
-            
-            # Combine terms with better balancing
-            log_normalizer = (jnp.dot(z, W_final_z_nonneg) + 
-                            0.5 * jnp.dot(original_input, W_final_x) + 
-                            b_final)
+        # Final output layer using ConvexLayer
+        output = ConvexLayer(
+            hidden_size=self.output_dim,
+            activation="linear",  # No activation for final layer
+            layer_type="type1",   # Non-negative weights to maintain convexity
+            name='convex_output_layer'
+        )(z, original_input, training=training)
+        
+        return output
+
+
+class ConvexNeuralNetworkLogZ(LogZNetwork):
+    """
+    Input Convex Neural Network for learning log normalizer A(η).
+    
+    Uses the generic ConvexNeuralNetwork with LogZ-specific preprocessing
+    and ensures scalar output for log normalizer values. Convexity is
+    guaranteed by the underlying ConvexNeuralNetwork architecture.
+    """
+    
+    # Inherit from LogZNetwork - architecture is always "convex" for this class
+    
+    @nn.compact
+    def __call__(self, eta: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        """
+        Forward pass through convex neural network for log normalizer.
+    
+    Args:
+            eta: Natural parameters [batch_size, eta_dim]
+            training: Whether in training mode
+        
+    Returns:
+            Log normalizer values [batch_size,]
+        """
+        # Apply feature engineering if enabled - use convex_only features for convex networks
+        if hasattr(self.config, 'use_feature_engineering') and self.config.use_feature_engineering:
+            from ..eta_features import compute_eta_features
+            x_input = compute_eta_features(eta, method='convex_only')
         else:
-            # Direct linear mapping if no hidden layers
-            W_direct = self.param('W_direct',
-                                nn.initializers.xavier_uniform(),
-                                (original_input.shape[-1], 1))
-            b_direct = self.param('b_direct', nn.initializers.zeros, (1,))
-            log_normalizer = jnp.dot(original_input, W_direct) + b_direct
+            x_input = eta
+        
+        # Use the generic convex neural network with scalar output
+        convex_net = ConvexNeuralNetwork(config=self.config, output_dim=1)
+        log_normalizer = convex_net(x_input, training=training)
         
         # Ensure scalar output
         return jnp.squeeze(log_normalizer, axis=-1)
 
-
-def convex_gradient_computation(model, params, eta, eps=1e-8):
-    """
-    Compute gradient of convex log normalizer w.r.t. natural parameters.
-    
-    Args:
-        model: ConvexNeuralNetworkLogZ
-        params: Model parameters
-        eta: Natural parameters [batch_size, eta_dim]
-        eps: Small regularization parameter
-        
-    Returns:
-        Gradient (mean) [batch_size, eta_dim]
-    """
-    def single_log_normalizer(eta_single):
-        return model.apply(params, eta_single[None, :], training=False)[0]
-    
-    # Compute gradient using automatic differentiation
-    grad_fn = grad(single_log_normalizer)
-    gradients = jax.vmap(grad_fn)(eta)
-    
-    # The convex property should naturally provide stable gradients,
-    # but we can still add small clipping for numerical safety
-    gradients = jnp.clip(gradients, -50.0, 50.0)
-    
-    return gradients
-
-
-def convex_hessian_computation(model, params, eta, method='diagonal', eps=1e-8):
-    """
-    Compute Hessian of convex log normalizer w.r.t. natural parameters.
-    
-    For convex functions, the Hessian should be positive semi-definite.
-    
-    Args:
-        model: ConvexNeuralNetworkLogZ
-        params: Model parameters
-        eta: Natural parameters [batch_size, eta_dim]
-        method: 'diagonal', 'full'
-        eps: Regularization parameter
-        
-    Returns:
-        Hessian (covariance) [batch_size, eta_dim] or [batch_size, eta_dim, eta_dim]
-    """
-    def single_log_normalizer(eta_single):
-        return model.apply(params, eta_single[None, :], training=False)[0]
-    
-    if method == 'diagonal':
-        # Compute diagonal of Hessian using forward-mode AD
-        def diagonal_hessian_fn(eta_single):
-            hess_diag = jnp.diag(hessian(single_log_normalizer)(eta_single))
-            return hess_diag
-        
-        hessians = jax.vmap(diagonal_hessian_fn)(eta)
-        
-        # For convex functions, Hessian diagonal should be non-negative
-        # Add small regularization to ensure positive definiteness
-        hessians = jnp.maximum(hessians, eps)
-        
-        return hessians
-        
-    elif method == 'full':
-        # Full Hessian computation
-        hess_fn = hessian(single_log_normalizer)
-        hessians = jax.vmap(hess_fn)(eta)
-        
-        # For convex functions, Hessian should be positive semi-definite
-        # Add regularization to diagonal to ensure positive definiteness
-        eye = jnp.eye(hessians.shape[-1])
-        hessians = hessians + eps * eye[None, :, :]
-        
-        return hessians
-    
-    else:
-        raise ValueError(f"Unknown Hessian method: {method}")
-
-
-def measure_jit_runtime(model, params, eta_sample, num_warmup=5, num_trials=10):
-    """
-    Measure the post-JIT compilation runtime for forward pass of neural networks.
-    
-    Args:
-        model: Neural network model
-        params: Model parameters
-        eta_sample: Sample input for timing [batch_size, eta_dim]
-        num_warmup: Number of warmup runs to ensure JIT compilation
-        num_trials: Number of timing trials to average over
-        
-    Returns:
-        Dict containing timing statistics in milliseconds
-    """
-    # Create JIT-compiled forward function
-    @jax.jit
-    def forward_pass(eta):
-        return model.apply(params, eta, training=False)
-    
-    # Warmup runs to ensure JIT compilation
-    for _ in range(num_warmup):
-        _ = forward_pass(eta_sample).block_until_ready()
-    
-    # Timing runs
-    runtimes = []
-    for _ in range(num_trials):
-        start_time = time.perf_counter()
-        result = forward_pass(eta_sample).block_until_ready()
-        end_time = time.perf_counter()
-        runtimes.append((end_time - start_time) * 1000)  # Convert to milliseconds
-    
-    runtimes = jnp.array(runtimes)
-    
-    return {
-        'mean_runtime_ms': float(jnp.mean(runtimes)),
-        'std_runtime_ms': float(jnp.std(runtimes)),
-        'min_runtime_ms': float(jnp.min(runtimes)),
-        'max_runtime_ms': float(jnp.max(runtimes)),
-        'median_runtime_ms': float(jnp.median(runtimes)),
-        'batch_size': eta_sample.shape[0],
-        'per_sample_runtime_ms': float(jnp.mean(runtimes) / eta_sample.shape[0])
-    }
-
-
-def convex_log_normalizer_loss_fn(model, params, eta_batch, mean_batch, cov_batch=None,
-                                 loss_weights=None, hessian_method='diagonal',
-                                 regularization=1e-6, epoch=0):
-    """
-    Loss function for convex neural network log normalizer.
-    
-    Includes convexity-aware regularization and stability measures.
-    """
-    if loss_weights is None:
-        loss_weights = {'mean_weight': 1.0, 'cov_weight': 0.1}
-    
-    # Compute network predictions
-    log_normalizer = model.apply(params, eta_batch, training=True)
-    
-    # Compute gradient (mean)
-    network_mean = convex_gradient_computation(model, params, eta_batch, regularization)
-    
-    # Mean loss
-    mean_diff = network_mean - mean_batch
-    mean_loss = jnp.mean(jnp.square(mean_diff))
-    
-    total_loss = loss_weights['mean_weight'] * mean_loss
-    
-    # Covariance loss (if requested and data available)
-    if cov_batch is not None and loss_weights['cov_weight'] > 0:
-        try:
-            # Compute Hessian (covariance)
-            network_hessian = convex_hessian_computation(
-                model, params, eta_batch, method=hessian_method, eps=regularization
-            )
-            
-            if hessian_method == 'diagonal':
-                # For diagonal approximation
-                empirical_diag = jnp.diagonal(cov_batch, axis1=1, axis2=2)
-                cov_loss = jnp.mean(jnp.square(network_hessian - empirical_diag))
-            else:
-                # For full Hessian
-                cov_loss = jnp.mean(jnp.square(network_hessian - cov_batch))
-            
-            total_loss += loss_weights['cov_weight'] * cov_loss
-            
-        except Exception as e:
-            print(f"Warning: Convex Hessian computation failed: {e}")
-            pass
-    
-    # Convexity-preserving regularization
-    # Add small L2 regularization on log normalizer values
-    convexity_reg = regularization * jnp.mean(jnp.square(log_normalizer))
-    total_loss += convexity_reg
-    
-    return total_loss
-
-
-class ConvexNeuralNetworkLogZTrainer(BaseTrainer):
+class ConvexNeuralNetworkLogZTrainer(LogZTrainer):
     """Trainer for Convex Neural Network Log Normalizer."""
     
     def __init__(self, config: FullConfig, hessian_method='diagonal', 
-                 loss_weights=None, use_curriculum=True):
-        model = ConvexNeuralNetworkLogZ(config=config.network)
-        super().__init__(model, config)
-        self.hessian_method = hessian_method
-        self.loss_weights = loss_weights or {'mean_weight': 1.0, 'cov_weight': 0.1}
-        self.use_curriculum = use_curriculum
-        self.epoch = 0
-    
-    def loss_fn(self, params: Dict, batch: Dict[str, jnp.ndarray], training: bool = True) -> jnp.ndarray:
-        """Compute convex log normalizer loss for a batch."""
-        # Use curriculum learning if enabled
-        if self.use_curriculum:
-            if self.epoch < 30:
-                current_weights = {'mean_weight': 1.0, 'cov_weight': 0.0}
-            elif self.epoch < 80:
-                progress = (self.epoch - 30) / 50
-                current_weights = {'mean_weight': 1.0, 'cov_weight': 0.1 * progress}
-            else:
-                current_weights = {'mean_weight': 1.0, 'cov_weight': 0.1}
-        else:
-            current_weights = self.loss_weights
+                 use_curriculum=True):
+        # Initialize LogZTrainer with convex architecture, then override model
+        super().__init__(config, architecture="convex", hessian_method=hessian_method, 
+                        adaptive_weights=use_curriculum, l1_reg_weight=0.0)
         
-        return convex_log_normalizer_loss_fn(
-            self.model, params,
-            batch['eta'], batch['mean'],
-            batch.get('cov'),
-            loss_weights=current_weights,
-            hessian_method=self.hessian_method,
-            epoch=self.epoch
-        )
-    
-    def train_step(self, params: Dict, opt_state: Any, batch: Dict[str, jnp.ndarray],
-                   optimizer: Any) -> Tuple[Dict, Any, float]:
-        """Single training step with convexity-aware gradient processing."""
-        loss_value, grads = jax.value_and_grad(self.loss_fn)(params, batch, training=True)
-        
-        # Moderate gradient clipping (convex functions should have stable gradients)
-        grads = jax.tree_map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
-        
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        
-        # Ensure non-negative weights are maintained after update
-        # (This is handled by the softplus activation in the layers)
-        
-        return params, opt_state, loss_value
-    
-    def train(self, train_data: Dict[str, jnp.ndarray], val_data: Dict[str, jnp.ndarray]) -> Tuple[Dict, Dict]:
-        """Training loop with convex-specific optimizations."""
-        # Initialize
-        sample_input = train_data['eta'][:1]
-        params, opt_state = self.initialize_model(sample_input)
-        optimizer = self.create_optimizer()
-        
-        # Training state
-        best_val_loss = float('inf')
-        patience_counter = 0
-        best_params = params
-        history = {'train_loss': [], 'val_loss': [], 'mean_loss': [], 'cov_loss': []}
-        
-        tc = self.config.training
-        batch_size = tc.batch_size
-        n_train = train_data['eta'].shape[0]
-        
-        print(f"Training Convex Neural Network LogZ for {tc.num_epochs} epochs")
-        print(f"Hessian method: {self.hessian_method}")
-        print(f"Curriculum learning: {self.use_curriculum}")
-        print(f"Architecture: {self.config.network.hidden_sizes}")
-        print(f"Parameters: {self.model.get_parameter_count(params):,}")
-        
-        start_time = time.time()
-        
-        for epoch in range(tc.num_epochs):
-            self.epoch = epoch
+        # Override with our specialized convex model
+        self.model = ConvexNeuralNetworkLogZ(config=config.network)
             
-            # Shuffle training data
-            self.rng, shuffle_rng = random.split(self.rng)
-            perm = random.permutation(shuffle_rng, n_train)
-            
-            train_losses = []
-            mean_losses = []
-            cov_losses = []
-            
-            # Training batches
-            for i in range(0, n_train, batch_size):
-                batch_idx = perm[i:i + batch_size]
-                batch = {
-                    'eta': train_data['eta'][batch_idx],
-                    'mean': train_data['mean'][batch_idx],
-                    'cov': train_data.get('cov', None)
-                }
-                
-                params, opt_state, loss = self.train_step(params, opt_state, batch, optimizer)
-                train_losses.append(loss)
-                
-                # Track individual loss components
-                network_mean = convex_gradient_computation(self.model, params, batch['eta'])
-                mean_loss = float(jnp.mean(jnp.square(network_mean - batch['mean'])))
-                mean_losses.append(mean_loss)
-                
-                if batch.get('cov') is not None and epoch >= 30:  # Only after curriculum warmup
-                    try:
-                        hessian_pred = convex_hessian_computation(
-                            self.model, params, batch['eta'], self.hessian_method
-                        )
-                        if self.hessian_method == 'diagonal':
-                            empirical_diag = jnp.diagonal(batch['cov'], axis1=1, axis2=2)
-                            cov_loss = float(jnp.mean(jnp.square(hessian_pred - empirical_diag)))
-                        else:
-                            cov_loss = float(jnp.mean(jnp.square(hessian_pred - batch['cov'])))
-                        cov_losses.append(cov_loss)
-                    except:
-                        cov_losses.append(0.0)
-                else:
-                    cov_losses.append(0.0)
-            
-            avg_train_loss = float(jnp.mean(jnp.array(train_losses)))
-            avg_mean_loss = float(jnp.mean(jnp.array(mean_losses)))
-            avg_cov_loss = float(jnp.mean(jnp.array(cov_losses)))
-            
-            history['train_loss'].append(avg_train_loss)
-            history['mean_loss'].append(avg_mean_loss)
-            history['cov_loss'].append(avg_cov_loss)
-            
-            # Validation
-            if epoch % tc.validation_freq == 0:
-                val_batch = {
-                    'eta': val_data['eta'],
-                    'mean': val_data['mean'],
-                    'cov': val_data.get('cov', None)
-                }
-                val_loss = float(self.loss_fn(params, val_batch, training=False))
-                history['val_loss'].append(val_loss)
-                
-                # Early stopping check
-                if val_loss < best_val_loss - tc.min_delta:
-                    best_val_loss = val_loss
-                    best_params = params
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                
-                if tc.early_stopping and patience_counter >= tc.patience:
-                    print(f"    Early stopping at epoch {epoch}")
-                    break
-                
-                if epoch % (tc.validation_freq * 2) == 0:
-                    # Get current curriculum weights
-                    if self.use_curriculum:
-                        if epoch < 30:
-                            current_weights = {'mean_weight': 1.0, 'cov_weight': 0.0}
-                        elif epoch < 80:
-                            progress = (epoch - 30) / 50
-                            current_weights = {'mean_weight': 1.0, 'cov_weight': 0.1 * progress}
-                        else:
-                            current_weights = {'mean_weight': 1.0, 'cov_weight': 0.1}
-                    else:
-                        current_weights = self.loss_weights
-                    
-                    print(f"    Epoch {epoch:3d}: Train={avg_train_loss:.4f}, Val={val_loss:.4f}, "
-                          f"Mean={avg_mean_loss:.4f}, Cov={avg_cov_loss:.4f}, "
-                          f"Weights={current_weights}")
-        
-        training_time = time.time() - start_time
-        print(f"Training completed in {training_time:.1f}s")
-        
-        return best_params, history
-    
-    def evaluate_with_derivatives(self, params: Dict, test_data: Dict[str, jnp.ndarray]) -> Dict[str, float]:
-        """Evaluate convex model by comparing derivatives to empirical statistics."""
-        # Get predictions
-        log_normalizer = self.model.apply(params, test_data['eta'], training=False)
-        
-        # Compute derivatives
-        network_mean = convex_gradient_computation(self.model, params, test_data['eta'])
-        
-        # Mean metrics
-        mean_mse = float(jnp.mean(jnp.square(network_mean - test_data['mean'])))
-        mean_mae = float(jnp.mean(jnp.abs(network_mean - test_data['mean'])))
-        
-        metrics = {
-            'mean_mse': mean_mse,
-            'mean_mae': mean_mae,
-            'log_normalizer_std': float(jnp.std(log_normalizer))
-        }
-        
-        # Covariance metrics (if available)
-        if 'cov' in test_data:
-            try:
-                network_hessian = convex_hessian_computation(
-                    self.model, params, test_data['eta'], method=self.hessian_method
-                )
-                
-                if self.hessian_method == 'diagonal':
-                    empirical_diag = jnp.diagonal(test_data['cov'], axis1=1, axis2=2)
-                    cov_mse = float(jnp.mean(jnp.square(network_hessian - empirical_diag)))
-                    cov_mae = float(jnp.mean(jnp.abs(network_hessian - empirical_diag)))
-                else:
-                    cov_mse = float(jnp.mean(jnp.square(network_hessian - test_data['cov'])))
-                    cov_mae = float(jnp.mean(jnp.abs(network_hessian - test_data['cov'])))
-                
-                metrics.update({
-                    'cov_mse': cov_mse,
-                    'cov_mae': cov_mae
-                })
-                
-            except Exception as e:
-                print(f"Warning: Could not compute covariance metrics: {e}")
-        
-        # JIT compilation runtime measurement
-        try:
-            # Use a subset of test data for runtime measurement (to avoid excessive timing)
-            runtime_sample_size = min(100, test_data['eta'].shape[0])
-            eta_sample = test_data['eta'][:runtime_sample_size]
-            
-            runtime_metrics = measure_jit_runtime(self.model, params, eta_sample)
-            metrics.update(runtime_metrics)
-            
-        except Exception as e:
-            print(f"Warning: Could not measure JIT runtime: {e}")
-            # Add default runtime metrics if measurement fails
-            metrics.update({
-                'mean_runtime_ms': float('nan'),
-                'std_runtime_ms': float('nan'),
-                'min_runtime_ms': float('nan'),
-                'max_runtime_ms': float('nan'),
-                'median_runtime_ms': float('nan'),
-                'per_sample_runtime_ms': float('nan')
-            })
-        
-        return metrics
-
-
-def create_convex_nn_log_normalizer_trainer(config: FullConfig,
-                                          hessian_method='diagonal',
-                                          loss_weights=None,
-                                          use_curriculum=True) -> ConvexNeuralNetworkLogZTrainer:
-    """Factory function to create convex neural network log normalizer trainer."""
-    return ConvexNeuralNetworkLogZTrainer(
-        config, hessian_method, loss_weights, use_curriculum
-    )
-
-
-# Example usage and testing functions
-
-def test_convex_nn_on_gaussian():
-    """Test convex neural network on 1D Gaussian case."""
-    from ..ef import GaussianNatural1D
-    
-    # Create simple test case
-    ef = GaussianNatural1D()
-    
-    # Test parameters
-    eta_test = jnp.array([[1.0, -0.5], [2.0, -1.0]])  # Natural parameters for Gaussian
-    
-    # Create a convex neural network model with alternating layer types
-    config = FullConfig()
-    config.network.hidden_sizes = [64, 48, 32, 24, 16]  # More layers for alternating types
-    config.network.output_dim = 1  # Log normalizer is scalar
-    config.network.activation = "softplus"  # Smooth activation
-    config.network.use_feature_engineering = True
-    
-    model = ConvexNeuralNetworkLogZ(config=config.network)
-    
-    # Initialize
-    rng = random.PRNGKey(42)
-    params = model.init(rng, eta_test)
-    
-    print(f"Convex Neural Network parameters: {sum(x.size for x in jax.tree_leaves(params))}")
-    
-    # Test forward pass
-    log_norm = model.apply(params, eta_test)
-    print(f"Log normalizer outputs: {log_norm}")
-    
-    # Test gradient computation
-    mean_pred = convex_gradient_computation(model, params, eta_test)
-    print(f"Predicted mean: {mean_pred}")
-    
-    # Test Hessian computation
-    hessian_pred = convex_hessian_computation(model, params, eta_test, method='diagonal')
-    print(f"Predicted Hessian (diagonal): {hessian_pred}")
-    
-    # Test JIT runtime measurement
-    print("\nTesting JIT runtime measurement...")
-    runtime_metrics = measure_jit_runtime(model, params, eta_test, num_warmup=3, num_trials=5)
-    print(f"Runtime metrics: {runtime_metrics}")
-    
-    return model, params
-
-
-def test_alternating_convex_layers():
-    """Test the alternating Type 1 and Type 2 convex layers."""
-    print("Testing Alternating Convex Layer Architecture")
-    print("=" * 50)
-    
-    # Test data
-    rng = random.PRNGKey(42)
-    eta_test = random.normal(rng, (5, 4))
-    
-    # Create model with more layers for alternating types
-    config = FullConfig()
-    config.network.hidden_sizes = [64, 48, 32, 24, 16]  # 5 layers
-    config.network.use_feature_engineering = True
-    config.network.activation = "softplus"
-    
-    model = ConvexNeuralNetworkLogZ(config=config.network)
-    
-    # Initialize and test
-    params = model.init(rng, eta_test)
-    output = model.apply(params, eta_test)
-    
-    param_count = sum(x.size for x in jax.tree_leaves(params))
-    print(f"Model with {len(config.network.hidden_sizes)} layers: {param_count:,} parameters")
-    print(f"Forward pass: {eta_test.shape} → {output.shape}")
-    
-    # Analyze layer architecture
-    print("\nLayer Type Pattern:")
-    print("Layer 0: Type 1 (W_z ≥ 0, convex activation)")
-    for i in range(1, len(config.network.hidden_sizes)):
-        layer_type = "Type 2" if i % 2 == 0 else "Type 1"
-        weight_constraint = "W_z ≤ 0" if i % 2 == 0 else "W_z ≥ 0"
-        activation_type = "concave" if i % 2 == 0 else "convex"
-        print(f"Layer {i}: {layer_type} ({weight_constraint}, {activation_type} activation)")
-    
-    print("\nMathematical Operations:")
-    print("Type 1: z_i = σ_convex(W_z≥0 · z_{i-1} + W_x · x + b)")
-    print("Type 2: z_i = σ_concave(W_z≤0 · z_{i-1} + W_x · x + b)")
-    print("\nConvexity maintained through alternating composition!")
-    
-    # Test gradients
-    def single_log_normalizer(eta_single):
-        return model.apply(params, eta_single[None, :], training=False)[0]
-    
-    grad_fn = grad(single_log_normalizer)
-    gradients = jax.vmap(grad_fn)(eta_test)
-    print(f"\nGradient computation successful: {gradients.shape}")
-    
-    return model, params
-
-
-if __name__ == "__main__":
-    test_convex_nn_on_gaussian()
-    print("\n" + "="*60 + "\n")
-    test_alternating_convex_layers()

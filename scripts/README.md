@@ -14,22 +14,43 @@ scripts/
 
 ## Model Training Scripts (`scripts/training/`)
 
-Each model has its own training script with standardized configuration at the top:
+Each model has its own training script with standardized configuration:
 
-- `train_standard_mlp.py` - Standard Multi-Layer Perceptron
-- `train_deep_flow.py` - Deep Flow Network with diffusion training
-- `train_quadratic_resnet.py` - Quadratic ResNet with adaptive mixing
-- `train_noprop_ct.py` - NoProp-CT continuous-time model (TODO)
-- `train_diffusion.py` - Diffusion-based moment network (TODO)
+### Traditional Approaches
+- `train_mlp_ET.py` - Standard Multi-Layer Perceptron ET networks
+- `train_glu_ET.py` - Gated Linear Unit ET networks  
+- `train_quadratic_resnet_ET.py` - Quadratic ResNet ET networks
+- `train_mlp_logZ.py` - MLP LogZ networks (gradient-based)
+- `train_quadratic_resnet_logZ.py` - Quadratic ResNet LogZ networks
+
+### Novel Flow-Based Approaches
+- `train_geometric_flow_ET.py` - **NEW** Geometric Flow ET networks with continuous dynamics
+- `train_glow_net_ET.py` - Glow networks using normalizing flows with affine coupling
+- `train_invertible_nn_ET.py` - Invertible neural networks
+
+### Specialized Models
+- `train_noprop_ct_ET.py` - NoProp-CT continuous-time models
+- `train_convex_nn_logZ.py` - Convex neural networks
 
 ### Usage
 
 Each script can be run independently:
 
 ```bash
-python scripts/training/train_standard_mlp.py
-python scripts/training/train_deep_flow.py
-python scripts/training/train_quadratic_resnet.py
+# Traditional ET Networks
+python scripts/training/train_mlp_ET.py
+python scripts/training/train_glu_ET.py
+python scripts/training/train_quadratic_resnet_ET.py
+
+# LogZ Networks  
+python scripts/training/train_mlp_logZ.py
+
+# Geometric Flow Networks (Novel)
+python scripts/training/train_geometric_flow_ET.py --save-dir artifacts/geometric_flow
+
+# Flow-based approaches
+python scripts/training/train_glow_net_ET.py
+python scripts/training/train_invertible_nn_ET.py
 ```
 
 ### Configuration
@@ -39,6 +60,15 @@ Edit the configuration section at the top of each script to modify:
 - Training parameters (learning rate, batch size, epochs)
 - Loss function type
 - Output directory
+
+### Geometric Flow Networks - Special Configuration
+
+The geometric flow approach has additional parameters:
+- `matrix_rank`: Rank of flow matrix A (default: μ_dim)
+- `n_time_steps`: Integration steps (default: 3, minimal due to smoothness)
+- `smoothness_weight`: Penalty for large derivatives (default: 1e-3)
+- `time_embed_dim`: Sinusoidal time embedding dimension (default: 16)
+- `max_freq`: Maximum frequency for time embeddings (default: 10.0)
 
 ## Experiment Scripts (`scripts/experiments/`)
 

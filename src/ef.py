@@ -26,8 +26,26 @@ class ExponentialFamily:
         """Return mapping from stat name -> shape (no batch dims)."""
         raise NotImplementedError
 
+    @property
     def stat_names(self) -> List[str]:
         return list(self.stat_specs.keys())
+
+    @cached_property
+    def x_dim(self) -> int:
+        size = 1
+        for n in self.x_shape:
+            size *= n
+        return size
+
+    @cached_property
+    def eta_dim(self) -> int:
+        total = 0
+        for shape in self.stat_specs.values():
+            size = 1
+            for n in shape:
+                size *= n
+            total += size
+        return total
 
     def compute_stats(self, x: Array, flatten: bool = True) -> Dict[str, Array]:
         stats = self._compute_stats(x)
@@ -56,7 +74,7 @@ class ExponentialFamily:
 
     def flatten_stats_or_eta(self, stats: Dict[str, Array]) -> Array:
         pieces = []
-        for name in self.stat_names():
+        for name in self.stat_names:
             v = jnp.asarray(stats[name])
             # Preserve batch dimensions, flatten only the stat dimensions
             stat_shape = self.stat_specs[name]
@@ -120,23 +138,6 @@ class ExponentialFamily:
         return jnp.zeros(self.x_shape)
 
     @property
-    def x_dim(self) -> int:
-        size = 1
-        for n in self.x_shape:
-            size *= n
-        return size
-
-    @property
-    def eta_dim(self) -> int:
-        total = 0
-        for shape in self.stat_specs.values():
-            size = 1
-            for n in shape:
-                size *= n
-            total += size
-        return total
-
-    @property
     def eta_shape(self) -> Dict[str, Tuple[int, ...]]:
         return self.stat_specs
 
@@ -192,7 +193,42 @@ class MultivariateNormal(ExponentialFamily):
 
     def _compute_stats(self, x: Array) -> Dict[str, Array]:
         return {"x": x, "xxT": x[...,None] * x[...,None,:]}
+    
+    def find_nearest_analytical_point(self, eta_target: Union[Array, Dict[str, Array]]) -> Tuple[Dict[str, Array], Dict[str, Array]]:
+        """
+        Find the nearest analytical reference point (η₀, μ₀) for flow-based computation.
+        
+        For multivariate Gaussian, we use the same mean but diagonal covariance matrix.
+        This gives us a point where μ₀ can be computed analytically while being close to the target.
+        
+        Args:
+            eta_target: Target natural parameters (flattened array or dict)
+            
+        Returns:
+            Tuple of (eta_0_dict, mu_0_dict):
+                - eta_0_dict: Reference natural parameters as a dict
+                - mu_0_dict: Analytical expectation μ₀ = E[T|η₀] as a dict
+        """
+        # Convert to dict format if needed
+        eta_target = self.unflatten_stats_or_eta(eta_target)
+        
+        eta1_nearest = eta_target['x']  # Linear part [d,]
+        eta2_nearest_diag = jnp.diag(eta_target['xxT'])
+        
+        Sigma_target_diag = jnp.real(-0.5 / eta2_nearest_diag)
+        mu_target = jnp.real(Sigma_target_diag * eta1_nearest)
+        
+        mu_nearest_dict = {
+            'x': jnp.real(mu_target),
+            'xxT': jnp.real(jnp.diag(Sigma_target_diag) + jnp.outer(mu_target, mu_target))
+        }
+        eta_nearest_dict = {
+            'x': jnp.real(eta1_nearest),
+            'xxT': jnp.real(jnp.diag(eta2_nearest_diag))
+        }
 
+        return eta_nearest_dict, mu_nearest_dict
+    
 @dataclass(frozen=True)
 class MultivariateNormal_tril(MultivariateNormal):
     """

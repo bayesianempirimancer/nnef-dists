@@ -21,6 +21,7 @@ from jax import random, grad, hessian, jacfwd
 from typing import Dict, Any, Tuple, Optional, Union, List
 import optax
 import time
+from tqdm import tqdm
 
 from ..base_model import BaseNeuralNetwork, BaseTrainer
 from ..config import FullConfig
@@ -171,41 +172,61 @@ class LogZTrainer(BaseTrainer):
     """
     
     def __init__(self, config: FullConfig, architecture: str = "mlp", 
-                 hessian_method: str = 'diagonal', adaptive_weights: bool = True):
+                 hessian_method: str = 'diagonal', adaptive_weights: bool = True, l1_reg_weight: float = 0.0):
         model = LogZNetwork(config=config.network, architecture=architecture)
         super().__init__(model, config)
         self.architecture = architecture
         self.hessian_method = hessian_method
         self.adaptive_weights = adaptive_weights
+        self.l1_reg_weight = l1_reg_weight
         self.epoch = 0
+        
+        # Precompiled functions for efficiency (will be set after model initialization)
+        self._compiled_gradient_fn = None
+        self._compiled_hessian_fn = None
+    
+    def _compile_functions(self):
+        """Precompile gradient and Hessian functions for efficiency."""
+        # Precompile the function structure (not bound to specific params)
+        def batch_gradient_fn(params, eta_batch):
+            def single_log_normalizer(eta_single):
+                return self.model.apply(params, eta_single[None, :], training=False)[0]
+            return jax.vmap(jax.grad(single_log_normalizer))(eta_batch)
+        
+        self._compiled_gradient_fn = jax.jit(batch_gradient_fn)
+        
+        # Precompile Hessian function based on method
+        if self.hessian_method == 'diagonal':
+            def batch_hessian_diag_fn(params, eta_batch):
+                def single_log_normalizer(eta_single):
+                    return self.model.apply(params, eta_single[None, :], training=False)[0]
+                def diagonal_hessian_fn(eta_single):
+                    grad_fn = jax.grad(single_log_normalizer)
+                    return jnp.diag(jax.jacfwd(grad_fn)(eta_single))
+                return jax.vmap(diagonal_hessian_fn)(eta_batch)
+            self._compiled_hessian_fn = jax.jit(batch_hessian_diag_fn)
+        else:
+            def batch_hessian_full_fn(params, eta_batch):
+                def single_log_normalizer(eta_single):
+                    return self.model.apply(params, eta_single[None, :], training=False)[0]
+                return jax.vmap(jax.hessian(single_log_normalizer))(eta_batch)
+            self._compiled_hessian_fn = jax.jit(batch_hessian_full_fn)
     
     def compute_gradient(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
         """Compute gradient of log normalizer (mean of sufficient statistics)."""
-        def single_log_normalizer(eta_single):
-            return self.model.apply(params, eta_single[None, :], training=False)[0]
+        # Use precompiled function if available, otherwise compile on first use
+        if self._compiled_gradient_fn is None:
+            self._compile_functions()
         
-        # Compute gradient for each sample
-        gradients = jax.vmap(jax.grad(single_log_normalizer))(eta)
-        return gradients
+        return self._compiled_gradient_fn(params, eta)
     
     def compute_hessian(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
         """Compute Hessian of log normalizer (covariance of sufficient statistics)."""
-        def single_log_normalizer(eta_single):
-            return self.model.apply(params, eta_single[None, :], training=False)[0]
+        # Use precompiled function if available, otherwise compile on first use
+        if self._compiled_hessian_fn is None:
+            self._compile_functions()
         
-        if self.hessian_method == 'diagonal':
-            # Only compute diagonal elements for efficiency
-            def hessian_diag(eta_single):
-                hess = jax.hessian(single_log_normalizer)(eta_single)
-                return jnp.diag(hess)
-            hessians = jax.vmap(hessian_diag)(eta)
-            return hessians
-        elif self.hessian_method == 'full':
-            # Compute full Hessian (expensive)
-            hessians = jax.vmap(jax.hessian(single_log_normalizer))(eta)
-            return hessians
-        else:
-            raise ValueError(f"Unknown hessian_method: {self.hessian_method}")
+        return self._compiled_hessian_fn(params, eta)
     
     def logZ_loss_fn(self, params: Dict, eta: jnp.ndarray, 
                      target_mean: jnp.ndarray, target_cov: Optional[jnp.ndarray] = None) -> jnp.ndarray:
@@ -235,7 +256,11 @@ class LogZTrainer(BaseTrainer):
             
             if self.hessian_method == 'diagonal':
                 # Only compare diagonal elements
-                cov_loss = jnp.mean((predicted_cov - jnp.diag(target_cov)) ** 2)
+                if target_cov.ndim == 3:  # Full covariance matrix [batch, dim, dim]
+                    target_diag = jnp.diagonal(target_cov, axis1=1, axis2=2)
+                else:  # Already diagonal [batch, dim]
+                    target_diag = target_cov
+                cov_loss = jnp.mean((predicted_cov - target_diag) ** 2)
             else:
                 # Compare full covariance matrices
                 cov_loss = jnp.mean((predicted_cov - target_cov) ** 2)
@@ -243,6 +268,13 @@ class LogZTrainer(BaseTrainer):
             # Weight covariance loss
             cov_weight = 0.1 if not self.adaptive_weights else max(0.01, 1.0 / (1.0 + 0.1 * self.epoch))
             total_loss += cov_weight * cov_loss
+        
+        # Add L1 regularization if enabled
+        if self.l1_reg_weight > 0.0:
+            l1_reg = 0.0
+            for param in jax.tree_leaves(params):
+                l1_reg += jnp.sum(jnp.abs(param))
+            total_loss += self.l1_reg_weight * l1_reg
         
         return total_loss
     
@@ -282,60 +314,81 @@ class LogZTrainer(BaseTrainer):
         print(f"Hessian method: {self.hessian_method}")
         print(f"Adaptive weights: {self.adaptive_weights}")
         
-        for epoch in range(epochs):
-            self.epoch = epoch
-            
-            # Training step
-            train_loss = 0.0
-            batch_size = 32
-            n_train = train_data['eta'].shape[0]
-            
-            # Mini-batch training
-            for i in range(0, n_train, batch_size):
-                batch = {
-                    'eta': train_data['eta'][i:i+batch_size],
-                    'mean': train_data['mean'][i:i+batch_size],
-                    'cov': train_data.get('cov', train_data['mean'][i:i+batch_size])  # Fallback
-                }
+        # Start timing
+        start_time = time.time()
+        
+        # Training loop with progress bar
+        with tqdm(range(epochs), desc="Training", unit="epoch") as pbar:
+            for epoch in pbar:
+                self.epoch = epoch
                 
-                params, opt_state, batch_loss = self.train_step(params, opt_state, batch, optimizer)
-                train_loss += batch_loss
-            
-            train_loss /= (n_train // batch_size)
-            history['train_loss'].append(train_loss)
-            
-            # Validation
-            if val_data is not None:
-                val_loss = self.logZ_loss_fn(params, val_data['eta'], 
-                                           val_data['mean'], val_data.get('cov'))
-                history['val_loss'].append(float(val_loss))
+                # Training step
+                train_loss = 0.0
+                batch_size = 32
+                n_train = train_data['eta'].shape[0]
                 
-                if val_loss < best_loss:
-                    best_loss = val_loss
-                    best_params = params
-            
-            # Progress reporting
-            if epoch % 50 == 0 or epoch < 10:
+                # Mini-batch training
+                for i in range(0, n_train, batch_size):
+                    batch = {
+                        'eta': train_data['eta'][i:i+batch_size],
+                        'mean': train_data['mean'][i:i+batch_size],
+                        'cov': train_data.get('cov', train_data['mean'][i:i+batch_size])  # Fallback
+                    }
+                    
+                    params, opt_state, batch_loss = self.train_step(params, opt_state, batch, optimizer)
+                    train_loss += batch_loss
+                
+                train_loss /= (n_train // batch_size)
+                history['train_loss'].append(train_loss)
+                
+                # Validation
                 if val_data is not None:
-                    print(f"  Epoch {epoch}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
+                    val_loss = self.logZ_loss_fn(params, val_data['eta'], 
+                                               val_data['mean'], val_data.get('cov'))
+                    history['val_loss'].append(float(val_loss))
+                    
+                    if val_loss < best_loss:
+                        best_loss = val_loss
+                        best_params = params
+                    
+                    # Update progress bar
+                    pbar.set_postfix({'Train Loss': f'{train_loss:.4f}', 'Val Loss': f'{val_loss:.4f}'})
                 else:
-                    print(f"  Epoch {epoch}: Train Loss = {train_loss:.6f}")
+                    pbar.set_postfix({'Train Loss': f'{train_loss:.4f}'})
+                
+                # Detailed progress reporting
+                if epoch % 50 == 0 or epoch < 10:
+                    if val_data is not None:
+                        print(f"  Epoch {epoch}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
+                    else:
+                        print(f"  Epoch {epoch}: Train Loss = {train_loss:.6f}")
+        
+        # Calculate total training time
+        total_training_time = time.time() - start_time
+        print(f"\n✓ Training completed in {total_training_time:.1f}s")
+        
+        # Add timing to history
+        history['total_training_time'] = total_training_time
         
         return best_params, history
     
-    def predict(self, params: Dict, eta: jnp.ndarray) -> Dict[str, jnp.ndarray]:
+    def predict(self, params: Dict, eta: jnp.ndarray, compute_covariance: bool = False) -> Dict[str, jnp.ndarray]:
         """Make predictions using the trained model."""
         predicted_mean = self.compute_gradient(params, eta)
-        predicted_cov = self.compute_hessian(params, eta)
         
-        return {
-            'mean': predicted_mean,
-            'covariance': predicted_cov
-        }
+        result = {'mean': predicted_mean}
+        
+        if compute_covariance:
+            predicted_cov = self.compute_hessian(params, eta)
+            result['covariance'] = predicted_cov
+        
+        return result
     
     def evaluate(self, params: Dict, test_data: Dict[str, jnp.ndarray]) -> Dict[str, float]:
         """Evaluate the model on test data."""
-        predictions = self.predict(params, test_data['eta'])
+        # Only compute covariance if test data has covariance information
+        compute_cov = 'cov' in test_data
+        predictions = self.predict(params, test_data['eta'], compute_covariance=compute_cov)
         
         # Mean evaluation
         mean_mse = jnp.mean((predictions['mean'] - test_data['mean']) ** 2)
@@ -347,9 +400,13 @@ class LogZTrainer(BaseTrainer):
         }
         
         # Covariance evaluation if available
-        if 'cov' in test_data:
+        if compute_cov:
             if self.hessian_method == 'diagonal':
-                cov_mse = jnp.mean((predictions['covariance'] - jnp.diag(test_data['cov'])) ** 2)
+                if test_data['cov'].ndim == 3:  # Full covariance matrix
+                    target_diag = jnp.diagonal(test_data['cov'], axis1=1, axis2=2)
+                else:  # Already diagonal
+                    target_diag = test_data['cov']
+                cov_mse = jnp.mean((predictions['covariance'] - target_diag) ** 2)
             else:
                 cov_mse = jnp.mean((predictions['covariance'] - test_data['cov']) ** 2)
             
@@ -358,6 +415,6 @@ class LogZTrainer(BaseTrainer):
         return results
 
 
-def create_logZ_network_and_trainer(config: FullConfig, architecture: str = "mlp") -> LogZTrainer:
+def create_logZ_network_and_trainer(config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 0.0) -> LogZTrainer:
     """Factory function to create LogZ network and trainer."""
-    return LogZTrainer(config, architecture=architecture)
+    return LogZTrainer(config, architecture=architecture, l1_reg_weight=l1_reg_weight)

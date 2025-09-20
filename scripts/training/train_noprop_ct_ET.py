@@ -17,9 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.config import FullConfig
 from src.models.noprop_ct_ET import create_model_and_trainer
-from src.data_utils import load_3d_gaussian_data, compute_ground_truth_3d_tril
-from plotting.model_comparison import create_comprehensive_report
-
+from src.utils.data_utils import load_3d_gaussian_data, compute_ground_truth_3d_tril
 
 # =============================================================================
 # CONFIGURATION - Edit these parameters to modify the experiment

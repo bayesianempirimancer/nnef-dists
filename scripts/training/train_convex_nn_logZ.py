@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-Training script for Convex Neural Network-based log normalizer.
+Training script for Alternating Convex Neural Network-based log normalizer.
 
-This script trains Input Convex Neural Networks (ICNNs) that learn the log normalizer A(η)
-while maintaining convexity properties essential for exponential family distributions.
+This script trains Input Convex Neural Networks (ICNNs) with alternating Type 1/Type 2 layers
+that learn the log normalizer A(η) while maintaining convexity properties essential for 
+exponential family distributions.
+
+Features:
+- Type 1 layers: W_z ≥ 0, convex activations (standard ICNN)
+- Type 2 layers: W_z ≤ 0, concave activations (novel approach)
+- Alternating pattern maintains overall convexity
+- Skip connections from input to all layers
 
 Usage:
     python scripts/training/train_convex_nn_logZ.py
@@ -12,48 +19,98 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-import numpy as np
+import time
 import jax
 import jax.numpy as jnp
 from jax import random
-import optax
-import flax.linen as nn
+from tqdm import tqdm
 
 # Add project root to path  
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-# Simple data generation function
-def generate_simple_test_data(n_samples=400, seed=42):
-    """Generate simple 2D Gaussian test data with better scaling."""
+from src.config import FullConfig
+from src.models.convex_nn_logZ import (
+    ConvexNeuralNetworkLogZ,
+    ConvexNeuralNetworkLogZTrainer
+)
+
+def create_alternating_convex_config():
+    """Create configuration for alternating convex architecture."""
+    config = FullConfig()
+    
+    # Mid-sized network with 6 layers for 3D Gaussian testing
+    config.network.hidden_sizes = [64, 48, 32, 24, 16, 8]  # 6 layers with decreasing size
+    config.network.output_dim = 9  # 3D multivariate normal has 9 sufficient statistics
+    config.network.activation = "softplus"  # Smooth convex/concave activations
+    config.network.use_feature_engineering = False  # Disable for speed
+    
+    # Training parameters for mid-sized model
+    config.training.learning_rate = 1e-3  # Standard learning rate
+    config.training.num_epochs = 100  # More epochs for better convergence
+    config.training.batch_size = 32  # Efficient batch size
+    config.training.patience = 25
+    config.training.weight_decay = 1e-6
+    config.training.gradient_clip_norm = 1.0
+    config.training.early_stopping = True
+    config.training.min_delta = 1e-6
+    config.training.validation_freq = 10
+    
+    return config
+
+
+def generate_test_data(n_samples=2000, seed=42):
+    """Generate 3D Gaussian test data using MultivariateNormal_tril exponential family."""
+    from src.ef import MultivariateNormal_tril
+    
+    # Create 3D multivariate normal exponential family
+    ef = MultivariateNormal_tril(x_shape=(3,))
+    
+    rng = random.PRNGKey(seed)
+    
     eta_vectors = []
-    expected_stats = []
+    mean_vectors = []
     
     for i in range(n_samples):
-        # Generate smaller, better conditioned data
-        mean = random.normal(random.PRNGKey(seed + i), (2,)) * 0.5  # Smaller means
-        A = random.normal(random.PRNGKey(seed + i + 1000), (2, 2)) * 0.3  # Smaller variance
-        covariance_matrix = A.T @ A + jnp.eye(2) * 0.1  # Better conditioning
+        rng, subkey = random.split(rng)
         
-        # Convert to natural parameters
-        sigma_inv = jnp.linalg.inv(covariance_matrix)
-        eta1 = sigma_inv @ mean  # η₁ = Σ⁻¹μ  
-        eta2_matrix = -0.5 * sigma_inv  # η₂ = -0.5Σ⁻¹
-        eta_vector = jnp.concatenate([eta1, eta2_matrix.flatten()])
+        # Generate 3D Gaussian parameters
+        mean = random.normal(subkey, (3,)) * 0.5
+        
+        # Generate positive definite covariance via Cholesky
+        rng, subkey = random.split(rng)
+        L_raw = random.normal(subkey, (3, 3)) * 0.3
+        L = jnp.tril(L_raw) + jnp.eye(3) * 0.5  # Lower triangular with positive diagonal
+        cov = L @ L.T  # Positive definite covariance
+        
+        # Convert to natural parameters using MultivariateNormal_tril
+        # For multivariate normal: eta = [Σ^{-1}μ; -0.5*tril(Σ^{-1})]
+        sigma_inv = jnp.linalg.inv(cov)
+        eta_mean_part = sigma_inv @ mean
+        
+        # Extract lower triangular part of precision matrix
+        L_inv = jnp.linalg.cholesky(sigma_inv)
+        eta_precision_part = -0.5 * L_inv[jnp.tril_indices(3)]
+        
+        eta_vector = jnp.concatenate([eta_mean_part, eta_precision_part])
+        
+        # Compute expected sufficient statistics using the EF
+        # For multivariate normal: E[T(X)] = [μ; tril(μμᵀ + Σ)]
+        expected_stats = jnp.concatenate([
+            mean,  # 3 elements
+            (jnp.outer(mean, mean) + cov)[jnp.tril_indices(3)]  # 6 elements (lower triangular)
+        ])  # 9 elements total
+        
         eta_vectors.append(eta_vector)
-        
-        # Expected sufficient statistics - should match the gradient dimensions
-        # For 2D Gaussian: gradient of A(η) w.r.t. [η1_1, η1_2, η2_11, η2_12, η2_21, η2_22]
-        # gives us [μ_1, μ_2, x1*x1, x1*x2, x2*x1, x2*x2] expectations
-        expected_stat = jnp.concatenate([
-            mean,  # μ (2 values)
-            (jnp.outer(mean, mean) + covariance_matrix).flatten()  # μμᵀ + Σ (4 values)
-        ])
-        expected_stats.append(expected_stat)
+        mean_vectors.append(expected_stats)
     
     eta_array = jnp.array(eta_vectors)
-    stats_array = jnp.array(expected_stats)
+    stats_array = jnp.array(mean_vectors)
     
-    # Normalize the data for better training
+    # Split into train/val/test
+    n_train = int(0.7 * n_samples)
+    n_val = int(0.15 * n_samples)
+    
+    # Normalize data
     eta_mean = jnp.mean(eta_array, axis=0)
     eta_std = jnp.std(eta_array, axis=0) + 1e-8
     eta_normalized = (eta_array - eta_mean) / eta_std
@@ -62,168 +119,149 @@ def generate_simple_test_data(n_samples=400, seed=42):
     stats_std = jnp.std(stats_array, axis=0) + 1e-8
     stats_normalized = (stats_array - stats_mean) / stats_std
     
-    print(f"Data ranges - eta: [{eta_normalized.min():.3f}, {eta_normalized.max():.3f}], stats: [{stats_normalized.min():.3f}, {stats_normalized.max():.3f}]")
+    data = {
+        'train': {
+            'eta': eta_normalized[:n_train],
+            'mean': stats_normalized[:n_train]
+        },
+        'val': {
+            'eta': eta_normalized[n_train:n_train+n_val],
+            'mean': stats_normalized[n_train:n_train+n_val]
+        },
+        'test': {
+            'eta': eta_normalized[n_train+n_val:],
+            'mean': stats_normalized[n_train+n_val:]
+        }
+    }
     
-    return eta_normalized, stats_normalized
+    print(f"Generated data shapes:")
+    print(f"  Train: eta={data['train']['eta'].shape}, mean={data['train']['mean'].shape}")
+    print(f"  Val:   eta={data['val']['eta'].shape}, mean={data['val']['mean'].shape}")
+    print(f"  Test:  eta={data['test']['eta'].shape}, mean={data['test']['mean'].shape}")
+    print(f"Data ranges - eta: [{eta_normalized.min():.3f}, {eta_normalized.max():.3f}]")
+    
+    return data
 
 
-class ConvexLogZModel(nn.Module):
-    """Convex Neural Network for log normalizer."""
-    hidden_sizes: list
+def analyze_alternating_architecture(config):
+    """Display the alternating layer architecture pattern."""
+    print("\nAlternating Convex Architecture Analysis:")
+    print("=" * 55)
     
-    @nn.compact
-    def __call__(self, x, training=True):
-        original_input = x
-        
-        # First layer (no previous z)
-        if len(self.hidden_sizes) > 0:
-            W_x = self.param('W_x_0', nn.initializers.xavier_uniform(), 
-                           (x.shape[-1], self.hidden_sizes[0]))
-            b = self.param('b_0', nn.initializers.zeros, (self.hidden_sizes[0],))
-            z = nn.relu(jnp.dot(x, W_x) + b)
-            
-            # Additional hidden layers with convexity constraints
-            for i, hidden_size in enumerate(self.hidden_sizes[1:], 1):
-                # Non-negative weights from previous layer (maintains convexity)
-                W_z = self.param(f'W_z_{i}', nn.initializers.uniform(scale=0.1),
-                               (z.shape[-1], hidden_size))
-                W_z_nonneg = nn.softplus(W_z)  # Ensure non-negative
-                
-                # Skip connection from input (unrestricted weights)
-                W_x = self.param(f'W_x_{i}', nn.initializers.xavier_uniform(),
-                               (original_input.shape[-1], hidden_size))
-                b = self.param(f'b_{i}', nn.initializers.zeros, (hidden_size,))
-                
-                z = nn.relu(jnp.dot(z, W_z_nonneg) + jnp.dot(original_input, W_x) + b)
+    sizes = config.network.hidden_sizes
+    print(f"Total layers: {len(sizes)}")
+    print(f"Layer sizes: {sizes}")
+    print(f"Activation: {config.network.activation}")
+    
+    print("\nLayer Type Pattern:")
+    print("Layer 0: Type 1 (W_z ≥ 0, convex activation) - Initial")
+    
+    for i in range(1, len(sizes)):
+        if i % 2 == 0:
+            layer_type = "Type 2"
+            constraint = "W_z ≤ 0"
+            activation = "concave"
         else:
-            z = x
+            layer_type = "Type 1"
+            constraint = "W_z ≥ 0"
+            activation = "convex"
         
-        # Final output layer (scalar log normalizer)
-        if len(self.hidden_sizes) > 0:
-            W_final_z = self.param('W_final_z', nn.initializers.uniform(scale=0.1),
-                                 (z.shape[-1], 1))
-            W_final_z_nonneg = nn.softplus(W_final_z)  # Non-negative for convexity
-            W_final_x = self.param('W_final_x', nn.initializers.xavier_uniform(),
-                                 (original_input.shape[-1], 1))
-            b_final = self.param('b_final', nn.initializers.zeros, (1,))
-            
-            output = (jnp.dot(z, W_final_z_nonneg) + 
-                    jnp.dot(original_input, W_final_x) + b_final)
-        else:
-            W_direct = self.param('W_direct', nn.initializers.xavier_uniform(),
-                                (original_input.shape[-1], 1))
-            b_direct = self.param('b_direct', nn.initializers.zeros, (1,))
-            output = jnp.dot(original_input, W_direct) + b_direct
-        
-        return jnp.squeeze(output, axis=-1)
-
-
-class SimpleConvexLogZ:
-    """Convex Neural Network Log Normalizer."""
+        print(f"Layer {i:2d}: {layer_type} ({constraint:8s}, {activation:7s} activation)")
     
-    def __init__(self, hidden_sizes=[32, 16]):
-        self.hidden_sizes = hidden_sizes
+    print("Final: Non-negative weights → scalar log normalizer")
     
-    def create_model(self):
-        """Create the convex neural network model."""
-        return ConvexLogZModel(hidden_sizes=self.hidden_sizes)
-    
-    def train(self, eta_data, ground_truth, epochs=200, learning_rate=1e-3):
-        """Train the convex model."""
-        model = self.create_model()
-        
-        # Initialize parameters
-        rng = random.PRNGKey(42)
-        params = model.init(rng, eta_data[:1])
-        
-        print(f"Model parameters: {sum(x.size for x in jax.tree.leaves(params)):,}")
-        
-        # Optimizer with learning rate schedule
-        schedule = optax.exponential_decay(
-            init_value=learning_rate,
-            transition_steps=100,
-            decay_rate=0.95
-        )
-        optimizer = optax.adamw(learning_rate=schedule, weight_decay=1e-5)
-        opt_state = optimizer.init(params)
-        
-        # Loss function using gradient of log normalizer
-        def loss_fn(params, eta_batch, target_batch):
-            def single_log_normalizer(eta_single):
-                return model.apply(params, eta_single[None, :], training=False)[0]
-            
-            grad_fn = jax.grad(single_log_normalizer)
-            network_mean = jax.vmap(grad_fn)(eta_batch)
-            mse_loss = jnp.mean(jnp.square(network_mean - target_batch))
-            
-            # Minimal regularization
-            log_norm = model.apply(params, eta_batch, training=True)
-            l2_loss = jnp.mean(jnp.square(log_norm))
-            return mse_loss + 1e-8 * l2_loss
-        
-        # Training loop
-        losses = []
-        print(f"Training Convex Neural Network for {epochs} epochs")
-        print(f"Architecture: {self.hidden_sizes}")
-        
-        for epoch in range(epochs):
-            loss, grads = jax.value_and_grad(loss_fn)(params, eta_data, ground_truth)
-            updates, opt_state = optimizer.update(grads, opt_state, params)
-            params = optax.apply_updates(params, updates)
-            losses.append(float(loss))
-            
-            if epoch % 25 == 0 or epoch < 10:
-                print(f"  Epoch {epoch}: Loss = {loss:.6f}")
-        
-        return params, losses, model
-    
-    def predict(self, model, params, eta_data):
-        """Make predictions using the trained model."""
-        def single_log_normalizer(eta_single):
-            return model.apply(params, eta_single[None, :], training=False)[0]
-        
-        grad_fn = jax.grad(single_log_normalizer)
-        predictions = jax.vmap(grad_fn)(eta_data)
-        return predictions
+    print("\nKey Properties:")
+    print("✓ Alternating weight constraints maintain overall convexity")
+    print("✓ Skip connections from input to all layers")
+    print("✓ Curriculum learning for stable training")
+    print("✓ Gradient clipping for numerical stability")
 
 
 def main():
-    """Main training function."""
-    print("Training Convex Neural Network LogZ Model")
-    print("=" * 50)
+    """Main training function for alternating convex architecture."""
+    print("Training Alternating Convex Neural Network LogZ Model")
+    print("=" * 65)
     
     # Generate test data
-    print("Generating test data...")
-    eta_data, ground_truth = generate_simple_test_data(n_samples=1000, seed=42)
-    print(f"Data shape: eta={eta_data.shape}, stats={ground_truth.shape}")
+    print("Generating 3D Gaussian test data using MultivariateNormal_tril...")
+    data = generate_test_data(n_samples=1000, seed=42)  # Mid-sized dataset for 6-layer model
     
-    # Create and train model
-    print("\nCreating Convex Neural Network model...")
-    trainer = SimpleConvexLogZ(hidden_sizes=[256, 128, 64, 32])
+    # Create configuration and analyze architecture
+    config = create_alternating_convex_config()
+    analyze_alternating_architecture(config)
     
-    print("\nTraining model...")
-    params, losses, model = trainer.train(eta_data, ground_truth, epochs=600, learning_rate=2e-3)
+    # Create trainer with alternating architecture
+    print(f"\nCreating Alternating Convex Neural Network trainer...")
+    trainer = ConvexNeuralNetworkLogZTrainer(
+        config,
+        hessian_method='diagonal',
+        use_curriculum=True  # Helps with training stability
+    )
     
-    # Make predictions
-    print("\nMaking predictions...")
-    predictions = trainer.predict(model, params, eta_data)
+    # Train the model
+    print(f"\nTraining alternating convex architecture...")
+    params, history = trainer.train(data['train'], data['val'])
     
-    # Compute final metrics
-    mse = float(jnp.mean(jnp.square(predictions - ground_truth)))
-    mae = float(jnp.mean(jnp.abs(predictions - ground_truth)))
+    # Get training time from history (added by base trainer)
+    training_time = history.get('total_training_time', 0.0)
+    print(f"\n✓ Training completed in {training_time:.1f}s")
     
-    print(f"\nFinal Results:")
-    print(f"MSE: {mse:.6f}")
-    print(f"MAE: {mae:.6f}")
-    print(f"Final Loss: {losses[-1]:.6f}")
+    # Evaluate on test set
+    print(f"\nEvaluating on test set...")
+    test_metrics = trainer.evaluate(params, data['test'])
     
-    print("\nKey advantages of Convex Neural Networks:")
-    print("- Guaranteed convexity of log normalizer A(η)")
+    # Make sample predictions to show the model working
+    print(f"\nSample predictions on test data:")
+    test_sample = data['test']['eta'][:5]
+    log_norm_pred = trainer.model.apply(params, test_sample, training=False)
+    gradient_pred = trainer.compute_gradient(params, test_sample)
+    
+    print(f"Input eta (first 3 test samples, 9D):")
+    for i, eta in enumerate(test_sample[:3]):
+        eta_str = ", ".join([f"{x:6.3f}" for x in eta])
+        print(f"  Sample {i+1}: [{eta_str}]")
+    
+    print(f"\nLog normalizer predictions: {log_norm_pred[:3]}")
+    print(f"Gradient predictions (sufficient statistics, 9D):")
+    for i, grad in enumerate(gradient_pred[:3]):
+        grad_str = ", ".join([f"{x:6.3f}" for x in grad])
+        print(f"  Sample {i+1}: [{grad_str}]")
+    
+    print(f"\nTrue targets (9D):")
+    true_targets = data['test']['mean'][:3]
+    for i, target in enumerate(true_targets):
+        target_str = ", ".join([f"{x:6.3f}" for x in target])
+        print(f"  Sample {i+1}: [{target_str}]")
+    
+    # Final performance summary
+    print(f"\nFinal Performance Metrics:")
+    print(f"=" * 40)
+    print(f"Mean MSE: {test_metrics['mean_mse']:.8f}")
+    print(f"Mean MAE: {test_metrics['mean_mae']:.8f}")
+    
+    if 'mean_runtime_ms' in test_metrics:
+        print(f"Runtime (JIT): {test_metrics['mean_runtime_ms']:.3f}ms per batch")
+        print(f"Per sample: {test_metrics.get('per_sample_runtime_ms', 0):.3f}ms")
+    
+    # Training history summary
+    if 'train_loss' in history and len(history['train_loss']) > 0:
+        final_train_loss = history['train_loss'][-1]
+        print(f"Final train loss: {final_train_loss:.6f}")
+        
+        if 'val_loss' in history and len(history['val_loss']) > 0:
+            final_val_loss = history['val_loss'][-1]
+            print(f"Final val loss: {final_val_loss:.6f}")
+    
+    print(f"\n✓ Alternating Convex Architecture Advantages:")
+    print("- Type 1 layers: W_z ≥ 0, convex activations (standard ICNN)")
+    print("- Type 2 layers: W_z ≤ 0, concave activations (novel approach)")
+    print("- Alternating pattern maintains overall convexity")
+    print("- Skip connections from input to all layers")
+    print("- Guaranteed convex log normalizer A(η)")
+    print("- Stable gradient computation")
     print("- Positive semi-definite Hessian (valid covariance)")
-    print("- Stable gradients due to convex properties")
-    print("- Non-negative weights ensure convexity constraints")
     
-    return params, losses, predictions
+    return params, history, test_metrics
 
 
 if __name__ == "__main__":

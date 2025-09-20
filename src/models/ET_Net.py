@@ -22,6 +22,7 @@ from jax import random
 from typing import Dict, Any, Tuple, Optional, Union, List
 import optax
 import time
+from tqdm import tqdm
 
 from ..base_model import BaseNeuralNetwork, BaseTrainer
 from ..config import FullConfig
@@ -36,7 +37,7 @@ class ETNetwork(BaseNeuralNetwork):
     - MLP: Standard multi-layer perceptron
     - GLU: Gated linear unit architecture
     - Quadratic: Quadratic ResNet architecture
-    - DeepFlow: Deep flow-based architecture
+    - DeepFlow: Glow network architecture (normalizing flows with affine coupling)
     - Invertible: Invertible neural network architecture
     - NoPropCT: Non-propagating continuous-time architecture
     
@@ -270,10 +271,11 @@ class ETTrainer(BaseTrainer):
     or Hessian computation.
     """
     
-    def __init__(self, config: FullConfig, architecture: str = "mlp"):
+    def __init__(self, config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 0.0):
         model = ETNetwork(config=config.network, architecture=architecture)
         super().__init__(model, config)
         self.architecture = architecture
+        self.l1_reg_weight = l1_reg_weight
     
     def et_loss_fn(self, params: Dict, eta: jnp.ndarray, 
                    target_stats: jnp.ndarray) -> jnp.ndarray:
@@ -294,13 +296,14 @@ class ETTrainer(BaseTrainer):
         # MSE loss
         mse_loss = jnp.mean((predicted_stats - target_stats) ** 2)
         
-        # L1 regularization on parameters
-        l1_reg = 0.0
-        for param in jax.tree_leaves(params):
-            l1_reg += jnp.sum(jnp.abs(param))
-        
-        # Total loss
-        total_loss = mse_loss + 1e-5 * l1_reg
+        # L1 regularization on parameters (configurable, default off)
+        if self.l1_reg_weight > 0.0:
+            l1_reg = 0.0
+            for param in jax.tree_leaves(params):
+                l1_reg += jnp.sum(jnp.abs(param))
+            total_loss = mse_loss + self.l1_reg_weight * l1_reg
+        else:
+            total_loss = mse_loss
         
         return total_loss
     
@@ -399,9 +402,9 @@ class ETTrainer(BaseTrainer):
         return results
 
 
-def create_et_network_and_trainer(config: FullConfig, architecture: str = "mlp") -> ETTrainer:
+def create_et_network_and_trainer(config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 0.0) -> ETTrainer:
     """Factory function to create ET network and trainer."""
-    return ETTrainer(config, architecture=architecture)
+    return ETTrainer(config, architecture=architecture, l1_reg_weight=l1_reg_weight)
 
 
 # Architecture-specific factory functions

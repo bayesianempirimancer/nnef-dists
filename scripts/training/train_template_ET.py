@@ -23,7 +23,7 @@ import seaborn as sns
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.config import load_config, FullConfig
-from src.data_utils import generate_exponential_family_data
+from src.utils.data_utils import generate_exponential_family_data
 from src.ef import MultivariateNormal
 
 def plot_training_results(trainer, eta_data, ground_truth, predictions, losses, config, model_name):
@@ -158,8 +158,8 @@ def create_trainer(config, model_class, model_name):
         from models.standard_mlp_ET import StandardMLPTrainer
         return StandardMLPTrainer(config)
     elif model_name == "deep_flow":
-        from models.deep_flow_ET import DeepFlowTrainer
-        return DeepFlowTrainer(config)
+        from models.glow_net_ET import GlowTrainerET
+        return GlowTrainerET(config)
     elif model_name == "glu":
         from models.glu_ET import GLUTrainer
         return GLUTrainer(config)

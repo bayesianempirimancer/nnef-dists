@@ -24,7 +24,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 # Import with proper module structure
 try:
     from config import FullConfig
-    from data_utils import generate_exponential_family_data
+    from utils.data_utils import generate_exponential_family_data
     from ef import MultivariateNormal
 except ImportError:
     # Fallback for direct execution
@@ -34,7 +34,7 @@ except ImportError:
     spec.loader.exec_module(config_module)
     FullConfig = config_module.FullConfig
     
-    spec = importlib.util.spec_from_file_location("data_utils", Path(__file__).parent.parent.parent / "src" / "data_utils.py")
+    spec = importlib.util.spec_from_file_location("data_utils", Path(__file__).parent.parent.parent / "src" / "utils" / "data_utils.py")
     data_utils_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(data_utils_module)
     generate_exponential_family_data = data_utils_module.generate_exponential_family_data
@@ -293,14 +293,14 @@ def main():
     
     # Deep Flow ET
     try:
-        from models.deep_flow_ET import DeepFlowNetwork, DeepFlowTrainer
-        results['deep_flow_ET'] = test_ET_model(
-            'deep_flow', DeepFlowNetwork, DeepFlowTrainer,
+        from models.glow_net_ET import GlowNetworkET, GlowTrainerET
+        results['glow_net_ET'] = test_ET_model(
+            'glow_net', GlowNetworkET, GlowTrainerET,
             config, eta_data, ground_truth, ef, args.epochs
         )
     except ImportError as e:
-        print(f"❌ Could not import Deep Flow ET: {e}")
-        results['deep_flow_ET'] = False
+        print(f"❌ Could not import Glow Network ET: {e}")
+        results['glow_net_ET'] = False
     
     # GLU ET
     try:
