@@ -1,5 +1,5 @@
 """
-Improved Invertible Neural Network for Exponential Family Moment Mapping
+Invertible Neural Network for Exponential Family Moment Mapping
 
 Enhanced version with:
 - Deeper architecture (more layers)
