@@ -6,8 +6,8 @@ This script trains networks that directly predict the expected sufficient statis
 E[T(X)] of exponential family distributions.
 
 Usage:
-    python scripts/models/train_{model_name}_ET.py --config configs/gaussian_1d.yaml
-    python scripts/models/train_{model_name}_ET.py --config configs/multivariate_3d.yaml
+    python scripts/training/train_{model_name}_ET.py --config configs/gaussian_1d.yaml
+    python scripts/training/train_{model_name}_ET.py --config configs/multivariate_3d.yaml
 """
 
 import argparse
@@ -20,11 +20,11 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # Add src to path
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from config import load_config, FullConfig
-from data_utils import generate_exponential_family_data
-from ef import MultivariateNormal
+from src.config import load_config, FullConfig
+from src.data_utils import generate_exponential_family_data
+from src.ef import MultivariateNormal
 
 def plot_training_results(trainer, eta_data, ground_truth, predictions, losses, config, model_name):
     """Create comprehensive plots for training results."""

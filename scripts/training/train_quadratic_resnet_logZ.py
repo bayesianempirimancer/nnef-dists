@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Training script for GLU-based log normalizer neural networks.
+Training script for Quadratic ResNet log normalizer neural networks.
 
-This script trains GLU networks that learn the log normalizer A(η)
+This script trains Quadratic ResNet networks that learn the log normalizer A(η)
 and use automatic differentiation to compute the mean and covariance of
 exponential family distributions.
 
 Usage:
-    python scripts/models/train_glu_logZ.py --config configs/gaussian_1d.yaml
-    python scripts/models/train_glu_logZ.py --config configs/multivariate_3d.yaml
+    python scripts/training/train_quadratic_resnet_logZ.py --config configs/gaussian_1d.yaml
+    python scripts/training/train_quadratic_resnet_logZ.py --config configs/multivariate_3d.yaml
 """
 
 import argparse
@@ -20,7 +20,7 @@ from jax import random
 import matplotlib.pyplot as plt
 
 # Add src to path
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Simple data generation function
 def generate_simple_test_data(n_samples=400, seed=42):
@@ -59,8 +59,8 @@ class SimpleConfig:
         self.use_layer_norm = True
 
 
-class SimpleGLULogZ:
-    """GLU Log Normalizer using official implementation."""
+class SimpleQuadraticResNetLogZ:
+    """Quadratic ResNet Log Normalizer using official implementation."""
     
     def __init__(self, hidden_sizes=[64, 64]):
         self.hidden_sizes = hidden_sizes
@@ -69,29 +69,44 @@ class SimpleGLULogZ:
     def create_model(self):
         """Create the model using the official implementation."""
         try:
-            from models.glu_logZ import GLULogNormalizerNetwork
-            return GLULogNormalizerNetwork(config=self.config)
+            from src.models.quadratic_resnet_logZ import QuadraticResNetLogNormalizer
+            return QuadraticResNetLogNormalizer(config=self.config)
         except ImportError:
             # Fallback to simplified implementation if import fails
             import flax.linen as nn
             
-            class GLULayer(nn.Module):
+            class QuadraticResidualBlock(nn.Module):
                 hidden_size: int
-                activation: str = "swish"
+                use_layer_norm: bool = True
                 
                 @nn.compact
-                def __call__(self, x, training=True):
-                    # GLU: x -> [linear1, linear2] -> [sigmoid(linear1) * linear2]
-                    linear1 = nn.Dense(self.hidden_size, name='linear1')(x)
-                    linear2 = nn.Dense(self.hidden_size, name='linear2')(x)
-                    
-                    gate = nn.sigmoid(linear1)
-                    output = gate * linear2
+                def __call__(self, x, training=True):                
+                    # Project input to hidden size if needed
+                    if x.shape[-1] != self.hidden_size:
+                        x = nn.Dense(self.hidden_size, name='residual_proj')(x)
+                    residual = x
+
+                    # Linear transformation
+                    linear_out = nn.Dense(self.hidden_size, name='linear_proj')(x)
+                    linear_out = nn.swish(linear_out)
+
+                    # Quadratic transformation with smaller initialization
+                    quadratic_out = nn.Dense(self.hidden_size, 
+                                           kernel_init=nn.initializers.normal(stddev=0.01), 
+                                           name='quadratic_proj')(x)
+                    quadratic_out = nn.swish(quadratic_out)
+
+                    # Combine: y = residual + Ax + (Bx)x (updated formula)
+                    output = residual + linear_out - residual * quadratic_out
+
+                    if self.use_layer_norm:
+                        output = nn.LayerNorm(name='layer_norm')(output)
                     
                     return output
             
-            class GLULogZModel(nn.Module):
+            class QuadraticResNetLogZModel(nn.Module):
                 hidden_sizes: list
+                use_layer_norm: bool = True
                 
                 @nn.compact
                 def __call__(self, x, training=True):
@@ -99,25 +114,17 @@ class SimpleGLULogZ:
                     x = nn.Dense(self.hidden_sizes[0], name='input_proj')(x)
                     x = nn.swish(x)
                     
-                    # GLU layers
+                    # Quadratic residual blocks
                     for i, hidden_size in enumerate(self.hidden_sizes):
-                        residual = x
-                        if residual.shape[-1] != hidden_size:
-                            residual = nn.Dense(hidden_size, name=f'residual_proj_{i}')(residual)
-                        
-                        glu_out = GLULayer(hidden_size=hidden_size, name=f'glu_{i}')(x, training=training)
-                        
-                        # Residual connection
-                        x = residual + glu_out
-                        
-                        # Layer normalization
-                        x = nn.LayerNorm(name=f'layer_norm_{i}')(x)
+                        x = QuadraticResidualBlock(hidden_size=hidden_size, 
+                                                 use_layer_norm=self.use_layer_norm,
+                                                 name=f'quadratic_block_{i}')(x, training=training)
                     
                     # Final scalar output
                     x = nn.Dense(1, name='output')(x)
                     return jnp.squeeze(x, axis=-1)
             
-            return GLULogZModel(hidden_sizes=self.hidden_sizes)
+            return QuadraticResNetLogZModel(hidden_sizes=self.hidden_sizes, use_layer_norm=True)
     
     def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
         """Train the model."""
@@ -175,7 +182,7 @@ class SimpleGLULogZ:
 
 def main():
     """Main training function."""
-    print("Training GLU LogZ Model")
+    print("Training Quadratic ResNet LogZ Model")
     print("=" * 40)
     
     # Generate test data
@@ -185,11 +192,12 @@ def main():
     
     # Test different architectures
     architectures = {
-        'GLU_LogZ_Small': [32, 32],
-        'GLU_LogZ_Medium': [64, 64],
-        'GLU_LogZ_Large': [128, 128],
-        'GLU_LogZ_Deep': [64, 64, 64],
-        'GLU_LogZ_Wide': [128, 64, 128],
+        'QuadResNet_LogZ_Small': [32, 32],
+        'QuadResNet_LogZ_Medium': [64, 64],
+        'QuadResNet_LogZ_Large': [128, 128],
+        'QuadResNet_LogZ_Deep': [64, 64, 64],
+        'QuadResNet_LogZ_Wide': [128, 64, 128],
+        'QuadResNet_LogZ_Max': [128, 128, 128],  # Maximum performance from our earlier work
     }
     
     results = {}
@@ -197,7 +205,7 @@ def main():
     for name, hidden_sizes in architectures.items():
         print(f"\nTraining {name} with hidden sizes: {hidden_sizes}")
         
-        model = SimpleGLULogZ(hidden_sizes=hidden_sizes)
+        model = SimpleQuadraticResNetLogZ(hidden_sizes=hidden_sizes)
         params, losses, trained_model = model.train(eta_data, ground_truth, epochs=300)
         predictions = model.predict(trained_model, params, eta_data)
         
@@ -269,7 +277,7 @@ def main():
         
         # Save plot
         artifacts_dir = Path(__file__).parent.parent.parent / "artifacts"
-        model_dir = artifacts_dir / "logZ_models" / "glu_logZ"
+        model_dir = artifacts_dir / "logZ_models" / "quadratic_resnet_logZ"
         model_dir.mkdir(parents=True, exist_ok=True)
         
         plt.savefig(model_dir / f"{name.lower()}_results.png", dpi=150, bbox_inches='tight')
@@ -281,18 +289,18 @@ def main():
     
     # Summary
     print(f"\n{'='*60}")
-    print("GLU LOGZ MODEL COMPARISON")
+    print("QUADRATIC RESNET LOGZ MODEL COMPARISON")
     print(f"{'='*60}")
     
     for name, result in results.items():
-        print(f"{name:20}: MSE={result['mse']:.6f}, MAE={result['mae']:.6f}, "
+        print(f"{name:25}: MSE={result['mse']:.6f}, MAE={result['mae']:.6f}, "
               f"Architecture={result['hidden_sizes']}")
     
     # Find best model
     best_model = min(results.items(), key=lambda x: x[1]['mse'])
     print(f"\n🏆 Best Model: {best_model[0]} with MSE={best_model[1]['mse']:.6f}")
     
-    print("\n✅ GLU LogZ training complete!")
+    print("\n✅ Quadratic ResNet LogZ training complete!")
 
 
 if __name__ == "__main__":

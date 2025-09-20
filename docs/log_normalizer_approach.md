@@ -57,7 +57,7 @@ The key relationships are:
 
 ### Training Scripts
 
-#### 1. Main Training Script (`scripts/models/train_log_normalizer.py`)
+#### 1. Main Training Script (`scripts/training/train_log_normalizer.py`)
 - Complete training pipeline for log normalizer networks
 - Comparison with baseline models
 - Comprehensive evaluation metrics
@@ -108,13 +108,13 @@ params, history = trainer.train(train_data, val_data)
 
 ```bash
 # Train log normalizer model
-python scripts/models/train_log_normalizer.py --config configs/gaussian_1d.yaml
+python scripts/training/train_log_normalizer.py --config configs/gaussian_1d.yaml
 
 # Use stable implementation
-python scripts/models/train_log_normalizer.py --config configs/gaussian_1d.yaml --stable
+python scripts/training/train_log_normalizer.py --config configs/gaussian_1d.yaml --stable
 
 # Compare with baseline
-python scripts/models/train_log_normalizer.py --config configs/gaussian_1d.yaml --compare
+python scripts/training/train_log_normalizer.py --config configs/gaussian_1d.yaml --compare
 ```
 
 ## Numerical Considerations
@@ -161,7 +161,7 @@ python scripts/models/train_log_normalizer.py --config configs/gaussian_1d.yaml 
 
 - `src/models/log_normalizer.py`: Core implementation
 - `src/logZ_grads.py`: Stable implementation with numerical measures
-- `scripts/models/train_log_normalizer.py`: Training script
+- `scripts/training/train_log_normalizer.py`: Training script
 - `scripts/test_log_normalizer.py`: Test script
 - `docs/log_normalizer_approach.md`: This documentation
 
@@ -174,10 +174,10 @@ To test the implementation:
 python scripts/test_log_normalizer.py
 
 # Train on 1D Gaussian
-python scripts/models/train_log_normalizer.py --config configs/gaussian_1d.yaml
+python scripts/training/train_log_normalizer.py --config configs/gaussian_1d.yaml
 
 # Train on 3D multivariate Gaussian
-python scripts/models/train_log_normalizer.py --config configs/multivariate_3d.yaml
+python scripts/training/train_log_normalizer.py --config configs/multivariate_3d.yaml
 ```
 
 ## Conclusion

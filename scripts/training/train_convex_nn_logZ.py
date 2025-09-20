@@ -6,7 +6,7 @@ This script trains Input Convex Neural Networks (ICNNs) that learn the log norma
 while maintaining convexity properties essential for exponential family distributions.
 
 Usage:
-    python scripts/models/train_convex_nn_logZ.py
+    python scripts/training/train_convex_nn_logZ.py
 """
 
 import argparse

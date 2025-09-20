@@ -6,7 +6,7 @@ This script tests all models in the src/models directory to ensure they give
 sensible results. It trains each model briefly and reports performance metrics.
 
 Usage:
-    python scripts/models/test_all_models.py --epochs 50 --plot
+    python scripts/training/test_all_models.py --epochs 50 --plot
 """
 
 import argparse
@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import time
 
 # Add src to path
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Import with proper module structure
 try:

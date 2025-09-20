@@ -12,7 +12,7 @@ scripts/
 └── README.md         # This file
 ```
 
-## Model Training Scripts (`scripts/models/`)
+## Model Training Scripts (`scripts/training/`)
 
 Each model has its own training script with standardized configuration at the top:
 
@@ -27,9 +27,9 @@ Each model has its own training script with standardized configuration at the to
 Each script can be run independently:
 
 ```bash
-python scripts/models/train_standard_mlp.py
-python scripts/models/train_deep_flow.py
-python scripts/models/train_quadratic_resnet.py
+python scripts/training/train_standard_mlp.py
+python scripts/training/train_deep_flow.py
+python scripts/training/train_quadratic_resnet.py
 ```
 
 ### Configuration

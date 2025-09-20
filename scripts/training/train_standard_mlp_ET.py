@@ -16,7 +16,7 @@ from jax import random
 import matplotlib.pyplot as plt
 
 # Add src to path
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Simple data generation function
 def generate_simple_test_data(n_samples=400, seed=42):

@@ -22,7 +22,7 @@ def main():
     print("=" * 60)
     
     # List model training scripts
-    models_dir = Path("scripts/models")
+    models_dir = Path("scripts/training")
     
     if models_dir.exists():
         training_scripts = list(models_dir.glob("train_*.py"))
@@ -35,7 +35,7 @@ def main():
             print(f"  • {model_name:<25} → {script}")
         
         print(f"\n💡 Usage:")
-        print(f"  python scripts/models/train_<model_name>.py")
+        print(f"  python scripts/training/train_<model_name>.py")
     
     # List predefined configurations
     print(f"\n⚙️  PREDEFINED CONFIGURATIONS:")
@@ -77,7 +77,7 @@ def main():
     print(f"\n📁 DIRECTORY STRUCTURE:")
     print("-" * 25)
     print("  scripts/")
-    print("  ├── models/           # Individual model training")
+    print("  ├── training/         # Individual model training")
     print("  ├── experiments/      # Comprehensive comparisons")
     print("  ├── archive/          # Old scripts (reference)")
     print("  └── README.md         # Documentation")
