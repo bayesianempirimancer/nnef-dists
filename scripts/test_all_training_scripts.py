@@ -11,6 +11,7 @@ import sys
 import json
 import pickle
 import time
+import importlib.util
 from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
@@ -191,69 +192,6 @@ def test_model_imports():
             print(f"  ✗ {module_name}.{function_name}: {e}")
 
 
-def generate_small_test_data():
-    """Generate a small test dataset for training script validation."""
-    print(f"\nGenerating Small Test Dataset...")
-    print("="*35)
-    
-    data_file = Path("data/easy_3d_gaussian_small.pkl")
-    
-    if data_file.exists():
-        size = data_file.stat().st_size
-        print(f"  ✓ {data_file} already exists ({size/1024:.1f} KB)")
-        return True
-    
-    try:
-        import numpy as np
-        import jax.numpy as jnp
-        from jax import random
-        
-        print(f"  🔧 Generating {data_file}...")
-        
-        # Generate small test data (100 samples)
-        rng = random.PRNGKey(42)
-        n_samples = 100
-        
-        # Generate random natural parameters (eta)
-        eta_data = random.normal(rng, (n_samples, 12))  # 12D for 3D Gaussian
-        
-        # Generate corresponding mean statistics (ground truth)
-        # For simplicity, just use the first 3 components as mean
-        mean_data = eta_data[:, :3]  # 3D mean
-        
-        # Create small dataset structure
-        small_data = {
-            "train": {
-                "eta": eta_data,
-                "mean": mean_data
-            },
-            "val": {
-                "eta": eta_data[:20],  # 20 validation samples
-                "mean": mean_data[:20]
-            },
-            "test": {
-                "eta": eta_data[:20],  # 20 test samples
-                "mean": mean_data[:20]
-            }
-        }
-        
-        # Save to file
-        import pickle
-        data_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(data_file, 'wb') as f:
-            pickle.dump(small_data, f)
-        
-        size = data_file.stat().st_size
-        print(f"  ✅ Generated {data_file} ({size/1024:.1f} KB)")
-        print(f"  📊 Dataset: {n_samples} train, 20 val, 20 test samples")
-        return True
-        
-    except Exception as e:
-        print(f"  ❌ Failed to generate test data: {e}")
-        return False
-
-
-
 
 def generate_small_test_data():
     """Generate a small test dataset for training validation."""
@@ -281,25 +219,41 @@ def generate_small_test_data():
         eta_val = random.normal(rng, (n_val, 12))
         eta_test = random.normal(rng, (n_test, 12))
         
-        # Generate corresponding mean statistics (ground truth)
-        # For simplicity, use the first 3 components as mean + some covariance structure
+        # Generate corresponding statistics (ground truth)
+        # For ET models: 9D (3D mean + 6D upper triangular covariance)
+        # For LogZ models: just mean (3D)
+        
+        # Generate mean (3D)
         mean_train = eta_train[:, :3] + 0.1 * random.normal(rng, (n_train, 3))
         mean_val = eta_val[:, :3] + 0.1 * random.normal(rng, (n_val, 3))
         mean_test = eta_test[:, :3] + 0.1 * random.normal(rng, (n_test, 3))
+        
+        # Generate full statistics for ET models (9D: mean + covariance)
+        # Create simple covariance structure (upper triangular)
+        cov_train = jnp.ones((n_train, 6)) * 0.1  # Simple covariance
+        cov_val = jnp.ones((n_val, 6)) * 0.1
+        cov_test = jnp.ones((n_test, 6)) * 0.1
+        
+        stats_train = jnp.concatenate([mean_train, cov_train], axis=1)  # 9D
+        stats_val = jnp.concatenate([mean_val, cov_val], axis=1)  # 9D
+        stats_test = jnp.concatenate([mean_test, cov_test], axis=1)  # 9D
         
         # Create small dataset structure
         small_data = {
             "train": {
                 "eta": eta_train,
-                "mean": mean_train
+                "mean": mean_train,  # 3D for LogZ models
+                "stats": stats_train  # 9D for ET models
             },
             "val": {
                 "eta": eta_val,
-                "mean": mean_val
+                "mean": mean_val,  # 3D for LogZ models
+                "stats": stats_val  # 9D for ET models
             },
             "test": {
                 "eta": eta_test,
-                "mean": mean_test
+                "mean": mean_test,  # 3D for LogZ models
+                "stats": stats_test  # 9D for ET models
             }
         }
         
@@ -334,11 +288,8 @@ def train_small_models():
         data = pickle.load(f)
     
     eta_train = data['train']['eta']
-    ground_truth_train = data['train']['mean']
     eta_val = data['val']['eta']
-    ground_truth_val = data['val']['mean']
     eta_test = data['test']['eta']
-    ground_truth_test = data['test']['mean']
     
     print(f"📊 Loaded dataset: {eta_train.shape[0]} train, {eta_val.shape[0]} val, {eta_test.shape[0]} test samples")
     
@@ -350,8 +301,7 @@ def train_small_models():
         patience=10,
         weight_decay=1e-4,
         gradient_clip_norm=1.0,
-        save_best=True,
-        save_frequency=10
+        validation_freq=10
     )
     
     results = {}
@@ -361,6 +311,16 @@ def train_small_models():
         print(f"\n🤖 Training {model_name}...")
         print(f"   Architecture: {model_config['hidden_sizes']}")
         print(f"   Type: {model_config['type']}")
+        
+        # Get appropriate ground truth for this model type
+        if model_config['type'] == 'ET':
+            ground_truth_train = data['train']['stats']
+            ground_truth_val = data['val']['stats']
+            ground_truth_test = data['test']['stats']
+        else:
+            ground_truth_train = data['train']['mean']
+            ground_truth_val = data['val']['mean']
+            ground_truth_test = data['test']['mean']
         
         try:
             result = train_single_model(
@@ -423,20 +383,23 @@ def train_single_model(model_name, model_config, eta_train, ground_truth_train, 
             elif model_name == 'geometric_flow_ET':
                 from src.models.geometric_flow_net import create_geometric_flow_et_network
             elif model_name == 'glow_ET':
-                from src.models.glow_ET import create_glow_et_model_and_trainer
+                from src.models.glow_net_ET import create_glow_et_model_and_trainer
             else:
                 raise ValueError(f"Unknown ET model: {model_name}")
             
             # Create model and trainer
             if model_name in ['geometric_flow_ET']:
-                # Special case for geometric flow
-                model, trainer = create_geometric_flow_et_network(config)
+                # Special case for geometric flow - returns single trainer object
+                trainer = create_geometric_flow_et_network(config)
+                model = trainer.model
             elif model_name == 'glow_ET':
-                # Special case for glow
-                model, trainer = create_glow_et_model_and_trainer(config)
+                # Special case for glow - returns single trainer object
+                trainer = create_glow_et_model_and_trainer(config)
+                model = trainer.model
             else:
-                # Standard ET models
-                model, trainer = create_model_and_trainer(config)
+                # Standard ET models - returns single trainer object
+                trainer = create_model_and_trainer(config)
+                model = trainer.model
                 
         elif model_config['type'] == 'LogZ':
             # Import LogZ model creation functions
@@ -451,8 +414,9 @@ def train_single_model(model_name, model_config, eta_train, ground_truth_train, 
             else:
                 raise ValueError(f"Unknown LogZ model: {model_name}")
             
-            # Create model and trainer
-            model, trainer = create_model_and_trainer(config)
+            # Create model and trainer - returns single trainer object
+            trainer = create_model_and_trainer(config)
+            model = trainer.model
         else:
             raise ValueError(f"Unknown model type: {model_config['type']}")
         

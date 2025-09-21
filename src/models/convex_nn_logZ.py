@@ -247,4 +247,8 @@ class ConvexNeuralNetworkLogZTrainer(LogZTrainer):
         
         # Override with our specialized convex model
         self.model = ConvexNeuralNetworkLogZ(config=config.network)
-            
+
+
+def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
+    """Factory function to create Convex NN LogZ model and trainer."""
+    return ConvexNeuralNetworkLogZTrainer(config, hessian_method=hessian_method, use_curriculum=adaptive_weights)
