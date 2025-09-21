@@ -17,38 +17,16 @@ from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
 from jax import random
-import matplotlib.pyplot as plt
+# matplotlib import removed - now using standardized plotting
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-# Simple data generation function
-def generate_simple_test_data(n_samples=400, seed=42):
-    """Generate simple 3D Gaussian test data."""
-    eta_vectors = []
-    expected_stats = []
-    
-    for i in range(n_samples):
-        # Generate random mean and covariance
-        mean = random.normal(random.PRNGKey(seed + i), (3,)) * 1.0
-        A = random.normal(random.PRNGKey(seed + i + 1000), (3, 3))
-        covariance_matrix = A.T @ A + jnp.eye(3) * 0.01
-        
-        # Convert to natural parameters
-        sigma_inv = jnp.linalg.inv(covariance_matrix)
-        eta1 = sigma_inv @ mean  # η₁ = Σ⁻¹μ
-        eta2_matrix = -0.5 * sigma_inv  # η₂ = -0.5Σ⁻¹
-        eta_vector = jnp.concatenate([eta1, eta2_matrix.flatten()])
-        eta_vectors.append(eta_vector)
-        
-        # Expected sufficient statistics
-        expected_stat = jnp.concatenate([
-            mean,  # μ (3 values)
-            (jnp.outer(mean, mean) + covariance_matrix).flatten()  # μμᵀ + Σ (9 values)
-        ])
-        expected_stats.append(expected_stat)
-    
-    return jnp.array(eta_vectors), jnp.array(expected_stats)
+# Import standardized plotting functions
+sys.path.append(str(Path(__file__).parent.parent))
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+
+# Data generation function removed - now using easy_3d_gaussian data
 
 
 # Simple configuration class
@@ -68,56 +46,15 @@ class SimpleGLULogZ:
     
     def create_model(self):
         """Create the model using the official implementation."""
-        try:
-            from models.glu_logZ import GLULogNormalizerNetwork
-            return GLULogNormalizerNetwork(config=self.config)
-        except ImportError:
-            # Fallback to simplified implementation if import fails
-            import flax.linen as nn
-            
-            class GLULayer(nn.Module):
-                hidden_size: int
-                activation: str = "swish"
-                
-                @nn.compact
-                def __call__(self, x, training=True):
-                    # GLU: x -> [linear1, linear2] -> [sigmoid(linear1) * linear2]
-                    linear1 = nn.Dense(self.hidden_size, name='linear1')(x)
-                    linear2 = nn.Dense(self.hidden_size, name='linear2')(x)
-                    
-                    gate = nn.sigmoid(linear1)
-                    output = gate * linear2
-                    
-                    return output
-            
-            class GLULogZModel(nn.Module):
-                hidden_sizes: list
-                
-                @nn.compact
-                def __call__(self, x, training=True):
-                    # Input projection
-                    x = nn.Dense(self.hidden_sizes[0], name='input_proj')(x)
-                    x = nn.swish(x)
-                    
-                    # GLU layers
-                    for i, hidden_size in enumerate(self.hidden_sizes):
-                        residual = x
-                        if residual.shape[-1] != hidden_size:
-                            residual = nn.Dense(hidden_size, name=f'residual_proj_{i}')(residual)
-                        
-                        glu_out = GLULayer(hidden_size=hidden_size, name=f'glu_{i}')(x, training=training)
-                        
-                        # Residual connection
-                        x = residual + glu_out
-                        
-                        # Layer normalization
-                        x = nn.LayerNorm(name=f'layer_norm_{i}')(x)
-                    
-                    # Final scalar output
-                    x = nn.Dense(1, name='output')(x)
-                    return jnp.squeeze(x, axis=-1)
-            
-            return GLULogZModel(hidden_sizes=self.hidden_sizes)
+        from src.models.glu_logZ import GLULogNormalizerNetwork
+        # Create proper network config
+        from src.config import NetworkConfig
+        network_config = NetworkConfig()
+        network_config.hidden_sizes = self.hidden_sizes
+        network_config.activation = "swish"
+        network_config.use_layer_norm = True
+        network_config.output_dim = 1  # Log normalizer is scalar
+        return GLULogNormalizerNetwork(config=network_config)
     
     def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
         """Train the model."""
@@ -178,10 +115,24 @@ def main():
     print("Training GLU LogZ Model")
     print("=" * 40)
     
-    # Generate test data
-    print("Generating test data...")
-    eta_data, ground_truth = generate_simple_test_data(n_samples=400, seed=42)
+    # Load test data from easy_3d_gaussian
+    print("Loading test data from easy_3d_gaussian...")
+    data_file = Path("data/easy_3d_gaussian.pkl")
+    
+    import pickle
+    with open(data_file, 'rb') as f:
+        data = pickle.load(f)
+    
+    eta_data = data["train"]["eta"]
+    ground_truth = data["train"]["mean"]
     print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
+    
+    # Purge cov_tt to save memory
+    if "cov" in data["train"]: del data["train"]["cov"]
+    if "cov" in data["val"]: del data["val"]["cov"]
+    if "cov" in data["test"]: del data["test"]["cov"]
+    import gc; gc.collect()
+    print("✅ Purged cov_tt elements from memory for optimization")
     
     # Test different architectures
     architectures = {
@@ -205,77 +156,28 @@ def main():
         mse = float(jnp.mean(jnp.square(predictions - ground_truth)))
         mae = float(jnp.mean(jnp.abs(predictions - ground_truth)))
         
-        # Create plots
-        fig = plt.figure(figsize=(15, 10))
+        # Create plots using standardized plotting function
+        metrics = plot_training_results(
+            trainer=model_wrapper,
+            eta_data=eta_data,
+            ground_truth=ground_truth,
+            predictions=predictions,
+            losses=losses,
+            config=model_wrapper.config,
+            model_name=name,
+            output_dir="artifacts/logZ_models/glu_logZ",
+            save_plots=True,
+            show_plots=False
+        )
         
-        # Training curve
-        ax1 = plt.subplot(2, 3, 1)
-        ax1.plot(losses, linewidth=2)
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.set_title(f'{name} Training Progress')
-        ax1.set_yscale('log')
-        ax1.grid(True, alpha=0.3)
-        
-        # Mean statistics
-        ax2 = plt.subplot(2, 3, 2)
-        mean_gt = ground_truth[:, :3]
-        mean_pred = predictions[:, :3]
-        
-        ax2.scatter(mean_gt[:, 0], mean_pred[:, 0], alpha=0.6, s=20, label='E[x₁]')
-        ax2.scatter(mean_gt[:, 1], mean_pred[:, 1], alpha=0.6, s=20, marker='s', label='E[x₂]')
-        ax2.scatter(mean_gt[:, 2], mean_pred[:, 2], alpha=0.6, s=20, marker='^', label='E[x₃]')
-        
-        min_val = min(mean_gt.min(), mean_pred.min())
-        max_val = max(mean_gt.max(), mean_pred.max())
-        ax2.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.8, linewidth=2)
-        
-        ax2.set_xlabel('Ground Truth')
-        ax2.set_ylabel('Prediction')
-        ax2.set_title(f'{name} Mean Statistics')
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
-        
-        # Covariance statistics
-        ax3 = plt.subplot(2, 3, 3)
-        cov_gt = ground_truth[:, 3:]
-        cov_pred = predictions[:, 3:]
-        
-        ax3.scatter(cov_gt.flatten(), cov_pred.flatten(), alpha=0.6, s=10)
-        
-        min_val = min(cov_gt.min(), cov_pred.min())
-        max_val = max(cov_gt.max(), cov_pred.max())
-        ax3.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.8, linewidth=2)
-        
-        ax3.set_xlabel('Ground Truth')
-        ax3.set_ylabel('Prediction')
-        ax3.set_title(f'{name} Covariance Statistics')
-        ax3.grid(True, alpha=0.3)
-        
-        # Performance metrics
-        ax4 = plt.subplot(2, 3, 4)
-        mean_r2 = 1 - jnp.sum((mean_pred - mean_gt)**2) / jnp.sum((mean_gt - jnp.mean(mean_gt))**2)
-        cov_r2 = 1 - jnp.sum((cov_pred - cov_gt)**2) / jnp.sum((cov_gt - jnp.mean(cov_gt))**2)
-        
-        ax4.text(0.1, 0.8, f'MSE: {mse:.6f}', transform=ax4.transAxes, fontsize=12)
-        ax4.text(0.1, 0.6, f'MAE: {mae:.6f}', transform=ax4.transAxes, fontsize=12)
-        ax4.text(0.1, 0.4, f'Mean R²: {float(mean_r2):.3f}', transform=ax4.transAxes, fontsize=12)
-        ax4.text(0.1, 0.2, f'Cov R²: {float(cov_r2):.3f}', transform=ax4.transAxes, fontsize=12)
-        
-        ax4.set_title(f'{name} Performance')
-        ax4.axis('off')
-        
-        plt.tight_layout()
-        
-        # Save plot
-        artifacts_dir = Path(__file__).parent.parent.parent / "artifacts"
-        model_dir = artifacts_dir / "logZ_models" / "glu_logZ"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        
-        plt.savefig(model_dir / f"{name.lower()}_results.png", dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        results[name] = {'mse': mse, 'mae': mae, 'hidden_sizes': hidden_sizes}
+        results[name] = {
+            'mse': metrics['mse'], 
+            'mae': metrics['mae'], 
+            'r2': metrics['r2'],
+            'final_loss': metrics['final_loss'],
+            'hidden_sizes': hidden_sizes,
+            'losses': losses
+        }
         
         print(f"  Final MSE: {mse:.6f}, MAE: {mae:.6f}")
     
@@ -291,6 +193,20 @@ def main():
     # Find best model
     best_model = min(results.items(), key=lambda x: x[1]['mse'])
     print(f"\n🏆 Best Model: {best_model[0]} with MSE={best_model[1]['mse']:.6f}")
+    
+    # Create model comparison plots
+    plot_model_comparison(
+        results=results,
+        output_dir="artifacts/logZ_models/glu_logZ",
+        save_plots=True,
+        show_plots=False
+    )
+    
+    # Save results summary
+    save_results_summary(
+        results=results,
+        output_dir="artifacts/logZ_models/glu_logZ"
+    )
     
     print("\n✅ GLU LogZ training complete!")
 

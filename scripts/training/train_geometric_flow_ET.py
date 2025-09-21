@@ -17,19 +17,24 @@ from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
 from jax import random
-import matplotlib.pyplot as plt
+# matplotlib import removed - now using standardized plotting
 import pickle
 import time
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+# Import standardized plotting functions
+sys.path.append(str(Path(__file__).parent.parent))
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+
 from src.config import FullConfig
 from src.ef import ef_factory
 from src.models.geometric_flow_net import create_geometric_flow_et_network
 
 
-def plot_geometric_flow_results(trainer, eta_data, ground_truth, predictions, history, config, save_dir):
+# Plotting function removed - now using standardized plotting from scripts/plot_training_results.py
+def _removed_plot_geometric_flow_results(trainer, eta_data, ground_truth, predictions, history, config, save_dir):
     """Create comprehensive plots for geometric flow training results."""
     
     # Create figure with subplots
@@ -163,50 +168,6 @@ def plot_geometric_flow_results(trainer, eta_data, ground_truth, predictions, hi
     plt.show()
 
 
-def generate_3d_gaussian_data(n_samples: int = 1000, seed: int = 42):
-    """Generate 3D multivariate Gaussian training data."""
-    print(f"Generating {n_samples} 3D Gaussian samples...")
-    
-    rng = random.PRNGKey(seed)
-    ef = ef_factory("multivariate_normal", x_shape=(3,))
-    d = 3
-    
-    eta_samples = []
-    mu_samples = []
-    
-    for i in range(n_samples):
-        rng, subkey = random.split(rng)
-        
-        # Random linear part
-        eta1 = random.normal(subkey, (d,)) * 0.4
-        
-        # Random negative definite quadratic part (direct construction, no eigenvalues!)
-        rng, subkey = random.split(rng)
-        
-        # Method: A^T A is always positive semidefinite, so -A^T A - I is negative definite
-        A = random.normal(subkey, (d, d)) * 0.4
-        eta2 = -jnp.dot(A.T, A) - (0.5 + 0.5 * random.uniform(subkey)) * jnp.eye(d)
-        
-        # This is guaranteed to be negative definite and real (no eigenvalue computation needed!)
-        
-        # Compute true μ (ensure real values)
-        Sigma = jnp.real(-0.5 * jnp.linalg.inv(eta2))
-        mu = jnp.real(jnp.linalg.solve(eta2, -0.5 * eta1))
-        E_xx = jnp.real(Sigma + jnp.outer(mu, mu))
-        
-        # Flatten
-        eta_flat = ef.flatten_stats_or_eta({'x': eta1, 'xxT': eta2})
-        mu_flat = ef.flatten_stats_or_eta({'x': mu, 'xxT': E_xx})
-        
-        eta_samples.append(eta_flat)
-        mu_samples.append(mu_flat)
-        
-        if (i + 1) % 200 == 0:
-            print(f"  Generated {i+1}/{n_samples}")
-    
-    return jnp.array(eta_samples), jnp.array(mu_samples)
-
-
 def create_simple_config():
     """Create a simple configuration for geometric flow training."""
     from src.config import NetworkConfig, TrainingConfig
@@ -251,9 +212,26 @@ def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
         eta_val, mu_val = data['eta_val'], data['mu_val']
     else:
         print("Generating new training data...")
-        # Generate training data
-        eta_train, mu_train = generate_3d_gaussian_data(n_samples=800, seed=42)
-        eta_val, mu_val = generate_3d_gaussian_data(n_samples=200, seed=123)
+        # Load easy_3d_gaussian data
+        data_file = Path("data/easy_3d_gaussian.pkl")
+        if not data_file.exists():
+            print("Easy 3D Gaussian dataset not found. Please ensure data/easy_3d_gaussian.pkl exists.")
+            return
+            
+        with open(data_file, 'rb') as f:
+            comparison_data = pickle.load(f)
+        
+        eta_train = comparison_data['train']['eta']
+        mu_train = comparison_data['train']['mean']
+        eta_val = comparison_data['val']['eta']
+        mu_val = comparison_data['val']['mean']
+        
+        # Purge cov_tt to save memory
+        if "cov" in comparison_data["train"]: del comparison_data["train"]["cov"]
+        if "cov" in comparison_data["val"]: del comparison_data["val"]["cov"]
+        if "cov" in comparison_data["test"]: del comparison_data["test"]["cov"]
+        import gc; gc.collect()
+        print("✅ Purged cov_tt elements from memory for optimization")
         
         # Save data to data directory
         data = {
@@ -313,8 +291,19 @@ def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
             # Store flow distances for plotting
             trainer.last_flow_distances = predictions_dict['flow_distances']
             
-            # Create plots
-            plot_geometric_flow_results(trainer, eta_val, mu_val, predictions, history, config, save_dir)
+            # Create plots using standardized plotting function
+            metrics = plot_training_results(
+                trainer=trainer,
+                eta_data=eta_val,
+                ground_truth=mu_val,
+                predictions=predictions,
+                losses=history.get('train_loss', []),
+                config=config,
+                model_name="geometric_flow_ET",
+                output_dir=str(save_dir),
+                save_plots=True,
+                show_plots=False
+            )
         else:
             print("No existing model found. Run without --plot-only first.")
         return
@@ -370,8 +359,19 @@ def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
         quad_i, quad_j = divmod(i-3, 3)
         print(f"    μ_{i+1} (x_{quad_i}x_{quad_j}): {results['component_errors'][i]:.8f}")
     
-    # Create plots
-    plot_geometric_flow_results(trainer, eta_val, mu_val, predictions, history, config, save_dir)
+    # Create plots using standardized plotting function
+    metrics = plot_training_results(
+        trainer=trainer,
+        eta_data=eta_val,
+        ground_truth=mu_val,
+        predictions=predictions,
+        losses=history.get('train_loss', []),
+        config=config,
+        model_name="geometric_flow_ET",
+        output_dir=str(save_dir),
+        save_plots=True,
+        show_plots=False
+    )
     
     # Save evaluation results
     eval_file = save_dir / "geometric_flow_et_evaluation.pkl"
@@ -411,7 +411,7 @@ def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
 def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description='Train Geometric Flow ET Network')
-    parser.add_argument('--save-dir', default='artifacts/geometric_flow_et', 
+    parser.add_argument('--save-dir', default='artifacts/ET_models/geometric_flow_ET', 
                        help='Directory to save results')
     parser.add_argument('--plot-only', action='store_true', 
                        help='Only generate plots from existing results')

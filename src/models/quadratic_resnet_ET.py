@@ -11,8 +11,10 @@ from ..config import FullConfig
 class QuadraticResNetNetwork(ETNetwork):
     """Quadratic ResNet-based ET Network."""
     
+    architecture: str = "quadratic"
+    
     def __init__(self, config):
-        super().__init__(config=config, architecture="quadratic")
+        super().__init__(config=config)
 
 
 class QuadraticResNetTrainer(ETTrainer):

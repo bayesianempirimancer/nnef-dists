@@ -8,12 +8,13 @@ import jax.numpy as jnp
 from jax import Array
 from ..ef import MultivariateNormal_tril
 
-def load_training_data(data_file: str) -> Tuple[Dict[str, Array], Dict[str, Array], str]:
+def load_training_data(data_file: str, purge_cov_tt: bool = True) -> Tuple[Dict[str, Array], Dict[str, Array], str]:
     """
     Load training data from a pickle file (JAX native format).
     
     Args:
         data_file: Path to the training data pickle file
+        purge_cov_tt: If True, removes cov_tt elements from memory to save space
         
     Returns:
         Tuple of (train_data, val_data, config_hash)
@@ -31,11 +32,21 @@ def load_training_data(data_file: str) -> Tuple[Dict[str, Array], Dict[str, Arra
         "y": data["val_y"]
     }
     
-    # Include covariance data if available
-    if "train_cov" in data:
-        train_data["cov"] = data["train_cov"]
-    if "val_cov" in data:
-        val_data["cov"] = data["val_cov"]
+    # Include covariance data if available and not purging
+    if not purge_cov_tt:
+        if "train_cov" in data:
+            train_data["cov"] = data["train_cov"]
+        if "val_cov" in data:
+            val_data["cov"] = data["val_cov"]
+    else:
+        # Explicitly delete cov_tt elements from memory to save space
+        if "train_cov" in data:
+            del data["train_cov"]
+        if "val_cov" in data:
+            del data["val_cov"]
+        # Force garbage collection to free memory immediately
+        import gc
+        gc.collect()
     
     # Extract config hash from filename
     config_hash = Path(data_file).stem.split("_")[-1]
@@ -59,7 +70,7 @@ def list_data_files(data_dir: str = "data") -> list[Path]:
     return list(data_path.glob("training_data_*.pkl"))
 
 
-def load_latest_data(data_dir: str = "data") -> Tuple[Dict[str, Array], Dict[str, Array], str]:
+def load_latest_data(data_dir: str = "data", purge_cov_tt: bool = True) -> Tuple[Dict[str, Array], Dict[str, Array], str]:
     """Load the most recently created training data file."""
     data_files = list_data_files(data_dir)
     if not data_files:
@@ -67,7 +78,7 @@ def load_latest_data(data_dir: str = "data") -> Tuple[Dict[str, Array], Dict[str
     
     # Sort by modification time, newest first
     latest_file = sorted(data_files, key=lambda x: x.stat().st_mtime, reverse=True)[0]
-    return load_training_data(str(latest_file))
+    return load_training_data(str(latest_file), purge_cov_tt=purge_cov_tt)
 
 
 def inspect_data(train_data: Dict[str, Array], val_data: Dict[str, Array], config_hash: str = "unknown"):
@@ -76,6 +87,13 @@ def inspect_data(train_data: Dict[str, Array], val_data: Dict[str, Array], confi
     print(f"Config hash: {config_hash}")
     print(f"Train data: eta {train_data['eta'].shape}, y {train_data['y'].shape}")
     print(f"Val data: eta {val_data['eta'].shape}, y {val_data['y'].shape}")
+    
+    # Check if cov_tt data is present
+    has_cov = 'cov' in train_data or 'cov' in val_data
+    if has_cov:
+        print(f"⚠️  Covariance data (cov_tt) is present - using extra memory!")
+    else:
+        print(f"✅ Covariance data (cov_tt) has been purged - memory optimized!")
     
     print(f"\n📈 Data Statistics:")
     print(f"Train eta range: [{train_data['eta'].min():.3f}, {train_data['eta'].max():.3f}]")
@@ -89,32 +107,34 @@ def inspect_data(train_data: Dict[str, Array], val_data: Dict[str, Array], confi
 
 
 # Convenience function for interactive use
-def quick_load(data_file: Optional[str] = None) -> Tuple[Dict[str, Array], Dict[str, Array]]:
+def quick_load(data_file: Optional[str] = None, purge_cov_tt: bool = True) -> Tuple[Dict[str, Array], Dict[str, Array]]:
     """
     Quick load function for interactive use.
     
     Args:
         data_file: Optional path to specific data file. If None, loads the latest.
+        purge_cov_tt: If True, removes cov_tt elements from memory to save space
         
     Returns:
         Tuple of (train_data, val_data)
     """
     if data_file is None:
-        train_data, val_data, config_hash = load_latest_data()
+        train_data, val_data, config_hash = load_latest_data(purge_cov_tt=purge_cov_tt)
     else:
-        train_data, val_data, config_hash = load_training_data(data_file)
+        train_data, val_data, config_hash = load_training_data(data_file, purge_cov_tt=purge_cov_tt)
     
     inspect_data(train_data, val_data, config_hash)
     return train_data, val_data
 
 
-def load_3d_gaussian_data(data_dir: Path, format: str = "tril") -> Tuple[Dict[str, Array], MultivariateNormal_tril]:
+def load_3d_gaussian_data(data_dir: Path, format: str = "tril", purge_cov_tt: bool = True) -> Tuple[Dict[str, Array], MultivariateNormal_tril]:
     """
     Load 3D Gaussian dataset and optionally convert to tril format.
     
     Args:
         data_dir: Directory containing data files
         format: "full" or "tril" format
+        purge_cov_tt: If True, removes cov_tt elements from memory to save space
         
     Returns:
         Tuple of (data_dict, exponential_family_object)
@@ -142,6 +162,19 @@ def load_3d_gaussian_data(data_dir: Path, format: str = "tril") -> Tuple[Dict[st
     
     with open(best_file, 'rb') as f:
         data = pickle.load(f)
+    
+    # Purge cov_tt elements if requested to save memory
+    if purge_cov_tt:
+        # Remove cov_tt elements from the loaded data
+        if "train" in data and "cov" in data["train"]:
+            del data["train"]["cov"]
+        if "val" in data and "cov" in data["val"]:
+            del data["val"]["cov"]
+        if "test" in data and "cov" in data["test"]:
+            del data["test"]["cov"]
+        # Force garbage collection to free memory immediately
+        import gc
+        gc.collect()
     
     if format == "tril":
         # Convert from full matrix format to triangular format

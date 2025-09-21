@@ -269,6 +269,19 @@ class GeometricFlowETNetwork(ETNetwork):
             u_current = u_current + dt * du_dt
         
         return u_current
+    
+    def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
+                            predicted_stats: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+
+        if not training or self.smoothness_weight <= 0:
+            return 0.0
+            
+        # Note: The geometric flow network uses a specialized training approach
+        # with custom data batching (flow batches) and loss computation that
+        # requires access to intermediate derivatives. The actual smoothness
+        # penalty is computed in GeometricFlowETTrainer.geometric_flow_loss().
+        # This method exists for API consistency but returns 0.
+        return 0.0
 
 
 class GeometricFlowETTrainer(ETTrainer):

@@ -32,7 +32,7 @@ def generate_eta_grid(num_points: int, eta_ranges: tuple, key: Array) -> Array:
     return jnp.stack(comps, axis=-1)
 
 
-def generate_negative_definite_matrix(d: int, key: Array, min_eigenval: float = -3.0, max_eigenval: float = -0.1) -> Array:
+def generate_negative_definite_matrix(d: int, key: Array, min_eigenval: float = -4.0, max_eigenval: float = -0.1) -> Array:
     """Generate a symmetric negative definite d×d matrix."""
     # Generate random orthogonal matrix
     A = random.normal(key, (d, d))

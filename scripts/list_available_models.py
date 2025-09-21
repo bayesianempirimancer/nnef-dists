@@ -26,6 +26,8 @@ def main():
     
     if models_dir.exists():
         training_scripts = list(models_dir.glob("train_*.py"))
+        # Filter out template files
+        training_scripts = [s for s in training_scripts if not s.name.endswith('_template.py') and not 'template' in s.name.lower()]
         
         print(f"\n📋 AVAILABLE MODEL TRAINING SCRIPTS ({len(training_scripts)}):")
         print("-" * 50)
@@ -88,10 +90,26 @@ def main():
     print("  ├── base_model.py     # Base classes")
     print("  └── data_utils.py     # Data loading utilities")
     print("")
-    print("  plotting/")
-    print("  └── model_comparison.py  # Plotting utilities")
+    print("  scripts/")
+    print("  └── plot_training_results.py  # Standardized plotting utilities")
+    print("")
+    print("  artifacts/")
+    print("  ├── ET_models/         # Expected statistics models")
+    print("  │   ├── mlp_ET/")
+    print("  │   ├── glu_ET/")
+    print("  │   ├── quadratic_resnet_ET/")
+    print("  │   ├── invertible_nn_ET/")
+    print("  │   ├── noprop_ct_ET/")
+    print("  │   ├── geometric_flow_ET/")
+    print("  │   └── glow_ET/")
+    print("  └── logZ_models/       # Log normalizer models")
+    print("      ├── mlp_logZ/")
+    print("      ├── glu_logZ/")
+    print("      ├── quadratic_resnet_logZ/")
+    print("      └── convex_nn_logZ/")
     
     print(f"\n✅ Use any of the above scripts to train and evaluate models!")
+    print(f"📁 Results are saved to artifacts/<model_type>/<model_name>/")
     print(f"📖 See scripts/README.md for detailed documentation")
 
 

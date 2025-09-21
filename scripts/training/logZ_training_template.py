@@ -1,32 +1,37 @@
 #!/usr/bin/env python3
 """
-Training script template for ET (Expected Statistics) neural networks.
+Training script template for LogZ (Log Normalizer) neural networks.
 
-This script trains networks that directly predict the expected sufficient statistics
-E[T(X)] of exponential family distributions.
+This script trains networks that learn the log normalizer A(η) and use automatic
+differentiation to compute the expected sufficient statistics E[T(X)] via ∇A(η).
 
 Usage:
-    python scripts/training/train_{model_name}_ET.py --config configs/gaussian_1d.yaml
-    python scripts/training/train_{model_name}_ET.py --config configs/multivariate_3d.yaml
+    python scripts/training/train_{model_name}_logZ.py --config configs/gaussian_1d.yaml
+    python scripts/training/train_{model_name}_logZ.py --config configs/multivariate_3d.yaml
 """
 
 import argparse
 import sys
 from pathlib import Path
 import numpy as np
+import jax
 import jax.numpy as jnp
 from jax import random
-import matplotlib.pyplot as plt
-import seaborn as sns
+# matplotlib import removed - now using standardized plotting
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
+
+# Import standardized plotting functions
+sys.path.append(str(Path(__file__).parent.parent))
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
 
 from src.config import load_config, FullConfig
 from src.utils.data_utils import generate_exponential_family_data
 from src.ef import MultivariateNormal
 
-def plot_training_results(trainer, eta_data, ground_truth, predictions, losses, config, model_name):
+# Plotting function removed - now using standardized plotting from scripts/plot_training_results.py
+def _removed_plot_training_results(trainer, eta_data, ground_truth, predictions, losses, config, model_name):
     """Create comprehensive plots for training results."""
     
     # Create figure with subplots
@@ -72,37 +77,22 @@ def plot_training_results(trainer, eta_data, ground_truth, predictions, losses, 
     plt.xticks(range(len(stat_names)), stat_names, rotation=45)
     plt.grid(True, alpha=0.3)
     
-    # 5. Output distribution
+    # 5. Log normalizer values
     ax5 = plt.subplot(2, 4, 5)
-    if predictions.shape[1] <= 2:
-        if predictions.shape[1] == 1:
-            plt.hist(predictions[:, 0], bins=50, alpha=0.7, edgecolor='black', label='Predictions')
-            plt.hist(ground_truth[:, 0], bins=50, alpha=0.7, edgecolor='black', label='Ground Truth')
-            plt.xlabel('E[T(X)]')
-            plt.legend()
-        else:
-            plt.scatter(predictions[:, 0], predictions[:, 1], alpha=0.6, s=20, label='Predictions')
-            plt.scatter(ground_truth[:, 0], ground_truth[:, 1], alpha=0.6, s=20, label='Ground Truth')
-            plt.xlabel('E[T₁(X)]')
-            plt.ylabel('E[T₂(X)]')
-            plt.legend()
-        plt.title('Output Distribution', fontsize=14, fontweight='bold')
-        plt.grid(True, alpha=0.3)
-    else:
-        plt.text(0.5, 0.5, f'{predictions.shape[1]}D output\n(too high for 2D plot)', 
-                ha='center', va='center', transform=ax5.transAxes, fontsize=12)
-        plt.title('Output Distribution', fontsize=14, fontweight='bold')
-    
-    # 6. Prediction magnitudes
-    ax6 = plt.subplot(2, 4, 6)
-    pred_magnitudes = np.linalg.norm(predictions, axis=1)
-    gt_magnitudes = np.linalg.norm(ground_truth, axis=1)
-    plt.hist(pred_magnitudes, bins=50, alpha=0.7, edgecolor='black', label='Predictions')
-    plt.hist(gt_magnitudes, bins=50, alpha=0.7, edgecolor='black', label='Ground Truth')
-    plt.xlabel('Prediction Magnitude ||E[T(X)]||')
+    log_normalizer_values = trainer.model.apply(trainer.params, eta_data, training=False)
+    plt.hist(log_normalizer_values, bins=50, alpha=0.7, edgecolor='black')
+    plt.xlabel('Log Normalizer A(η)')
     plt.ylabel('Frequency')
-    plt.title('Distribution of Prediction Magnitudes', fontsize=14, fontweight='bold')
-    plt.legend()
+    plt.title('Distribution of Log Normalizer Values', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    
+    # 6. Gradient magnitudes
+    ax6 = plt.subplot(2, 4, 6)
+    gradient_magnitudes = np.linalg.norm(predictions, axis=1)
+    plt.hist(gradient_magnitudes, bins=50, alpha=0.7, edgecolor='black')
+    plt.xlabel('Gradient Magnitude ||∇A(η)||')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Gradient Magnitudes', fontsize=14, fontweight='bold')
     plt.grid(True, alpha=0.3)
     
     # 7. Input distribution
@@ -146,7 +136,7 @@ def plot_training_results(trainer, eta_data, ground_truth, predictions, losses, 
     plt.tight_layout()
     
     # Save plot
-    output_path = f"{model_name}_ET_training_results_{config.network.exp_family}.png"
+    output_path = f"{model_name}_logZ_training_results_{config.network.exp_family}.png"
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Training results saved to: {output_path}")
     
@@ -154,39 +144,33 @@ def plot_training_results(trainer, eta_data, ground_truth, predictions, losses, 
 
 def create_trainer(config, model_class, model_name):
     """Create trainer instance based on model class."""
-    if model_name == "standard_mlp":
-        from models.standard_mlp_ET import StandardMLPTrainer
-        return StandardMLPTrainer(config)
-    elif model_name == "deep_flow":
-        from models.glow_net_ET import GlowTrainerET
-        return GlowTrainerET(config)
+    if model_name == "mlp":
+        from src.models.mlp_logZ import MLPLogNormalizerTrainer
+        return MLPLogNormalizerTrainer(config)
     elif model_name == "glu":
-        from models.glu_ET import GLUTrainer
-        return GLUTrainer(config)
-    elif model_name == "invertible_nn":
-        from models.invertible_nn_ET import InvertibleNNTrainer
-        return InvertibleNNTrainer(config)
-    elif model_name == "noprop_ct":
-        from models.noprop_ct_ET import NoPropCTTrainer
-        return NoPropCTTrainer(config)
+        from src.models.glu_logZ import GLULogNormalizerTrainer
+        return GLULogNormalizerTrainer(config)
     elif model_name == "quadratic_resnet":
-        from models.quadratic_resnet_ET import QuadraticResNetTrainer
-        return QuadraticResNetTrainer(config)
+        from src.models.quadratic_resnet_logZ import QuadraticResNetLogNormalizerTrainer
+        return QuadraticResNetLogNormalizerTrainer(config)
+    elif model_name == "convex_nn":
+        from src.models.convex_nn_logZ import ConvexNNLogNormalizerTrainer
+        return ConvexNNLogNormalizerTrainer(config)
     else:
-        raise ValueError(f"Unknown model: {model_name}")
+        raise ValueError(f"Unknown model: {model_name}. Available models: mlp, glu, quadratic_resnet, convex_nn")
 
 def main():
-    parser = argparse.ArgumentParser(description='Train ET Neural Network')
+    parser = argparse.ArgumentParser(description='Train LogZ Neural Network')
     parser.add_argument('--config', type=str, required=True,
                        help='Path to configuration file')
-    parser.add_argument('--epochs', type=int, default=100,
+    parser.add_argument('--epochs', type=int, default=300,
                        help='Number of training epochs')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
     parser.add_argument('--plot', action='store_true',
                        help='Generate plots')
     parser.add_argument('--model', type=str, required=True,
-                       help='Model name (standard_mlp, deep_flow, glu, invertible_nn, noprop_ct, quadratic_resnet)')
+                       help='Model name (mlp, glu, quadratic_resnet, convex_nn)')
     
     args = parser.parse_args()
     
@@ -215,7 +199,7 @@ def main():
     ef = MultivariateNormal(dim=config.network.exp_family.split('_')[-1])
     
     # Create trainer
-    print(f"\nCreating {args.model} ET trainer...")
+    print(f"\nCreating {args.model} LogZ trainer...")
     trainer = create_trainer(config, None, args.model)
     
     # Initialize parameters

@@ -11,8 +11,10 @@ from ..config import FullConfig
 class InvertibleNetwork(ETNetwork):
     """Invertible NN-based ET Network."""
     
+    architecture: str = "invertible"
+    
     def __init__(self, config):
-        super().__init__(config=config, architecture="invertible")
+        super().__init__(config=config)
 
 
 class InvertibleTrainer(ETTrainer):

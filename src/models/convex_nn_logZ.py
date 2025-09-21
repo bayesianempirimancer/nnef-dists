@@ -238,11 +238,12 @@ class ConvexNeuralNetworkLogZ(LogZNetwork):
 class ConvexNeuralNetworkLogZTrainer(LogZTrainer):
     """Trainer for Convex Neural Network Log Normalizer."""
     
-    def __init__(self, config: FullConfig, hessian_method='diagonal', 
-                 use_curriculum=True):
+    def __init__(self, config: FullConfig, loss_type: str = "mse_mean_only", 
+                 hessian_method='diagonal', use_curriculum=True):
         # Initialize LogZTrainer with convex architecture, then override model
-        super().__init__(config, architecture="convex", hessian_method=hessian_method, 
-                        adaptive_weights=use_curriculum, l1_reg_weight=0.0)
+        super().__init__(config, architecture="convex", loss_type=loss_type,
+                        hessian_method=hessian_method, adaptive_weights=use_curriculum, 
+                        l1_reg_weight=1e-4)
         
         # Override with our specialized convex model
         self.model = ConvexNeuralNetworkLogZ(config=config.network)

@@ -11,15 +11,14 @@ from ..config import FullConfig
 class GLULogNormalizerNetwork(LogZNetwork):
     """GLU-based LogZ Network."""
     
-    def __init__(self, config):
-        super().__init__(config=config, architecture="glu")
+    architecture: str = "glu"
 
 
 class GLULogNormalizerTrainer(LogZTrainer):
     """Trainer for GLU LogZ Network."""
     
     def __init__(self, config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
-        super().__init__(config, architecture="glu", hessian_method=hessian_method, adaptive_weights=adaptive_weights)
+        super().__init__(config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)
 
 
 def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):

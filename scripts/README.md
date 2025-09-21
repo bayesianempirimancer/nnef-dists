@@ -25,7 +25,7 @@ Each model has its own training script with standardized configuration:
 
 ### Novel Flow-Based Approaches
 - `train_geometric_flow_ET.py` - **NEW** Geometric Flow ET networks with continuous dynamics
-- `train_glow_net_ET.py` - Glow networks using normalizing flows with affine coupling
+- `train_glow_ET.py` - Glow networks using normalizing flows with affine coupling
 - `train_invertible_nn_ET.py` - Invertible neural networks
 
 ### Specialized Models
@@ -49,7 +49,7 @@ python scripts/training/train_mlp_logZ.py
 python scripts/training/train_geometric_flow_ET.py --save-dir artifacts/geometric_flow
 
 # Flow-based approaches
-python scripts/training/train_glow_net_ET.py
+python scripts/training/train_glow_ET.py
 python scripts/training/train_invertible_nn_ET.py
 ```
 

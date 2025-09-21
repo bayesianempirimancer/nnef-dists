@@ -75,22 +75,22 @@ def compute_eta_features(eta: jnp.ndarray,
     
     # Select predefined method settings
     if method == 'default':
-        # Default: eta, eta/||eta||, cross-products of normalized eta
+        # Default: eta, eta/||eta||, ||eta||,cross-products of normalized eta
         include_polynomial = False
-        include_cross_terms = True
+        include_cross_terms = False
         include_inverse = False
         include_normalized = True
-        include_norm_features = True
-        include_logarithmic = False
+        include_norm_features = False
+        include_logarithmic = True
         include_absolute = False
         
     elif method == 'polynomial':
         include_polynomial = True
-        include_cross_terms = True
+        include_cross_terms = False
         include_inverse = False
         include_normalized = True
-        include_norm_features = True
-        include_logarithmic = False
+        include_norm_features = False
+        include_logarithmic = True
         include_absolute = False
         
     elif method == 'advanced':
@@ -100,22 +100,22 @@ def compute_eta_features(eta: jnp.ndarray,
         include_normalized = True
         include_norm_features = True
         include_logarithmic = True
-        include_absolute = True
+        include_absolute = False
         
     elif method == 'minimal':
-        include_polynomial = True
+        include_polynomial = False
         include_cross_terms = False
         include_inverse = False
         include_normalized = True
-        include_norm_features = True
-        include_logarithmic = False
+        include_norm_features = False
+        include_logarithmic = True
         include_absolute = False
         max_polynomial_degree = 2
         
     elif method == 'convex_only':
         # Convex-only features for convex neural networks
         include_polynomial = True  # Polynomial features of eta are convex if degree is even and coeffs > 0
-        include_cross_terms = True  # Cross-products of eta can be convex
+        include_cross_terms = False  # Cross-products of eta can be convex
         include_inverse = False     # 1/x is not convex
         include_normalized = False  # eta/||eta|| is not convex
         include_norm_features = True  # ||eta|| is convex, but 1/||eta|| and log(1+||eta||) are not

@@ -18,38 +18,16 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import random
-import matplotlib.pyplot as plt
+# matplotlib import removed - now using standardized plotting
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-# Simple data generation function
-def generate_simple_test_data(n_samples=400, seed=42):
-    """Generate simple 3D Gaussian test data."""
-    eta_vectors = []
-    expected_stats = []
-    
-    for i in range(n_samples):
-        # Generate random mean and covariance
-        mean = random.normal(random.PRNGKey(seed + i), (3,)) * 1.0
-        A = random.normal(random.PRNGKey(seed + i + 1000), (3, 3))
-        covariance_matrix = A.T @ A + jnp.eye(3) * 0.01
-        
-        # Convert to natural parameters
-        sigma_inv = jnp.linalg.inv(covariance_matrix)
-        eta1 = sigma_inv @ mean  # η₁ = Σ⁻¹μ
-        eta2_matrix = -0.5 * sigma_inv  # η₂ = -0.5Σ⁻¹
-        eta_vector = jnp.concatenate([eta1, eta2_matrix.flatten()])
-        eta_vectors.append(eta_vector)
-        
-        # Expected sufficient statistics
-        expected_stat = jnp.concatenate([
-            mean,  # μ (3 values)
-            (jnp.outer(mean, mean) + covariance_matrix).flatten()  # μμᵀ + Σ (9 values)
-        ])
-        expected_stats.append(expected_stat)
-    
-    return jnp.array(eta_vectors), jnp.array(expected_stats)
+# Import standardized plotting functions
+sys.path.append(str(Path(__file__).parent.parent))
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+
+# Data generation function removed - now using easy_3d_gaussian data
 
 
 # Simple configuration class
@@ -64,35 +42,19 @@ class SimpleMLPLogZ:
     
     def __init__(self, hidden_sizes=[64, 64]):
         self.hidden_sizes = hidden_sizes
-        self.config = SimpleConfig(hidden_sizes=hidden_sizes, activation="swish")
+        # Create proper FullConfig
+        from src.config import FullConfig
+        self.config = FullConfig()
+        self.config.network.hidden_sizes = hidden_sizes
+        self.config.network.activation = "swish"
+        self.config.network.use_layer_norm = True
     
     def create_model(self):
         """Create the model using the official implementation."""
-        try:
-            from src.models.mlp_logZ import MLPLogNormalizerTrainer
-            # Create a dummy trainer to get the model
-            trainer = MLPLogNormalizerTrainer(self.config)
-            return trainer.model
-        except ImportError:
-            # Fallback to simplified implementation if import fails
-            import flax.linen as nn
-            
-            class MLPLogZModel(nn.Module):
-                hidden_sizes: list
-                
-                @nn.compact
-                def __call__(self, x, training=True):
-                    for i, hidden_size in enumerate(self.hidden_sizes):
-                        x = nn.Dense(hidden_size, name=f'hidden_{i}')(x)
-                        x = nn.swish(x)
-                        if i < len(self.hidden_sizes) - 1:
-                            x = nn.LayerNorm(name=f'layer_norm_{i}')(x)
-                    
-                    # Output layer - scalar log normalizer
-                    x = nn.Dense(1, name='output')(x)
-                    return jnp.squeeze(x, axis=-1)
-            
-            return MLPLogZModel(hidden_sizes=self.hidden_sizes)
+        from src.models.mlp_logZ import MLPLogNormalizerTrainer
+        # Create a dummy trainer to get the model
+        trainer = MLPLogNormalizerTrainer(self.config)
+        return trainer.model
     
     def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
         """Train the model."""
@@ -147,131 +109,31 @@ class SimpleMLPLogZ:
         predictions = jax.vmap(grad_fn)(eta_data)
         return predictions
 
-def plot_training_results(trainer, eta_data, ground_truth, predictions, losses, config):
-    """Create comprehensive plots for training results."""
-    
-    # Create figure with subplots
-    fig = plt.figure(figsize=(20, 12))
-    
-    # 1. Learning curves
-    ax1 = plt.subplot(2, 4, 1)
-    plt.plot(losses, 'b-', linewidth=2)
-    plt.title('Training Loss', fontsize=14, fontweight='bold')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.grid(True, alpha=0.3)
-    
-    # 2. Predictions vs Ground Truth (scatter)
-    ax2 = plt.subplot(2, 4, 2)
-    plt.scatter(ground_truth, predictions, alpha=0.6, s=20)
-    min_val = min(ground_truth.min(), predictions.min())
-    max_val = max(ground_truth.max(), predictions.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
-    plt.xlabel('Ground Truth')
-    plt.ylabel('Predictions')
-    plt.title('Predictions vs Ground Truth', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    
-    # 3. Residuals
-    ax3 = plt.subplot(2, 4, 3)
-    residuals = predictions - ground_truth
-    plt.scatter(ground_truth, residuals, alpha=0.6, s=20)
-    plt.axhline(y=0, color='r', linestyle='--', linewidth=2)
-    plt.xlabel('Ground Truth')
-    plt.ylabel('Residuals')
-    plt.title('Residuals vs Ground Truth', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    
-    # 4. Per-statistic performance
-    ax4 = plt.subplot(2, 4, 4)
-    stat_names = [f'E[T_{i}]' for i in range(ground_truth.shape[1])]
-    mse_per_stat = np.mean((predictions - ground_truth) ** 2, axis=0)
-    bars = plt.bar(range(len(stat_names)), mse_per_stat)
-    plt.xlabel('Statistics')
-    plt.ylabel('MSE')
-    plt.title('MSE per Statistic', fontsize=14, fontweight='bold')
-    plt.xticks(range(len(stat_names)), stat_names, rotation=45)
-    plt.grid(True, alpha=0.3)
-    
-    # 5. Log normalizer values
-    ax5 = plt.subplot(2, 4, 5)
-    log_normalizer_values = trainer.model.apply(trainer.params, eta_data, training=False)
-    plt.hist(log_normalizer_values, bins=50, alpha=0.7, edgecolor='black')
-    plt.xlabel('Log Normalizer A(η)')
-    plt.ylabel('Frequency')
-    plt.title('Distribution of Log Normalizer Values', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    
-    # 6. Gradient magnitudes
-    ax6 = plt.subplot(2, 4, 6)
-    gradients = trainer.compute_predictions(trainer.params, eta_data)
-    gradient_magnitudes = np.linalg.norm(gradients, axis=1)
-    plt.hist(gradient_magnitudes, bins=50, alpha=0.7, edgecolor='black')
-    plt.xlabel('Gradient Magnitude ||∇A(η)||')
-    plt.ylabel('Frequency')
-    plt.title('Distribution of Gradient Magnitudes', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    
-    # 7. Input distribution
-    ax7 = plt.subplot(2, 4, 7)
-    if eta_data.shape[1] <= 2:
-        if eta_data.shape[1] == 1:
-            plt.hist(eta_data[:, 0], bins=50, alpha=0.7, edgecolor='black')
-            plt.xlabel('Natural Parameters η')
-        else:
-            plt.scatter(eta_data[:, 0], eta_data[:, 1], alpha=0.6, s=20)
-            plt.xlabel('η₁')
-            plt.ylabel('η₂')
-        plt.title('Input Distribution', fontsize=14, fontweight='bold')
-        plt.grid(True, alpha=0.3)
-    else:
-        plt.text(0.5, 0.5, f'{eta_data.shape[1]}D input\n(too high for 2D plot)', 
-                ha='center', va='center', transform=ax7.transAxes, fontsize=12)
-        plt.title('Input Distribution', fontsize=14, fontweight='bold')
-    
-    # 8. Performance metrics
-    ax8 = plt.subplot(2, 4, 8)
-    mse = np.mean((predictions - ground_truth) ** 2)
-    mae = np.mean(np.abs(predictions - ground_truth))
-    r2 = 1 - np.sum((ground_truth - predictions) ** 2) / np.sum((ground_truth - np.mean(ground_truth)) ** 2)
-    
-    metrics_text = f"""
-    MSE: {mse:.6f}
-    MAE: {mae:.6f}
-    R²: {r2:.4f}
-    
-    Final Loss: {losses[-1]:.6f}
-    Parameters: {sum(x.size for x in jax.tree.leaves(trainer.params)):,}
-    """
-    
-    plt.text(0.1, 0.5, metrics_text, transform=ax8.transAxes, 
-             fontsize=11, verticalalignment='center',
-             bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-    plt.axis('off')
-    plt.title('Performance Metrics', fontsize=14, fontweight='bold')
-    
-    plt.tight_layout()
-    
-    # Save plot to artifacts directory
-    artifacts_dir = Path(__file__).parent.parent.parent / "artifacts"
-    model_dir = artifacts_dir / "logZ_models" / "mlp_logZ"
-    model_dir.mkdir(parents=True, exist_ok=True)
-    
-    output_path = model_dir / f"mlp_logZ_training_results_{config.network.exp_family}.png"
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Training results saved to: {output_path}")
-    
-    return fig
+# Plotting function removed - now using standardized plotting from scripts/plot_training_results.py
 
 def main():
     """Main training function."""
     print("Training MLP LogZ Model")
     print("=" * 40)
     
-    # Generate test data
-    print("Generating test data...")
-    eta_data, ground_truth = generate_simple_test_data(n_samples=400, seed=42)
+    # Load test data from easy_3d_gaussian
+    print("Loading test data from easy_3d_gaussian...")
+    data_file = Path("data/easy_3d_gaussian.pkl")
+    
+    import pickle
+    with open(data_file, 'rb') as f:
+        data = pickle.load(f)
+    
+    eta_data = data["train"]["eta"]
+    ground_truth = data["train"]["mean"]
     print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
+    
+    # Purge cov_tt to save memory
+    if "cov" in data["train"]: del data["train"]["cov"]
+    if "cov" in data["val"]: del data["val"]["cov"]
+    if "cov" in data["test"]: del data["test"]["cov"]
+    import gc; gc.collect()
+    print("✅ Purged cov_tt elements from memory for optimization")
     
     # Test different architectures
     architectures = {
@@ -295,77 +157,28 @@ def main():
         mse = float(jnp.mean(jnp.square(predictions - ground_truth)))
         mae = float(jnp.mean(jnp.abs(predictions - ground_truth)))
         
-        # Create plots
-        fig = plt.figure(figsize=(15, 10))
+        # Create plots using standardized plotting function
+        metrics = plot_training_results(
+            trainer=model_wrapper,
+            eta_data=eta_data,
+            ground_truth=ground_truth,
+            predictions=predictions,
+            losses=losses,
+            config=model_wrapper.config,
+            model_name=name,
+            output_dir="artifacts/logZ_models/mlp_logZ",
+            save_plots=True,
+            show_plots=False
+        )
         
-        # Training curve
-        ax1 = plt.subplot(2, 3, 1)
-        ax1.plot(losses, linewidth=2)
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.set_title(f'{name} Training Progress')
-        ax1.set_yscale('log')
-        ax1.grid(True, alpha=0.3)
-        
-        # Mean statistics
-        ax2 = plt.subplot(2, 3, 2)
-        mean_gt = ground_truth[:, :3]
-        mean_pred = predictions[:, :3]
-        
-        ax2.scatter(mean_gt[:, 0], mean_pred[:, 0], alpha=0.6, s=20, label='E[x₁]')
-        ax2.scatter(mean_gt[:, 1], mean_pred[:, 1], alpha=0.6, s=20, marker='s', label='E[x₂]')
-        ax2.scatter(mean_gt[:, 2], mean_pred[:, 2], alpha=0.6, s=20, marker='^', label='E[x₃]')
-        
-        min_val = min(mean_gt.min(), mean_pred.min())
-        max_val = max(mean_gt.max(), mean_pred.max())
-        ax2.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.8, linewidth=2)
-        
-        ax2.set_xlabel('Ground Truth')
-        ax2.set_ylabel('Prediction')
-        ax2.set_title(f'{name} Mean Statistics')
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
-        
-        # Covariance statistics
-        ax3 = plt.subplot(2, 3, 3)
-        cov_gt = ground_truth[:, 3:]
-        cov_pred = predictions[:, 3:]
-        
-        ax3.scatter(cov_gt.flatten(), cov_pred.flatten(), alpha=0.6, s=10)
-        
-        min_val = min(cov_gt.min(), cov_pred.min())
-        max_val = max(cov_gt.max(), cov_pred.max())
-        ax3.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.8, linewidth=2)
-        
-        ax3.set_xlabel('Ground Truth')
-        ax3.set_ylabel('Prediction')
-        ax3.set_title(f'{name} Covariance Statistics')
-        ax3.grid(True, alpha=0.3)
-        
-        # Performance metrics
-        ax4 = plt.subplot(2, 3, 4)
-        mean_r2 = 1 - jnp.sum((mean_pred - mean_gt)**2) / jnp.sum((mean_gt - jnp.mean(mean_gt))**2)
-        cov_r2 = 1 - jnp.sum((cov_pred - cov_gt)**2) / jnp.sum((cov_gt - jnp.mean(cov_gt))**2)
-        
-        ax4.text(0.1, 0.8, f'MSE: {mse:.6f}', transform=ax4.transAxes, fontsize=12)
-        ax4.text(0.1, 0.6, f'MAE: {mae:.6f}', transform=ax4.transAxes, fontsize=12)
-        ax4.text(0.1, 0.4, f'Mean R²: {float(mean_r2):.3f}', transform=ax4.transAxes, fontsize=12)
-        ax4.text(0.1, 0.2, f'Cov R²: {float(cov_r2):.3f}', transform=ax4.transAxes, fontsize=12)
-        
-        ax4.set_title(f'{name} Performance')
-        ax4.axis('off')
-        
-        plt.tight_layout()
-        
-        # Save plot
-        artifacts_dir = Path(__file__).parent.parent.parent / "artifacts"
-        model_dir = artifacts_dir / "logZ_models" / "mlp_logZ"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        
-        plt.savefig(model_dir / f"{name.lower()}_results.png", dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        results[name] = {'mse': mse, 'mae': mae, 'hidden_sizes': hidden_sizes}
+        results[name] = {
+            'mse': metrics['mse'], 
+            'mae': metrics['mae'], 
+            'r2': metrics['r2'],
+            'final_loss': metrics['final_loss'],
+            'hidden_sizes': hidden_sizes,
+            'losses': losses
+        }
         
         print(f"  Final MSE: {mse:.6f}, MAE: {mae:.6f}")
     
@@ -381,6 +194,20 @@ def main():
     # Find best model
     best_model = min(results.items(), key=lambda x: x[1]['mse'])
     print(f"\n🏆 Best Model: {best_model[0]} with MSE={best_model[1]['mse']:.6f}")
+    
+    # Create model comparison plots
+    plot_model_comparison(
+        results=results,
+        output_dir="artifacts/logZ_models/mlp_logZ",
+        save_plots=True,
+        show_plots=False
+    )
+    
+    # Save results summary
+    save_results_summary(
+        results=results,
+        output_dir="artifacts/logZ_models/mlp_logZ"
+    )
     
     print("\n✅ MLP LogZ training complete!")
 

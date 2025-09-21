@@ -4,12 +4,17 @@ Fast variational inference with non-named exponential family distributions using
 
 ## Overview
 
-For an exponential family with natural parameters `eta` and sufficient statistics `T(x)`, inference by message passing requires the mapping `mu_T(eta) = E[T(x) | eta]`. Named exponential-family distributions have closed-form `mu_T`. This project learns `mu_T` for non-named families using two complementary approaches:
+For an exponential family with natural parameters $\eta$ and sufficient statistics $T(x)$, inference by message passing requires the mapping $\mu_T(eta) = \left< T(x) | \eta\right>$. Named exponential-family distributions are particularly easy to work with because they have uniquely invertible closed-form expressions for $\mu_T(\eta)$.  More generally, exponential family distributions can be written
+
+$$ \log p(x|\eta) = \eta\cdot T(x) - A(\eta)$$
+
+and include many distributions for which $\mu_T(\eta)$ is unknown and must be obtained via a sampling procedure such as MCMC.  This project aims to massively expand the set of exponential family distributions that are as easy to work with as named distributions by learning the function $mu_T(\eta)$ for arbitrary exponential family distributions.  The basic approach is to train a set of relatively small neural networks using samples conditioned on $\eta$ for a particular choice of $T(x)$.  Each choice of $T(x)$ then gives us a new class of distributions for which algorithms like Variational Bayesian Expectation Maximization or Coordinate Ascent Variational Inference become trivially implementable via message passing.  Currently we are comparing three classes of neural network architectures all of which can be trained using $\left\{\eta, \mu_T\right\}$ pairs generated via MCMC smaples and some of which can be fit directly to samples from any distribution:
 
 1. **Direct Neural Approximation**: Traditional neural networks trained on MCMC samples
-2. **Geometric Flow Networks**: Novel flow-based approach using continuous dynamics that respects the geometric structure of exponential families
+2. **Geometric Network**: Traditional Neural Networks that approximate $A(\eta)$ and exploit the relationship $\mu_T(\eta) = \nabla A(\eta)$
+3. **Geometric Flow Networks**: Novel flow-based approach using continuous dynamics that respects the geometric structure of exponential families, specificially $\Sigma_{TT}(\eta) = \nabla \mu_T(\eta)$
 
-This repository uses JAX/Flax for modeling and BlackJAX for HMC sampling. It supports both 1D and multidimensional exponential family distributions with comprehensive training and visualization capabilities.
+This repository uses JAX/Flax for modeling and BlackJAX for HMC sampling. It utilizes an arbitrary exponential family distribution class that allows for user specification of the vector of sufficient statistic function $T(x)$.  
 
 ## Quickstart
 
@@ -19,10 +24,10 @@ This repository uses JAX/Flax for modeling and BlackJAX for HMC sampling. It sup
 pip install -e .
 ```
 
-2. Generate training data for a 1D Gaussian model:
+2. Generate training data for a 3D Gaussian model:
 
 ```bash
-python src/generate_data.py --config configs/gaussian_1d_large.yaml
+python src/generate_data.py --config configs/gaussian_3d_large.yaml
 ```
 
 3. Train neural networks (multiple approaches available):
@@ -36,56 +41,110 @@ python scripts/training/train_mlp_logZ.py
 
 # Geometric Flow Network (novel flow-based approach)
 python scripts/training/train_geometric_flow_ET.py --save-dir artifacts/geometric_flow
+
+# Deep Flow Network (normalizing flows)
+python scripts/training/train_glow_ET.py
+
+# Quadratic ResNet (advanced architecture)
+python scripts/training/train_quadratic_resnet_ET.py
 ```
 
-4. For 3D multivariate Gaussian models:
+4. Train individual models for comparison:
 
 ```bash
-# Generate data
-python src/generate_data.py --config configs/multivariate_3d_large.yaml
-
-# Train different model types
-python scripts/training/train_mlp_ET.py
-python scripts/training/train_geometric_flow_ET.py --save-dir artifacts/geometric_flow_3d
+# Train specific model types
+python scripts/train_comparison_models.py --model mlp_ET
+python scripts/train_comparison_models.py --model geometric_flow_ET
+python scripts/train_comparison_models.py --model convex_nn_logZ
 ```
 
-5. Generate plots only (if training history exists):
+5. Test all models comprehensively:
 
 ```bash
-python scripts/train_large_1d.py --plot-only
-python scripts/train_large_3d.py --plot-only
+python scripts/test_all_models.py
 ```
 
 Artifacts (learned parameters, training history, and plots) will be saved under `artifacts/`.
 
-## Project layout
+## Project Layout
 
 - `src/`: Core library
-  - `ef.py`: Generic `ExponentialFamily` interface with `GaussianNatural1D`, `MultivariateNormal` implementations, EF factory, and analytical reference point methods
+  - `ef.py`: Generic `ExponentialFamily` interface with `GaussianNatural1D`, `MultivariateNormal`, and `MultivariateNormal_tril` implementations
   - `sampling.py`: BlackJAX HMC sampling utilities for arbitrary-shaped distributions
+  - `config.py`: Configuration management system with `FullConfig`, `NetworkConfig`, and `TrainingConfig` classes
   - `models/`: Neural network architectures
     - `ET_Net.py`: Direct expectation networks (MLP, GLU, Quadratic ResNet, etc.)
     - `logZ_Net.py`: Log-normalizer networks with gradient/Hessian computation
     - `geometric_flow_net.py`: **NEW** Geometric flow networks using continuous dynamics
-    - `glow_net_ET.py`: Glow networks using normalizing flows with affine coupling
+    - `glow_ET.py`: Glow networks using normalizing flows with affine coupling
+    - `mlp_ET.py`: Standard MLP expectation networks
+    - `mlp_logZ.py`: MLP-based log normalizer networks
+    - `glu_network.py`: Gated Linear Unit networks
+    - `quadratic_resnet.py`: Quadratic residual networks
+    - `invertible_nn.py`: Invertible neural networks with coupling layers
+    - `noprop_ct_ET.py`: No-propagation continuous-time networks
+    - `convex_nn_logZ.py`: Input convex neural networks for log normalizers
   - `generate_data.py`: Data generation using HMC sampling with configurable parameters
+  - `utils/`: Utility modules
+    - `performance.py`: Performance measurement utilities
+    - `matrix_utils.py`: JAX utilities for matrix operations
+    - `data_utils.py`: Data loading and preprocessing utilities
+    - `exact_covariance.py`: Analytical covariance computation for known exponential families
 - `scripts/`: Training and visualization scripts
-  - `training/`: Training scripts for different model architectures
-    - `train_mlp_ET.py`: Standard MLP ET networks
-    - `train_geometric_flow_ET.py`: **NEW** Geometric flow networks
-    - `train_*_logZ.py`: Various LogZ network architectures
+  - `training/`: Training scripts for different model architectures (see table below)
   - `test_flow_math_fixed.py`: Mathematical verification of flow dynamics
   - `demo_flow_scaling.py`: Demonstration of flow efficiency with coarse discretization
-- `src/utils/`: Utility modules
-  - `performance.py`: Performance measurement utilities
-  - `matrix_utils.py`: JAX utilities for matrix operations
-  - `data_utils.py`: Data loading and preprocessing utilities
-  - `exact_covariance.py`: Analytical covariance computation for known exponential families
 - `configs/`: Configuration files
   - `gaussian_1d_large.yaml`: Large-scale 1D Gaussian configuration
   - `multivariate_3d_large.yaml`: Large-scale 3D multivariate Gaussian configuration
+- `plotting/`: Visualization and comparison utilities
 - `artifacts/`: Saved models, training history, and plots (organized by model type)
 - `data/`: Generated training datasets (pickle files) - all training data stored here for reuse
+- `examples/`: Example usage scripts and notebooks
+- `docs/`: Documentation files
+- `papers/`: Research papers and manuscripts
+
+## Training Scripts
+
+The project includes comprehensive training scripts for various neural network architectures. Each script can be run independently and includes evaluation, plotting, and result saving capabilities.
+
+| Script | Model Type | Description |
+|--------|------------|-------------|
+| `train_mlp_ET.py` | Direct ET | Standard MLP networks that directly learn the expectation mapping μ_T(η) = E[T(X)\|η]. Features multiple architecture sizes and comprehensive evaluation. |
+| `train_standard_mlp_ET.py` | Direct ET | Simplified standard MLP implementation with official model integration and fallback capabilities. |
+| `train_geometric_flow_ET.py` | Geometric Flow | **Novel** geometric flow networks using continuous dynamics: du/dt = A@A^T@(η_target - η_init). Respects exponential family geometry with minimal time steps. |
+| `train_glow_ET.py` | Normalizing Flow | Deep flow networks using normalizing flows with affine coupling layers. Features 50+ flow layers with diffusion-based training. |
+| `train_quadratic_resnet_ET.py` | Direct ET | Quadratic residual networks with adaptive quadratic mixing. Deep narrow architecture (10 layers x 96 units) optimized for complex mappings. |
+| `train_glu_ET.py` | Direct ET | Gated Linear Unit networks with deep narrow architecture (10 layers x 80 units). Features gated activations for improved expressiveness. |
+| `train_invertible_nn_ET.py` | Invertible NN | Invertible neural networks with additive coupling layers and ActNorm. 8 coupling layers x 128 units with strict gradient clipping. |
+| `train_noprop_ct_ET.py` | Continuous Time | No-propagation continuous-time networks with ODE solvers. 8 CT layers x 96 units with Euler integration and noise scaling. |
+| `train_mlp_logZ.py` | Log Normalizer | MLP networks that learn the log normalizer A(η) and compute expectations via ∇A(η). Multiple architecture comparisons included. |
+| `train_glu_logZ.py` | Log Normalizer | GLU-based log normalizer networks with gated activations for learning A(η). |
+| `train_quadratic_resnet_logZ.py` | Log Normalizer | Quadratic residual networks for log normalizer learning with residual connections and adaptive mixing. |
+| `train_convex_nn_logZ.py` | Log Normalizer | **Novel** alternating convex neural networks with Type 1/Type 2 layers. Maintains convexity properties essential for exponential families. |
+| `ET_training_template.py` | Template | Training script template for ET networks. Provides standardized structure and plotting utilities for creating new model training scripts. |
+| `logZ_training_template.py` | Template | Training script template for LogZ networks. Provides standardized structure and plotting utilities for creating new LogZ model training scripts. |
+| `train_comparison_models.py` | Multi-Model | Unified training script for standardized comparison across all model types. Supports individual model training with consistent evaluation. |
+| `test_all_models.py` | Multi-Model | Comprehensive testing script that evaluates all available models on standardized datasets with performance comparison. |
+
+### Model Categories
+
+**Direct ET Networks**: Learn μ_T(η) directly from (η, μ_T) pairs
+- MLP, GLU, Quadratic ResNet, Standard MLP variants
+- Fast training, direct optimization of target mapping
+
+**Log Normalizer Networks**: Learn A(η) and compute μ_T = ∇A(η)  
+- MLP, GLU, Quadratic ResNet, Convex NN variants
+- Leverages automatic differentiation, maintains mathematical properties
+
+**Flow-Based Networks**: Use continuous dynamics or normalizing flows
+- Geometric Flow (novel approach respecting exponential family geometry)
+- Glow Networks (normalizing flows with affine coupling)
+- Invertible Neural Networks (coupling layers)
+
+**Continuous Time Networks**: Solve ODEs for expectation computation
+- NoProp-CT (no propagation continuous time)
+- ODE solvers with learned dynamics
 
 ## Supported Distributions
 
@@ -106,7 +165,7 @@ Artifacts (learned parameters, training history, and plots) will be saved under 
 - **LogZ Networks**: Learn log-normalizer `A(η)`, then compute `μ_T = ∇A(η)` via automatic differentiation
 
 ### Geometric Flow Networks (Novel)
-A breakthrough approach that learns flow dynamics to compute expectations:
+An approach that learns flow dynamics to compute expectations:
 
 ```
 du/dt = A(u,t,η_t) @ A(u,t,η_t)^T @ (η_target - η_init)

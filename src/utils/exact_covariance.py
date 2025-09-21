@@ -27,7 +27,7 @@ def compute_exact_covariance_matrix(mu: jnp.ndarray, Sigma: jnp.ndarray) -> jnp.
     Returns:
         Covariance matrix of T [d + d², d + d²]
     """
-    d = mu.shape[0]
+    d = mu.shape[-1]
     T_dim = d + d * d  # Linear + quadratic terms
     
     cov_matrix = jnp.zeros((T_dim, T_dim))

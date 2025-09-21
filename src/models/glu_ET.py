@@ -11,9 +11,7 @@ from ..config import FullConfig
 class GLUNetwork(ETNetwork):
     """GLU-based ET Network."""
     
-    def __init__(self, config):
-        super().__init__(config=config, architecture="glu")
-
+    architecture: str = "glu"
 
 class GLUTrainer(ETTrainer):
     """Trainer for GLU ET Network."""

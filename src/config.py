@@ -170,13 +170,15 @@ def get_ultra_deep_config() -> FullConfig:
     return config
 
 
-def get_flow_config() -> FullConfig:
-    """Get configuration for flow-based models."""
+def get_glow_config() -> FullConfig:
+    """Get configuration for GLOW-based models."""
     config = FullConfig()
-    config.model_specific.num_flow_layers = 30
+    config.network.hidden_sizes = [64, 128, 128]  # Base network layers for display
+    config.model_specific.num_flow_layers = 50  # Increased from 30 to 50 layers
     config.model_specific.flow_hidden_size = 64
     config.training.learning_rate = 1e-3
     config.training.num_epochs = 100
+    config.training.batch_size = 64
     return config
 
 
@@ -226,7 +228,7 @@ def get_transformer_config() -> FullConfig:
 CONFIG_REGISTRY = {
     'deep_narrow': get_deep_narrow_config,
     'ultra_deep': get_ultra_deep_config,
-    'flow': get_flow_config,
+    'glow': get_glow_config,
     'diffusion': get_diffusion_config,
     'noprop': get_noprop_config,
     'quadratic': get_quadratic_config,

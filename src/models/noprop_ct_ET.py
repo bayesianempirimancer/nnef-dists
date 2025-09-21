@@ -11,8 +11,10 @@ from ..config import FullConfig
 class NoPropCTNetwork(ETNetwork):
     """NoProp-CT-based ET Network."""
     
+    architecture: str = "nopropct"
+    
     def __init__(self, config):
-        super().__init__(config=config, architecture="nopropct")
+        super().__init__(config=config)
 
 
 class NoPropCTTrainer(ETTrainer):

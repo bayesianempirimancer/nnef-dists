@@ -24,11 +24,11 @@ import time
 from tqdm import tqdm
 
 from ..base_model import BaseNeuralNetwork, BaseTrainer
-from ..config import FullConfig
+from ..config import FullConfig, NetworkConfig
 from ..ef import ExponentialFamily
 
 
-class LogZNetwork(BaseNeuralNetwork):
+class LogZNetwork(nn.Module):
     """
     Unified LogZ Network for learning log normalizers.
     
@@ -41,7 +41,8 @@ class LogZNetwork(BaseNeuralNetwork):
     provide the moments of the exponential family distribution.
     """
     
-    architecture: str = "mlp"  # "mlp", "glu", "quadratic"
+    config: NetworkConfig
+    architecture: str = "mlp"  # Default architecture
     
     @nn.compact
     def __call__(self, eta: jnp.ndarray, training: bool = True) -> jnp.ndarray:
@@ -74,6 +75,24 @@ class LogZNetwork(BaseNeuralNetwork):
         # Final projection to scalar log normalizer
         x = nn.Dense(1, name='logZ_output')(x)
         return jnp.squeeze(x, axis=-1)
+    
+    def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
+                            predicted_mean: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        """
+        Compute model-specific internal losses (e.g., regularization, smoothness penalties).
+        
+        Base implementation returns 0. Subclasses can override to add specific penalties.
+        
+        Args:
+            params: Model parameters
+            eta: Natural parameters [batch_size, eta_dim]
+            predicted_mean: Predicted mean statistics [batch_size, mu_dim] 
+            training: Whether in training mode
+            
+        Returns:
+            Internal loss value (scalar)
+        """
+        return 0.0
     
     def _mlp_forward(self, x: jnp.ndarray, training: bool) -> jnp.ndarray:
         """MLP architecture forward pass."""
@@ -160,6 +179,10 @@ class LogZNetwork(BaseNeuralNetwork):
             output = nn.LayerNorm(name=f'quad_layer_norm_{block_idx}')(output)
         
         return output
+    
+    def get_parameter_count(self, params: Dict) -> int:
+        """Count total number of parameters."""
+        return sum(x.size for x in jax.tree_leaves(params))
 
 
 class LogZTrainer(BaseTrainer):
@@ -172,15 +195,19 @@ class LogZTrainer(BaseTrainer):
     """
     
     def __init__(self, config: FullConfig, architecture: str = "mlp", 
-                 hessian_method: str = 'diagonal', adaptive_weights: bool = True, l1_reg_weight: float = 0.0):
-        model = LogZNetwork(config=config.network, architecture=architecture)
+                 loss_type: str = "mse_mean_only", hessian_method: str = 'diagonal', 
+                 adaptive_weights: bool = True, l1_reg_weight: float = 1e-4):
+        model = LogZNetwork(config=config.network)
         super().__init__(model, config)
         self.architecture = architecture
-        self.hessian_method = hessian_method
+        self.loss_type = loss_type
         self.adaptive_weights = adaptive_weights
         self.l1_reg_weight = l1_reg_weight
         self.epoch = 0
         
+        # Determine if we need Hessian computation based on loss type
+        self.needs_hessian = loss_type in ["mse_mean_and_cov", "mse_mean_and_diag_cov", "KLqp", "KLqp_diag", "KLpq", "KLpq_diag"]
+        self.hessian_method = "diagonal" if loss_type in ["mse_mean_and_diag_cov", "KLqp_diag", "KLpq_diag"] else "full"
         # Precompiled functions for efficiency (will be set after model initialization)
         self._compiled_gradient_fn = None
         self._compiled_hessian_fn = None
@@ -242,22 +269,26 @@ class LogZTrainer(BaseTrainer):
         Returns:
             Loss value
         """
-        # Compute network predictions
+
+        # Always compute mean prediction and loss
         predicted_mean = self.compute_gradient(params, eta)
-        
-        # Mean loss
         mean_loss = jnp.mean((predicted_mean - target_mean) ** 2)
-        
         total_loss = mean_loss
         
-        # Add covariance loss if target covariance is provided
-        if target_cov is not None:
+        # Add covariance loss based on loss type
+        if self.loss_type == "mse_mean_only":
+            # Only use mean loss - no Hessian needed
+            pass
+        elif self.loss_type in ["mse_mean_and_cov", "mse_mean_and_diag_cov"]:             
+            if target_cov is None:
+                raise ValueError("Target covariance is required for mse_mean_and_cov or mse_mean_and_diag_cov loss type")
+            # Compute covariance loss
             predicted_cov = self.compute_hessian(params, eta)
             
             if self.hessian_method == 'diagonal':
                 # Only compare diagonal elements
                 if target_cov.ndim == 3:  # Full covariance matrix [batch, dim, dim]
-                    target_diag = jnp.diagonal(target_cov, axis1=1, axis2=2)
+                    target_diag = jnp.diagonal(target_cov, axis1=-2, axis2=-1)
                 else:  # Already diagonal [batch, dim]
                     target_diag = target_cov
                 cov_loss = jnp.mean((predicted_cov - target_diag) ** 2)
@@ -268,6 +299,10 @@ class LogZTrainer(BaseTrainer):
             # Weight covariance loss
             cov_weight = 0.1 if not self.adaptive_weights else max(0.01, 1.0 / (1.0 + 0.1 * self.epoch))
             total_loss += cov_weight * cov_loss
+        
+        # Add model-specific internal losses (e.g., smoothness penalties, regularization)
+        internal_loss = self.model.compute_internal_loss(params, eta, predicted_mean, training=True)
+        total_loss += internal_loss
         
         # Add L1 regularization if enabled
         if self.l1_reg_weight > 0.0:
@@ -311,7 +346,9 @@ class LogZTrainer(BaseTrainer):
         best_loss = float('inf')
         
         print(f"Training LogZ Network ({self.architecture}) for {epochs} epochs")
-        print(f"Hessian method: {self.hessian_method}")
+        print(f"Loss type: {self.loss_type}")
+        if self.needs_hessian:
+            print(f"Hessian method: {self.hessian_method}")
         print(f"Adaptive weights: {self.adaptive_weights}")
         
         # Start timing
@@ -331,9 +368,11 @@ class LogZTrainer(BaseTrainer):
                 for i in range(0, n_train, batch_size):
                     batch = {
                         'eta': train_data['eta'][i:i+batch_size],
-                        'mean': train_data['mean'][i:i+batch_size],
-                        'cov': train_data.get('cov', train_data['mean'][i:i+batch_size])  # Fallback
+                        'mean': train_data['mean'][i:i+batch_size]
                     }
+                    # Only add covariance if it exists in training data
+                    if 'cov' in train_data:
+                        batch['cov'] = train_data['cov'][i:i+batch_size]
                     
                     params, opt_state, batch_loss = self.train_step(params, opt_state, batch, optimizer)
                     train_loss += batch_loss
@@ -415,6 +454,6 @@ class LogZTrainer(BaseTrainer):
         return results
 
 
-def create_logZ_network_and_trainer(config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 0.0) -> LogZTrainer:
+def create_logZ_network_and_trainer(config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 1e-4) -> LogZTrainer:
     """Factory function to create LogZ network and trainer."""
     return LogZTrainer(config, architecture=architecture, l1_reg_weight=l1_reg_weight)

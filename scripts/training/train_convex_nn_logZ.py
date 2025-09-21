@@ -28,6 +28,10 @@ from tqdm import tqdm
 # Add project root to path  
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+# Import standardized plotting functions
+sys.path.append(str(Path(__file__).parent.parent))
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+
 from src.config import FullConfig
 from src.models.convex_nn_logZ import (
     ConvexNeuralNetworkLogZ,
@@ -56,91 +60,6 @@ def create_alternating_convex_config():
     config.training.validation_freq = 10
     
     return config
-
-
-def generate_test_data(n_samples=2000, seed=42):
-    """Generate 3D Gaussian test data using MultivariateNormal_tril exponential family."""
-    from src.ef import MultivariateNormal_tril
-    
-    # Create 3D multivariate normal exponential family
-    ef = MultivariateNormal_tril(x_shape=(3,))
-    
-    rng = random.PRNGKey(seed)
-    
-    eta_vectors = []
-    mean_vectors = []
-    
-    for i in range(n_samples):
-        rng, subkey = random.split(rng)
-        
-        # Generate 3D Gaussian parameters
-        mean = random.normal(subkey, (3,)) * 0.5
-        
-        # Generate positive definite covariance via Cholesky
-        rng, subkey = random.split(rng)
-        L_raw = random.normal(subkey, (3, 3)) * 0.3
-        L = jnp.tril(L_raw) + jnp.eye(3) * 0.5  # Lower triangular with positive diagonal
-        cov = L @ L.T  # Positive definite covariance
-        
-        # Convert to natural parameters using MultivariateNormal_tril
-        # For multivariate normal: eta = [Σ^{-1}μ; -0.5*tril(Σ^{-1})]
-        sigma_inv = jnp.linalg.inv(cov)
-        eta_mean_part = sigma_inv @ mean
-        
-        # Extract lower triangular part of precision matrix
-        L_inv = jnp.linalg.cholesky(sigma_inv)
-        eta_precision_part = -0.5 * L_inv[jnp.tril_indices(3)]
-        
-        eta_vector = jnp.concatenate([eta_mean_part, eta_precision_part])
-        
-        # Compute expected sufficient statistics using the EF
-        # For multivariate normal: E[T(X)] = [μ; tril(μμᵀ + Σ)]
-        expected_stats = jnp.concatenate([
-            mean,  # 3 elements
-            (jnp.outer(mean, mean) + cov)[jnp.tril_indices(3)]  # 6 elements (lower triangular)
-        ])  # 9 elements total
-        
-        eta_vectors.append(eta_vector)
-        mean_vectors.append(expected_stats)
-    
-    eta_array = jnp.array(eta_vectors)
-    stats_array = jnp.array(mean_vectors)
-    
-    # Split into train/val/test
-    n_train = int(0.7 * n_samples)
-    n_val = int(0.15 * n_samples)
-    
-    # Normalize data
-    eta_mean = jnp.mean(eta_array, axis=0)
-    eta_std = jnp.std(eta_array, axis=0) + 1e-8
-    eta_normalized = (eta_array - eta_mean) / eta_std
-    
-    stats_mean = jnp.mean(stats_array, axis=0)
-    stats_std = jnp.std(stats_array, axis=0) + 1e-8
-    stats_normalized = (stats_array - stats_mean) / stats_std
-    
-    data = {
-        'train': {
-            'eta': eta_normalized[:n_train],
-            'mean': stats_normalized[:n_train]
-        },
-        'val': {
-            'eta': eta_normalized[n_train:n_train+n_val],
-            'mean': stats_normalized[n_train:n_train+n_val]
-        },
-        'test': {
-            'eta': eta_normalized[n_train+n_val:],
-            'mean': stats_normalized[n_train+n_val:]
-        }
-    }
-    
-    print(f"Generated data shapes:")
-    print(f"  Train: eta={data['train']['eta'].shape}, mean={data['train']['mean'].shape}")
-    print(f"  Val:   eta={data['val']['eta'].shape}, mean={data['val']['mean'].shape}")
-    print(f"  Test:  eta={data['test']['eta'].shape}, mean={data['test']['mean'].shape}")
-    print(f"Data ranges - eta: [{eta_normalized.min():.3f}, {eta_normalized.max():.3f}]")
-    
-    return data
 
 
 def analyze_alternating_architecture(config):
@@ -182,9 +101,41 @@ def main():
     print("Training Alternating Convex Neural Network LogZ Model")
     print("=" * 65)
     
-    # Generate test data
-    print("Generating 3D Gaussian test data using MultivariateNormal_tril...")
-    data = generate_test_data(n_samples=1000, seed=42)  # Mid-sized dataset for 6-layer model
+    # Load easy_3d_gaussian data
+    print("Loading easy_3d_gaussian dataset...")
+    from pathlib import Path
+    import pickle
+    
+    data_file = Path("data/easy_3d_gaussian.pkl")
+    if not data_file.exists():
+        print(f"Easy 3D Gaussian dataset not found. Please ensure data/easy_3d_gaussian.pkl exists.")
+        return
+    
+    with open(data_file, 'rb') as f:
+        comparison_data = pickle.load(f)
+    
+    # Purge cov_tt to save memory
+    if "cov" in comparison_data["train"]: del comparison_data["train"]["cov"]
+    if "cov" in comparison_data["val"]: del comparison_data["val"]["cov"]
+    if "cov" in comparison_data["test"]: del comparison_data["test"]["cov"]
+    import gc; gc.collect()
+    print("✅ Purged cov_tt elements from memory for optimization")
+    
+    # Convert to format expected by this script
+    data = {
+        'train': {
+            'eta': comparison_data['train']['eta'],
+            'mean': comparison_data['train']['mean']
+        },
+        'val': {
+            'eta': comparison_data['val']['eta'], 
+            'mean': comparison_data['val']['mean']
+        },
+        'test': {
+            'eta': comparison_data['test']['eta'],
+            'mean': comparison_data['test']['mean']
+        }
+    }
     
     # Create configuration and analyze architecture
     config = create_alternating_convex_config()
@@ -260,6 +211,38 @@ def main():
     print("- Guaranteed convex log normalizer A(η)")
     print("- Stable gradient computation")
     print("- Positive semi-definite Hessian (valid covariance)")
+    
+    # Create output directory
+    output_dir = Path("artifacts/logZ_models/convex_nn_logZ")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create results dictionary for plotting
+    results = {
+        "convex_nn_logZ": {
+            "train_loss": history.get('train_loss', []),
+            "val_loss": history.get('val_loss', []),
+            "test_metrics": test_metrics,
+            "model_name": "convex_nn_logZ",
+            "config": {"architecture": "convex_nn", "hidden_sizes": [64, 48, 32, 24, 16, 8]}
+        }
+    }
+    
+    # Create model comparison plots using standardized plotting function
+    plot_model_comparison(
+        results=results,
+        output_dir=str(output_dir),
+        save_plots=True,
+        show_plots=False
+    )
+    
+    # Save results summary using standardized function
+    save_results_summary(
+        results=results,
+        output_dir=str(output_dir)
+    )
+    
+    print(f"\n✅ Convex NN LogZ training complete!")
+    print(f"📁 Results saved to {output_dir}")
     
     return params, history, test_metrics
 

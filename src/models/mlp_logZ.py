@@ -11,15 +11,13 @@ from ..config import FullConfig
 class MLPLogNormalizerNetwork(LogZNetwork):
     """MLP-based LogZ Network."""
     
-    def __init__(self, config):
-        super().__init__(config=config, architecture="mlp")
-
+    architecture: str = "mlp"
 
 class MLPLogNormalizerTrainer(LogZTrainer):
     """Trainer for MLP LogZ Network."""
     
     def __init__(self, config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
-        super().__init__(config, architecture="mlp", hessian_method=hessian_method, adaptive_weights=adaptive_weights)
+        super().__init__(config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)
 
 
 def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):

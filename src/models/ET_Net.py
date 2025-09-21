@@ -85,6 +85,24 @@ class ETNetwork(BaseNeuralNetwork):
         x = nn.Dense(self.config.output_dim, name='et_output')(x)
         return x
     
+    def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
+                            predicted_stats: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        """
+        Compute model-specific internal losses (e.g., regularization, smoothness penalties).
+        
+        Base implementation returns 0. Subclasses can override to add specific penalties.
+        
+        Args:
+            params: Model parameters
+            eta: Natural parameters [batch_size, eta_dim]
+            predicted_stats: Predicted expected statistics [batch_size, stats_dim] 
+            training: Whether in training mode
+            
+        Returns:
+            Internal loss value (scalar)
+        """
+        return 0.0
+    
     def _mlp_forward(self, x: jnp.ndarray, training: bool) -> jnp.ndarray:
         """MLP architecture forward pass."""
         for i, hidden_size in enumerate(self.config.hidden_sizes):
@@ -271,7 +289,7 @@ class ETTrainer(BaseTrainer):
     or Hessian computation.
     """
     
-    def __init__(self, config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 0.0):
+    def __init__(self, config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 1e-4):
         model = ETNetwork(config=config.network, architecture=architecture)
         super().__init__(model, config)
         self.architecture = architecture
@@ -295,15 +313,18 @@ class ETTrainer(BaseTrainer):
         
         # MSE loss
         mse_loss = jnp.mean((predicted_stats - target_stats) ** 2)
+        total_loss = mse_loss
+        
+        # Add model-specific internal losses (e.g., smoothness penalties, regularization)
+        internal_loss = self.model.compute_internal_loss(params, eta, predicted_stats, training=True)
+        total_loss += internal_loss
         
         # L1 regularization on parameters (configurable, default off)
         if self.l1_reg_weight > 0.0:
             l1_reg = 0.0
             for param in jax.tree_leaves(params):
                 l1_reg += jnp.sum(jnp.abs(param))
-            total_loss = mse_loss + self.l1_reg_weight * l1_reg
-        else:
-            total_loss = mse_loss
+            total_loss += self.l1_reg_weight * l1_reg
         
         return total_loss
     
@@ -402,7 +423,7 @@ class ETTrainer(BaseTrainer):
         return results
 
 
-def create_et_network_and_trainer(config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 0.0) -> ETTrainer:
+def create_et_network_and_trainer(config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 1e-4) -> ETTrainer:
     """Factory function to create ET network and trainer."""
     return ETTrainer(config, architecture=architecture, l1_reg_weight=l1_reg_weight)
 

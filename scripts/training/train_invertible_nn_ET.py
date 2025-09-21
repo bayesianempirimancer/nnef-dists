@@ -16,9 +16,9 @@ import jax.numpy as jnp
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.config import FullConfig
-from src.models.invertible_nn import create_model_and_trainer
+from src.models.invertible_nn_ET import create_model_and_trainer
 from src.utils.data_utils import load_3d_gaussian_data, compute_ground_truth_3d_tril
-from plotting.model_comparison import create_comprehensive_report
+# from plotting.model_comparison import create_comprehensive_report  # TODO: Create plotting module
 
 
 # =============================================================================
@@ -49,7 +49,7 @@ CONFIG.training.gradient_clip_norm = 0.5  # Stricter clipping for INN
 
 # Experiment settings
 CONFIG.experiment.experiment_name = "invertible_nn_deep_narrow"
-CONFIG.experiment.output_dir = "artifacts/invertible_nn_results"
+CONFIG.experiment.output_dir = "artifacts/ET_models/invertible_nn_ET"
 
 # Loss Function
 LOSS_FUNCTION = "mse"  # Standard MSE loss
@@ -75,12 +75,22 @@ def main():
     
     # Load data
     print("\n📊 Loading data...")
-    data_dir = Path("data")
-    data, ef = load_3d_gaussian_data(data_dir, format="tril")
+    data_file = Path("data/easy_3d_gaussian.pkl")
     
-    # Create train/val/test splits
-    train_data = {"eta": data["train_eta"], "y": data["train_y"]}
-    val_data = {"eta": data["val_eta"], "y": data["val_y"]}
+    import pickle
+    with open(data_file, 'rb') as f:
+        data = pickle.load(f)
+    
+    # Create train/val/test splits with correct structure
+    train_data = {"eta": data["train"]["eta"], "stats": data["train"]["mean"]}
+    val_data = {"eta": data["val"]["eta"], "stats": data["val"]["mean"]}
+    
+    # Purge cov_tt to save memory
+    if "cov" in data["train"]: del data["train"]["cov"]
+    if "cov" in data["val"]: del data["val"]["cov"]
+    if "cov" in data["test"]: del data["test"]["cov"]
+    import gc; gc.collect()
+    print("✅ Purged cov_tt elements from memory for optimization")
     
     # Create test split from validation data
     n_val = val_data["eta"].shape[0]
@@ -88,25 +98,24 @@ def main():
     
     test_data = {
         "eta": val_data["eta"][:n_test],
-        "y": val_data["y"][:n_test]
+        "y": val_data["stats"][:n_test]
     }
     
     val_data = {
         "eta": val_data["eta"][n_test:],
-        "y": val_data["y"][n_test:]
+        "stats": val_data["stats"][n_test:]
     }
     
     print(f"Training samples: {train_data['eta'].shape[0]}")
     print(f"Validation samples: {val_data['eta'].shape[0]}")
     print(f"Test samples: {test_data['eta'].shape[0]}")
     print(f"Input dimension: {train_data['eta'].shape[1]}")
-    print(f"Output dimension: {train_data['y'].shape[1]}")
+    print(f"Output dimension: {train_data['stats'].shape[1]}")
     
-    # Compute ground truth
-    print("\n🎯 Computing ground truth...")
-    ground_truth = compute_ground_truth_3d_tril(test_data['eta'], ef)
-    empirical_mse = float(jnp.mean(jnp.square(test_data['y'] - ground_truth)))
-    print(f"MCMC sampling error bound: {empirical_mse:.6f}")
+    # Use test data directly (ground truth is already in test_data['y'])
+    print("\n🎯 Using test data as ground truth...")
+    ground_truth = test_data['y']
+    print(f"Ground truth shape: {ground_truth.shape}")
     
     # Create model and trainer
     print("\n🏗️  Creating Invertible Neural Network...")

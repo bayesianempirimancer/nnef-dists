@@ -11,8 +11,8 @@ from ..config import FullConfig
 class MLPNetwork(ETNetwork):
     """MLP-based ET Network."""
     
-    def __init__(self, config):
-        super().__init__(config=config, architecture="mlp")
+    architecture: str = "mlp"
+    
 
 
 class MLPTrainer(ETTrainer):

@@ -13,47 +13,21 @@ import json
 import jax
 import jax.numpy as jnp
 from jax import random
-import matplotlib.pyplot as plt
+# matplotlib import removed - now using standardized plotting
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-# Simple data generation function
-def generate_simple_test_data(n_samples=400, seed=42):
-    """Generate simple 3D Gaussian test data."""
-    eta_vectors = []
-    expected_stats = []
-    
-    for i in range(n_samples):
-        # Generate random mean and covariance
-        mean = random.normal(random.PRNGKey(seed + i), (3,)) * 1.0
-        A = random.normal(random.PRNGKey(seed + i + 1000), (3, 3))
-        covariance_matrix = A.T @ A + jnp.eye(3) * 0.01
-        
-        # Convert to natural parameters
-        sigma_inv = jnp.linalg.inv(covariance_matrix)
-        eta1 = sigma_inv @ mean  # η₁ = Σ⁻¹μ
-        eta2_matrix = -0.5 * sigma_inv  # η₂ = -0.5Σ⁻¹
-        eta_vector = jnp.concatenate([eta1, eta2_matrix.flatten()])
-        eta_vectors.append(eta_vector)
-        
-        # Expected sufficient statistics
-        expected_stat = jnp.concatenate([
-            mean,  # μ (3 values)
-            (jnp.outer(mean, mean) + covariance_matrix).flatten()  # μμᵀ + Σ (9 values)
-        ])
-        expected_stats.append(expected_stat)
-    
-    return jnp.array(eta_vectors), jnp.array(expected_stats)
-
+# Import standardized plotting functions
+sys.path.append(str(Path(__file__).parent.parent))
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
 
 # Simple configuration class
 class SimpleConfig:
     def __init__(self, hidden_sizes, activation="swish"):
         self.hidden_sizes = hidden_sizes
         self.activation = activation
-        self.use_layer_norm = True
-
+        self.use_layer_norm = False
 
 class SimpleStandardMLPET:
     """Standard MLP ET using official implementation."""
@@ -64,29 +38,15 @@ class SimpleStandardMLPET:
     
     def create_model(self):
         """Create the model using the official implementation."""
-        try:
-            from src.models.mlp_ET import MLPNetwork
-            return MLPNetwork(config=self.config)
-        except ImportError:
-            # Fallback to simplified implementation if import fails
-            import flax.linen as nn
-            
-            class StandardMLPETModel(nn.Module):
-                hidden_sizes: list
-                
-                @nn.compact
-                def __call__(self, x, training=True):
-                    for i, hidden_size in enumerate(self.hidden_sizes):
-                        x = nn.Dense(hidden_size, name=f'hidden_{i}')(x)
-                        x = nn.swish(x)
-                        if i < len(self.hidden_sizes) - 1:
-                            x = nn.LayerNorm(name=f'layer_norm_{i}')(x)
-                    
-                    # Output layer - 12 sufficient statistics
-                    x = nn.Dense(12, name='output')(x)
-                    return x
-            
-            return StandardMLPETModel(hidden_sizes=self.hidden_sizes)
+        from src.models.mlp_ET import MLPNetwork
+        # Create proper network config
+        from src.config import NetworkConfig
+        network_config = NetworkConfig()
+        network_config.hidden_sizes = self.hidden_sizes
+        network_config.activation = "swish"
+        network_config.use_layer_norm = True
+        network_config.output_dim = 12  # 3D Gaussian sufficient statistics
+        return MLPNetwork(config=network_config)
     
     def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
         """Train the model."""
@@ -155,10 +115,24 @@ def main():
     print("Training Standard MLP ET Model")
     print("=" * 40)
     
-    # Generate test data
-    print("Generating test data...")
-    eta_data, ground_truth = generate_simple_test_data(n_samples=400, seed=42)
+    # Load test data from easy_3d_gaussian
+    print("Loading test data from easy_3d_gaussian...")
+    data_file = Path("data/easy_3d_gaussian.pkl")
+    
+    import pickle
+    with open(data_file, 'rb') as f:
+        data = pickle.load(f)
+    
+    eta_data = data["train"]["eta"]
+    ground_truth = data["train"]["mean"]
     print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
+    
+    # Purge cov_tt to save memory
+    if "cov" in data["train"]: del data["train"]["cov"]
+    if "cov" in data["val"]: del data["val"]["cov"]
+    if "cov" in data["test"]: del data["test"]["cov"]
+    import gc; gc.collect()
+    print("✅ Purged cov_tt elements from memory for optimization")
     
     # Define architectures to test
     architectures = {
@@ -212,69 +186,26 @@ def main():
     print(f"\n🏆 Best Model: {best_model} with MSE={best_mse:.6f}")
     
     # Create output directory
-    output_dir = Path("artifacts/ET_models/standard_mlp_ET")
+    output_dir = Path("artifacts/ET_models/mlp_ET")
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Plot training curves
-    plt.figure(figsize=(12, 8))
-    
-    # Plot 1: Training curves
-    plt.subplot(2, 2, 1)
-    for model_name, result in results.items():
-        plt.plot(result['losses'], label=model_name, alpha=0.7)
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training Curves')
-    plt.legend()
-    plt.yscale('log')
-    
-    # Plot 2: MSE comparison
-    plt.subplot(2, 2, 2)
-    model_names = list(results.keys())
-    mse_values = [results[name]['mse'] for name in model_names]
-    plt.bar(range(len(model_names)), mse_values)
-    plt.xticks(range(len(model_names)), model_names, rotation=45)
-    plt.ylabel('MSE')
-    plt.title('MSE Comparison')
-    plt.yscale('log')
-    
-    # Plot 3: MAE comparison
-    plt.subplot(2, 2, 3)
-    mae_values = [results[name]['mae'] for name in model_names]
-    plt.bar(range(len(model_names)), mae_values)
-    plt.xticks(range(len(model_names)), model_names, rotation=45)
-    plt.ylabel('MAE')
-    plt.title('MAE Comparison')
-    plt.yscale('log')
-    
-    # Plot 4: Architecture comparison (parameter count estimation)
-    plt.subplot(2, 2, 4)
-    param_counts = []
-    for model_name, result in results.items():
-        # Rough estimation: input(12) * first_hidden + hidden_layers + last_hidden * output(12)
-        hidden_sizes = result['hidden_sizes']
-        if len(hidden_sizes) == 0:
-            param_count = 12 * 12  # Direct mapping
-        else:
-            param_count = 12 * hidden_sizes[0]  # Input layer
-            for i in range(len(hidden_sizes) - 1):
-                param_count += hidden_sizes[i] * hidden_sizes[i + 1]  # Hidden layers
-            param_count += hidden_sizes[-1] * 12  # Output layer
-        param_counts.append(param_count)
-    
-    plt.bar(range(len(model_names)), param_counts)
-    plt.xticks(range(len(model_names)), model_names, rotation=45)
-    plt.ylabel('Estimated Parameters')
-    plt.title('Parameter Count Comparison')
-    plt.yscale('log')
-    
-    plt.tight_layout()
-    plt.savefig(output_dir / 'training_comparison.png', dpi=150, bbox_inches='tight')
-    plt.close()
+    # Create model comparison plots using standardized plotting function
+    plot_model_comparison(
+        results=results,
+        output_dir=str(output_dir),
+        save_plots=True,
+        show_plots=False
+    )
     
     # Save results
     with open(output_dir / 'results.json', 'w') as f:
             json.dump(results, f, indent=2)
+    
+    # Save results summary using standardized function
+    save_results_summary(
+        results=results,
+        output_dir=str(output_dir)
+    )
         
     print(f"\n✅ Standard MLP ET training complete!")
     print(f"📁 Results saved to {output_dir}")
