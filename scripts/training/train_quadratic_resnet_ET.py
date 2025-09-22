@@ -1,235 +1,230 @@
 #!/usr/bin/env python3
 """
-Training script for Quadratic ResNet model.
+Training script for Quadratic ResNet ET model.
 
-This script trains, evaluates, and plots results for a Quadratic ResNet
-on the natural parameter to statistics mapping task.
+This script trains, evaluates, and plots results for a Quadratic ResNet ET
+on the natural parameter to statistics mapping task using standardized
+template-based data loading and dimension-agnostic processing.
 """
 
 import sys
 from pathlib import Path
 import time
 import json
+import jax
 import jax.numpy as jnp
+from jax import random
+# matplotlib import removed - now using standardized plotting
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add src to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from src.config import get_quadratic_config, FullConfig
-from src.models.quadratic_resnet_ET import create_model_and_trainer
-from src.utils.data_utils import load_3d_gaussian_data, compute_ground_truth_3d_tril
-# from plotting.model_comparison import create_comprehensive_report  # TODO: Create plotting module
+# Import standardized plotting functions
+sys.path.append(str(Path(__file__).parent.parent))
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
 
+# Import dimension inference utility and standardized data loading from template
+from src.utils.data_utils import infer_dimensions
+sys.path.append(str(Path(__file__).parent))
+from src.utils.data_utils import load_standardized_ep_data
 
-# =============================================================================
-# CONFIGURATION - Edit these parameters to modify the experiment
-# =============================================================================
+# Simple configuration class
+class SimpleConfig:
+    def __init__(self, hidden_sizes, activation="swish"):
+        self.hidden_sizes = hidden_sizes
+        self.activation = activation
+        self.use_layer_norm = False
 
-# Model Configuration
-MODEL_CONFIG = "custom"  # Use custom config for deep narrow
-
-# Deep narrow quadratic ResNet configuration
-CUSTOM_CONFIG = FullConfig()
-CUSTOM_CONFIG.network.hidden_sizes = [96] * 10  # 10 layers x 96 units (deep narrow)
-CUSTOM_CONFIG.network.activation = "tanh"
-CUSTOM_CONFIG.network.use_feature_engineering = True
-CUSTOM_CONFIG.network.residual_connections = True
-CUSTOM_CONFIG.network.output_dim = 9  # For tril format
-
-# Quadratic-specific parameters
-CUSTOM_CONFIG.model_specific.use_quadratic_terms = True
-CUSTOM_CONFIG.model_specific.quadratic_mixing = "adaptive"
-
-CUSTOM_CONFIG.training.learning_rate = 8e-4
-CUSTOM_CONFIG.training.num_epochs = 120
-CUSTOM_CONFIG.training.batch_size = 32
-CUSTOM_CONFIG.training.patience = 25
-CUSTOM_CONFIG.training.weight_decay = 1e-5
-CUSTOM_CONFIG.training.gradient_clip_norm = 0.8
-
-CUSTOM_CONFIG.experiment.experiment_name = "quadratic_resnet_deep_narrow"
-CUSTOM_CONFIG.experiment.output_dir = "artifacts/ET_models/quadratic_resnet_ET"
-
-# Loss Function
-LOSS_FUNCTION = "mse"  # Standard MSE loss
-
-# =============================================================================
-
+class SimpleQuadraticResNetET:
+    """Quadratic ResNet ET using official implementation."""
+    
+    def __init__(self, hidden_sizes=[64, 64], eta_dim=None):
+        self.hidden_sizes = hidden_sizes
+        self.eta_dim = eta_dim
+        self.config = SimpleConfig(hidden_sizes=hidden_sizes, activation="swish")
+    
+    def create_model_and_trainer(self):
+        """Create the model and trainer using the official implementation."""
+        from src.models.quadratic_resnet_ET import create_model_and_trainer
+        # Create proper network config using inferred dimensions
+        from src.config import NetworkConfig, FullConfig, TrainingConfig
+        
+        # For ET models, input and output dimensions should be the same
+        if self.eta_dim is None:
+            raise ValueError("eta_dim must be provided. Call infer_dimensions() first.")
+        
+        input_dim = self.eta_dim
+        output_dim = self.eta_dim  # ET models predict expected statistics
+        
+        network_config = NetworkConfig(
+            hidden_sizes=self.hidden_sizes,
+            activation="swish",
+            use_layer_norm=True,
+            input_dim=input_dim,
+            output_dim=output_dim
+        )
+        
+        training_config = TrainingConfig(
+            learning_rate=1e-3,
+            num_epochs=300,
+            batch_size=32,
+            patience=50
+        )
+        
+        full_config = FullConfig(network=network_config, training=training_config)
+        return create_model_and_trainer(full_config)
+    
+    def train(self, train_data, val_data, epochs=300, learning_rate=1e-3):
+        """Train the model using pre-split data and measure training time."""
+        start_time = time.time()
+        
+        trainer = self.create_model_and_trainer()
+        
+        # Train model using the pre-split data (BaseTrainer doesn't take epochs/learning_rate as arguments)
+        best_params, training_history = trainer.train(
+            train_data=train_data,
+            val_data=val_data
+        )
+        
+        training_time = time.time() - start_time
+        
+        return best_params, training_history['train_loss'], training_time
+    
+    def predict(self, trainer, params, eta_data):
+        """Make predictions."""
+        return trainer.predict(params, eta_data)
+    
+    def benchmark_inference(self, trainer, params, eta_data, num_runs=50):
+        """Benchmark inference time with multiple runs for accuracy."""
+        # Warm-up run to ensure compilation is complete
+        _ = trainer.predict(params, eta_data[:1])
+        
+        # Measure inference time over multiple runs
+        times = []
+        for _ in range(num_runs):
+            start_time = time.time()
+            _ = trainer.predict(params, eta_data)
+            times.append(time.time() - start_time)
+        
+        # Return statistics
+        avg_time = sum(times) / len(times)
+        min_time = min(times)
+        max_time = max(times)
+        
+        return {
+            'avg_inference_time': avg_time,
+            'min_inference_time': min_time,
+            'max_inference_time': max_time,
+            'samples_per_second': len(eta_data) / avg_time,
+            'std_inference_time': jnp.std(jnp.array(times))
+        }
+    
+    def evaluate(self, trainer, params, eta_data, ground_truth):
+        """Evaluate model performance."""
+        predictions = self.predict(trainer, params, eta_data)
+        mse = float(jnp.mean((predictions - ground_truth) ** 2))
+        mae = float(jnp.mean(jnp.abs(predictions - ground_truth)))
+        
+        return {
+            "mse": mse,
+            "mae": mae,
+            "predictions": predictions
+        }
 
 def main():
     """Main training and evaluation pipeline."""
+    print("Training Quadratic ResNet ET Model")
+    print("=" * 40)
     
-    print("🔥 QUADRATIC RESNET TRAINING")
-    print("=" * 50)
+    # Load data using standardized template function (dimension-agnostic)
+    eta_data, ground_truth, metadata = load_standardized_ep_data()
     
-    # Load configuration
-    if MODEL_CONFIG == "quadratic":
-        config = get_quadratic_config()
-        print(f"Using predefined quadratic config")
-    else:
-        config = CUSTOM_CONFIG
-        print("Using custom deep narrow configuration")
-    
-    # Override output settings
-    config.experiment.experiment_name = config.experiment.experiment_name or "quadratic_resnet_experiment"
-    config.experiment.output_dir = config.experiment.output_dir or "artifacts/ET_models/quadratic_resnet_ET"
-    
-    print(f"Experiment: {config.experiment.experiment_name}")
-    print(f"Architecture: {config.network.hidden_sizes}")
-    print(f"Quadratic Terms: {config.model_specific.use_quadratic_terms}")
-    print(f"Quadratic Mixing: {config.model_specific.quadratic_mixing}")
-    print(f"Learning Rate: {config.training.learning_rate}")
-    print(f"Batch Size: {config.training.batch_size}")
-    print(f"Loss Function: {LOSS_FUNCTION}")
-    
-    # Load data
-    print("\n📊 Loading data...")
-    data_file = Path("data/easy_3d_gaussian.pkl")
-    
-    import pickle
-    with open(data_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    # Create train/val/test splits with correct structure
-    train_data = {"eta": data["train"]["eta"], "stats": data["train"]["mean"]}
-    val_data = {"eta": data["val"]["eta"], "stats": data["val"]["mean"]}
-    
-    # Purge cov_tt to save memory
-    if "cov" in data["train"]: del data["train"]["cov"]
-    if "cov" in data["val"]: del data["val"]["cov"]
-    if "cov" in data["test"]: del data["test"]["cov"]
-    import gc; gc.collect()
-    print("✅ Purged cov_tt elements from memory for optimization")
-    
-    # Create test split from validation data
-    n_val = val_data["eta"].shape[0]
-    n_test = min(n_val // 2, 500)
-    
-    test_data = {
-        "eta": val_data["eta"][:n_test],
-        "y": val_data["stats"][:n_test]
+    # Define architecture to test (deep 8-layer network)
+    architectures = {
+        "Deep": [64, 64, 64, 64, 64, 64, 64, 64]
     }
     
-    val_data = {
-        "eta": val_data["eta"][n_test:],
-        "stats": val_data["stats"][n_test:]
-    }
+    results = {}
     
-    print(f"Training samples: {train_data['eta'].shape[0]}")
-    print(f"Validation samples: {val_data['eta'].shape[0]}")
-    print(f"Test samples: {test_data['eta'].shape[0]}")
-    print(f"Input dimension: {train_data['eta'].shape[1]}")
-    print(f"Output dimension: {train_data['stats'].shape[1]}")
-    
-    # Use test data directly (ground truth is already in test_data['y'])
-    print("\n🎯 Using test data as ground truth...")
-    ground_truth = test_data['y']
-    print(f"Ground truth shape: {ground_truth.shape}")
-    
-    # Create model and trainer
-    print("\n🏗️  Creating Quadratic ResNet model...")
-    trainer = create_model_and_trainer(config)
-    
-    # Train model
-    print("\n🚂 Training model...")
-    start_time = time.time()
-    
-    try:
-        best_params, history = trainer.train(train_data, val_data)
-        training_time = time.time() - start_time
+    # Test the architecture
+    for arch_name, hidden_sizes in architectures.items():
+        print(f"\nTraining QuadResNet_ET_{arch_name} with hidden sizes: {hidden_sizes}")
         
-        print(f"✅ Training completed in {training_time:.1f}s")
+        # Infer dimensions from metadata
+        eta_dim = infer_dimensions(train_data['eta'], metadata=metadata)
+        model_wrapper = SimpleQuadraticResNetET(hidden_sizes=hidden_sizes, eta_dim=eta_dim)
         
-        # Evaluate model
-        print("\n📈 Evaluating model...")
-        metrics = trainer.evaluate(best_params, test_data, ground_truth)
+        trainer = model_wrapper.create_model_and_trainer()
         
-        print(f"Test MSE (vs Empirical): {metrics['mse']:.2f}")
-        print(f"Test MAE (vs Empirical): {metrics['mae']:.2f}")
-        if 'ground_truth_mse' in metrics:
-            print(f"Test MSE (vs Ground Truth): {metrics['ground_truth_mse']:.2f}")
-            print(f"Test MAE (vs Ground Truth): {metrics['ground_truth_mae']:.2f}")
+        # Train
+        print("🚂 Training...")
+        params, losses, training_time = model_wrapper.train(train_data, val_data, epochs=300)
         
-        # Prepare results
-        param_count = trainer.model.get_parameter_count(best_params)
+        # Evaluate
+        print("📊 Evaluating...")
+        metrics = model_wrapper.evaluate(trainer, params, train_data['eta'], train_data['y'])
         
-        results = {
-            'Quadratic ResNet': {
-                'status': 'success',
-                'metrics': metrics,
-                'history': history,
-                'training_time': training_time,
-                'architecture_info': {
-                    'hidden_sizes': config.network.hidden_sizes,
-                    'parameter_count': param_count,
-                    'depth': len(config.network.hidden_sizes),
-                    'activation': config.network.activation,
-                    'quadratic_terms': config.model_specific.use_quadratic_terms
-                },
-                'config': config.to_dict()
-            }
+        # Benchmark inference
+        print("⚡ Benchmarking inference...")
+        inference_stats = model_wrapper.benchmark_inference(trainer, params, train_data['eta'])
+        
+        results[f"QuadResNet_ET_{arch_name}"] = {
+            "hidden_sizes": hidden_sizes,
+            "mse": metrics["mse"],
+            "mae": metrics["mae"],
+            "training_time": training_time,
+            "inference_stats": inference_stats,
+            "final_train_loss": losses[-1] if losses else float('inf')
         }
         
-        # Save model
-        if config.experiment.save_model:
-            save_dir = Path(config.experiment.output_dir) / "model"
-            trainer.save_model(best_params, save_dir)
+        predictions = metrics["predictions"]
         
-        # Create plots and report
-        if config.experiment.save_plots:
-            print("\n📊 Creating plots and report...")
-            output_dir = Path(config.experiment.output_dir)
-            create_comprehensive_report(results, output_dir, config.experiment.experiment_name)
+        # Store detailed results
+        detailed_results = {
+            "test_metrics": metrics,
+            "architecture": hidden_sizes,
+            "model_name": f"QuadResNet_ET_{arch_name}",
+            "predictions": predictions,
+            "ground_truth": train_data['y'],
+            "training_time": training_time,
+            "inference_stats": inference_stats
+        }
         
-        # Save detailed results
-        results_file = Path(config.experiment.output_dir) / "results.json"
-        results_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(results_file, 'w') as f:
-            def convert_for_json(obj):
-                if hasattr(obj, 'tolist'):
-                    return obj.tolist()
-                elif isinstance(obj, dict):
-                    return {k: convert_for_json(v) for k, v in obj.items()}
-                elif isinstance(obj, (list, tuple)):
-                    return [convert_for_json(item) for item in obj]
+        print(f"  MSE: {metrics['mse']:.6f}")
+        print(f"  MAE: {metrics['mae']:.6f}")
+        print(f"  Training time: {training_time:.2f}s")
+        print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+    
+    print(f"\n🏆 Best Model: QuadResNet_ET_Deep with MSE={results['QuadResNet_ET_Deep']['mse']:.6f}")
+    
+    # Create output directory
+    output_dir = Path("artifacts/ET_models/quadratic_resnet_ET")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save results
+    results_file = output_dir / "training_results.json"
+    with open(results_file, 'w') as f:
+        # Convert numpy arrays to lists for JSON serialization
+        json_results = {}
+        for key, value in results.items():
+            json_results[key] = {}
+            for k, v in value.items():
+                if hasattr(v, 'tolist'):
+                    json_results[key][k] = v.tolist()
                 else:
-                    return obj
-            
-            json.dump(convert_for_json(results), f, indent=2)
-        
-        print(f"📁 Results saved to {config.experiment.output_dir}")
-        
-        # Final summary
-        print(f"\n🏆 FINAL RESULTS:")
-        print(f"  Model: Quadratic ResNet")
-        print(f"  Architecture: {len(config.network.hidden_sizes)} layers x {config.network.hidden_sizes[0]} units")
-        print(f"  Parameters: {param_count:,}")
-        print(f"  Training Time: {training_time:.1f}s")
-        print(f"  Best MSE (Ground Truth): {metrics.get('ground_truth_mse', metrics['mse']):.2f}")
-        print(f"  MCMC Error Bound: {empirical_mse:.6f}")
-        
-    except Exception as e:
-        print(f"❌ Training failed: {str(e)}")
-        
-        # Save failure information
-        results = {
-            'Quadratic ResNet': {
-                'status': 'failed',
-                'error': str(e),
-                'training_time': time.time() - start_time,
-                'config': config.to_dict()
-            }
-        }
-        
-        results_file = Path(config.experiment.output_dir) / "results.json"
-        results_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(results_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        raise
+                    json_results[key][k] = v
+        json.dump(json_results, f, indent=2)
+    
+    print(f"\n✅ Quadratic ResNet ET training complete!")
+    print(f"📁 Results saved to {output_dir}")
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Train Quadratic ResNet ET model")
+    parser.add_argument("--data_file", type=str, default=None,
+                      help="Path to training data file (default: data/easy_3d_gaussian.pkl)")
+    
+    args = parser.parse_args()
     main()

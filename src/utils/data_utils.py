@@ -8,51 +8,73 @@ import jax.numpy as jnp
 from jax import Array
 from ..ef import MultivariateNormal_tril
 
-def load_training_data(data_file: str, purge_cov_tt: bool = True) -> Tuple[Dict[str, Array], Dict[str, Array], str]:
+def infer_dimensions(eta_data: Array, metadata: Optional[Dict] = None) -> int:
     """
-    Load training data from a pickle file (JAX native format).
+    Infer eta dimensions from the data or metadata.
+    
+    Args:
+        eta_data: Input eta data array
+        metadata: Optional metadata dictionary containing dimension info
+        
+    Returns:
+        int: The inferred eta dimension
+    """
+    if metadata is not None and 'eta_dim' in metadata:
+        eta_dim = metadata['eta_dim']
+        print(f"Using eta_dim from metadata: {eta_dim}")
+        
+        # Print additional metadata info if available
+        if 'ef_distribution_name' in metadata:
+            print(f"Exponential family: {metadata['ef_distribution_name']}")
+        if 'x_shape' in metadata:
+            print(f"Data shape x: {metadata['x_shape']}")
+        if 'x_dim' in metadata:
+            print(f"Data x dimension: {metadata['x_dim']}")
+    else:
+        eta_dim = eta_data.shape[-1]
+        print(f"Inferred eta_dim from data shape: {eta_dim}")
+    
+    return eta_dim
+
+def load_data_with_metadata(data_file: str) -> Dict:
+    """
+    Load training data using metadata to determine format - completely dimension-agnostic.
     
     Args:
         data_file: Path to the training data pickle file
-        purge_cov_tt: If True, removes cov_tt elements from memory to save space
-        
+    
     Returns:
-        Tuple of (train_data, val_data, config_hash)
-        where train_data and val_data are dicts with 'eta' and 'y' keys
+        Dictionary with train/val/test splits and metadata in whatever format is specified
     """
-    with open(data_file, "rb") as f:
+    import pickle
+    from pathlib import Path
+    
+    data_path = Path(data_file)
+    if not data_path.exists():
+        raise FileNotFoundError(f"Data file not found: {data_file}")
+    
+    print(f"Loading data from {data_file}...")
+    with open(data_path, 'rb') as f:
         data = pickle.load(f)
     
-    train_data = {
-        "eta": data["train_eta"],
-        "y": data["train_y"]
-    }
-    val_data = {
-        "eta": data["val_eta"],
-        "y": data["val_y"]
-    }
+    # Extract format information from metadata
+    metadata = data.get('metadata', {})
+    eta_dim = metadata.get('eta_dim', data['train']['eta'].shape[-1])
+    ef_name = metadata.get('ef_distribution_name', 'unknown')
     
-    # Include covariance data if available and not purging
-    if not purge_cov_tt:
-        if "train_cov" in data:
-            train_data["cov"] = data["train_cov"]
-        if "val_cov" in data:
-            val_data["cov"] = data["val_cov"]
-    else:
-        # Explicitly delete cov_tt elements from memory to save space
-        if "train_cov" in data:
-            del data["train_cov"]
-        if "val_cov" in data:
-            del data["val_cov"]
-        # Force garbage collection to free memory immediately
-        import gc
-        gc.collect()
+    print(f"📊 Data format from metadata:")
+    print(f"  eta_dim: {eta_dim}")
+    print(f"  ef_distribution_name: {ef_name}")
+    print(f"  Using data as-is (dimension-agnostic)")
     
-    # Extract config hash from filename
-    config_hash = Path(data_file).stem.split("_")[-1]
+    # Purge cov_TT to save memory
+    for split in ['train', 'val', 'test']:
+        if split in data and "cov_TT" in data[split]:
+            del data[split]["cov_TT"]
+    import gc; gc.collect()
+    print("✅ Purged cov_tt elements from memory for optimization")
     
-    return train_data, val_data, config_hash
-
+    return data
 
 def list_data_files(data_dir: str = "data") -> list[Path]:
     """List all available training data files."""
@@ -251,3 +273,24 @@ def compute_ground_truth_3d_tril(eta: jnp.ndarray, ef: MultivariateNormal_tril) 
     expected_stats = jnp.concatenate([mu, expected_xxT_tril], axis=1)  # Shape: (batch_size, 9)
     
     return expected_stats
+
+
+def load_standardized_ep_data(data_file="data/easy_3d_gaussian.pkl"):
+    """Load and prepare standardized exponential family training data with memory optimization."""
+    print(f"Loading test data from {data_file}...")
+    
+    with open(data_file, 'rb') as f:
+        data = pickle.load(f)
+    
+    eta_data = data["train"]["eta"]
+    ground_truth = data["train"]["mu_T"]
+    print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
+    
+    # Purge cov_TT to save memory
+    if "cov_TT" in data["train"]: del data["train"]["cov_TT"]
+    if "cov_TT" in data["val"]: del data["val"]["cov_TT"]
+    if "cov_TT" in data["test"]: del data["test"]["cov_TT"]
+    import gc; gc.collect()
+    print("✅ Purged cov_tt elements from memory for optimization")
+    
+    return eta_data, ground_truth, data.get('metadata', {})

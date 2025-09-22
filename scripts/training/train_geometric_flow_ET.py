@@ -14,10 +14,6 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-import numpy as np
-import jax.numpy as jnp
-from jax import random
-# matplotlib import removed - now using standardized plotting
 import pickle
 import time
 
@@ -30,145 +26,9 @@ from plot_training_results import plot_training_results, plot_model_comparison, 
 
 from src.config import FullConfig
 from src.ef import ef_factory
-from src.models.geometric_flow_net import create_geometric_flow_et_network
+from src.models.geometric_flow_net import create_model_and_trainer
 
-
-# Plotting function removed - now using standardized plotting from scripts/plot_training_results.py
-def _removed_plot_geometric_flow_results(trainer, eta_data, ground_truth, predictions, history, config, save_dir):
-    """Create comprehensive plots for geometric flow training results."""
-    
-    # Create figure with subplots
-    fig = plt.figure(figsize=(20, 15))
-    
-    # 1. Training curves
-    plt.subplot(3, 4, 1)
-    if 'train_loss' in history:
-        plt.plot(history['train_loss'], 'b-', linewidth=2, label='Train')
-    if 'val_loss' in history:
-        plt.plot(history['val_loss'], 'r-', linewidth=2, label='Validation')
-    plt.title('Training Loss', fontsize=14, fontweight='bold')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.yscale('log')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # 2. Predictions vs Ground Truth (overall)
-    plt.subplot(3, 4, 2)
-    plt.scatter(ground_truth.flatten(), predictions.flatten(), alpha=0.6, s=15)
-    min_val = min(ground_truth.min(), predictions.min())
-    max_val = max(ground_truth.max(), predictions.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
-    plt.xlabel('Ground Truth')
-    plt.ylabel('Predictions')
-    plt.title('Overall Predictions', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    
-    # 3. Component-wise MSE
-    plt.subplot(3, 4, 3)
-    component_mse = np.mean((predictions - ground_truth) ** 2, axis=0)
-    plt.bar(range(len(component_mse)), component_mse, alpha=0.7)
-    plt.xlabel('Component Index')
-    plt.ylabel('MSE')
-    plt.title('Component-wise Errors', fontsize=14, fontweight='bold')
-    plt.yscale('log')
-    plt.grid(True, alpha=0.3)
-    
-    # 4. Flow distances (if available)
-    plt.subplot(3, 4, 4)
-    if hasattr(trainer, 'last_flow_distances'):
-        plt.hist(trainer.last_flow_distances, bins=20, alpha=0.7, color='orange')
-        plt.xlabel('Flow Distance ||η₁ - η₀||')
-        plt.ylabel('Frequency')
-        plt.title('Flow Distance Distribution', fontsize=14, fontweight='bold')
-    else:
-        plt.text(0.5, 0.5, 'Flow distances\nnot available', ha='center', va='center', 
-                transform=plt.gca().transAxes, fontsize=12)
-        plt.title('Flow Distances', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    
-    # 5-8. Component-wise predictions for linear terms (first 3)
-    for i in range(min(3, ground_truth.shape[1])):
-        plt.subplot(3, 4, 5 + i)
-        plt.scatter(ground_truth[:, i], predictions[:, i], alpha=0.6, s=20)
-        min_val = ground_truth[:, i].min()
-        max_val = ground_truth[:, i].max()
-        plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
-        plt.xlabel(f'True μ_{i+1}')
-        plt.ylabel(f'Pred μ_{i+1}')
-        plt.title(f'Linear Component {i+1}', fontsize=12, fontweight='bold')
-        plt.grid(True, alpha=0.3)
-    
-    # 9. Residuals analysis
-    plt.subplot(3, 4, 9)
-    residuals = predictions - ground_truth
-    plt.hist(residuals.flatten(), bins=30, alpha=0.7, color='purple')
-    plt.xlabel('Residuals')
-    plt.ylabel('Frequency')
-    plt.title('Residual Distribution', fontsize=14, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    
-    # 10. Error vs flow distance (if available)
-    plt.subplot(3, 4, 10)
-    if hasattr(trainer, 'last_flow_distances'):
-        prediction_errors = np.linalg.norm(predictions - ground_truth, axis=1)
-        plt.scatter(trainer.last_flow_distances, prediction_errors, alpha=0.6, s=20)
-        plt.xlabel('Flow Distance')
-        plt.ylabel('Prediction Error')
-        plt.title('Error vs Flow Distance', fontsize=12, fontweight='bold')
-    else:
-        plt.text(0.5, 0.5, 'Flow distance\nanalysis\nnot available', ha='center', va='center',
-                transform=plt.gca().transAxes, fontsize=10)
-        plt.title('Error Analysis', fontsize=12, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    
-    # 11. Model architecture info
-    plt.subplot(3, 4, 11)
-    info_text = [
-        f'Architecture: {trainer.architecture}',
-        f'Matrix Rank: {trainer.matrix_rank}',
-        f'Time Steps: {trainer.n_time_steps}',
-        f'Smoothness Weight: {trainer.smoothness_weight}',
-        f'Time Embed Dim: {trainer.model.time_embed_dim}',
-        f'Max Frequency: {trainer.model.max_freq}',
-        f'Final MSE: {np.mean((predictions - ground_truth) ** 2):.2e}',
-        f'Final MAE: {np.mean(np.abs(predictions - ground_truth)):.2e}'
-    ]
-    
-    for i, text in enumerate(info_text):
-        plt.text(0.05, 0.9 - i*0.1, text, fontsize=11, transform=plt.gca().transAxes)
-    plt.title('Model Configuration', fontsize=12, fontweight='bold')
-    plt.axis('off')
-    
-    # 12. Time embedding visualization
-    plt.subplot(3, 4, 12)
-    # Show time embedding for a few time points
-    t_points = jnp.linspace(0, 1, 11)
-    embeddings = []
-    for t in t_points:
-        # Create dummy network instance to get embedding
-        embed = trainer.model._time_embedding(float(t))
-        embeddings.append(embed)
-    
-    embeddings = jnp.array(embeddings)
-    plt.imshow(embeddings.T, aspect='auto', cmap='RdBu', interpolation='bilinear')
-    plt.xlabel('Time Point')
-    plt.ylabel('Embedding Dimension')
-    plt.title('Time Embeddings', fontsize=12, fontweight='bold')
-    plt.colorbar()
-    
-    plt.suptitle(f'Geometric Flow ET Network - 3D Multivariate Gaussian', fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    
-    # Save plots
-    save_path = Path(save_dir) / 'geometric_flow_et_results.png'
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"Results plot saved to: {save_path}")
-    
-    plt.show()
-
-
-def create_simple_config():
+def create_simple_config(eta_dim):
     """Create a simple configuration for geometric flow training."""
     from src.config import NetworkConfig, TrainingConfig
     
@@ -176,7 +36,7 @@ def create_simple_config():
         hidden_sizes=[128, 64, 32],
         use_layer_norm=True,
         dropout_rate=0.0,
-        output_dim=12  # For 3D Gaussian
+        output_dim=eta_dim  # Use inferred dimension
     )
     
     training_config = TrainingConfig(
@@ -191,58 +51,52 @@ def create_simple_config():
 def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
     """Train geometric flow ET network on 3D Gaussian data."""
     
-    # Create configuration
-    config = create_simple_config()
-    print(f"Using simple configuration for geometric flow training")
-    
     # Create save directory
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     
-    # Generate or load data (store in data directory, not artifacts)
-    data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
-    data_file = data_dir / "geometric_flow_training_data.pkl"
+    # Load data from standard data file
+    data_file = Path("data/easy_3d_gaussian.pkl")
+    if not data_file.exists():
+        print("Easy 3D Gaussian dataset not found. Please run:")
+        print("python scripts/generate_normal_data.py --difficulty Easy --dim 3")
+        return
+        
+    print("Loading training data from standard data file...")
+    with open(data_file, 'rb') as f:
+        data = pickle.load(f)
     
-    if plot_only and data_file.exists():
-        print("Loading existing training data for plotting...")
-        with open(data_file, 'rb') as f:
-            data = pickle.load(f)
-        eta_train, mu_train = data['eta_train'], data['mu_train']
-        eta_val, mu_val = data['eta_val'], data['mu_val']
+    eta_train = data['train']['eta']
+    mu_train = data['train']['mu_T']
+    eta_val = data['val']['eta']
+    mu_val = data['val']['mu_T']
+    
+    # Infer dimensions from metadata or data
+    if 'metadata' in data and 'eta_dim' in data['metadata']:
+        eta_dim = data['metadata']['eta_dim']
+        print(f"Using eta_dim from metadata: {eta_dim}")
+        
+        # Print additional metadata info if available
+        if 'ef_distribution_name' in data['metadata']:
+            print(f"Exponential family: {data['metadata']['ef_distribution_name']}")
+        if 'x_shape' in data['metadata']:
+            print(f"Data shape x: {data['metadata']['x_shape']}")
+        if 'x_dim' in data['metadata']:
+            print(f"Data dimension: {data['metadata']['x_dim']}")
     else:
-        print("Generating new training data...")
-        # Load easy_3d_gaussian data
-        data_file = Path("data/easy_3d_gaussian.pkl")
-        if not data_file.exists():
-            print("Easy 3D Gaussian dataset not found. Please ensure data/easy_3d_gaussian.pkl exists.")
-            return
-            
-        with open(data_file, 'rb') as f:
-            comparison_data = pickle.load(f)
-        
-        eta_train = comparison_data['train']['eta']
-        mu_train = comparison_data['train']['mean']
-        eta_val = comparison_data['val']['eta']
-        mu_val = comparison_data['val']['mean']
-        
-        # Purge cov_tt to save memory
-        if "cov" in comparison_data["train"]: del comparison_data["train"]["cov"]
-        if "cov" in comparison_data["val"]: del comparison_data["val"]["cov"]
-        if "cov" in comparison_data["test"]: del comparison_data["test"]["cov"]
-        import gc; gc.collect()
-        print("✅ Purged cov_tt elements from memory for optimization")
-        
-        # Save data to data directory
-        data = {
-            'eta_train': eta_train,
-            'mu_train': mu_train,
-            'eta_val': eta_val,
-            'mu_val': mu_val
-        }
-        with open(data_file, 'wb') as f:
-            pickle.dump(data, f)
-        print(f"Training data saved to: {data_file} (in data/ directory)")
+        eta_dim = eta_train.shape[-1]
+        print(f"Inferred eta_dim from data shape: {eta_dim}")
+    
+    # Create configuration
+    config = create_simple_config(eta_dim)
+    print(f"Using simple configuration for geometric flow training")
+    
+    # Purge cov_TT to save memory
+    if "cov_TT" in data["train"]: del data["train"]["cov_TT"]
+    if "cov_TT" in data["val"]: del data["val"]["cov_TT"]
+    if "cov_TT" in data["test"]: del data["test"]["cov_TT"]
+    import gc; gc.collect()
+    print("✅ Purged cov_TT elements from memory for optimization")
     
     print(f"Training data: {eta_train.shape[0]} samples")
     print(f"Validation data: {eta_val.shape[0]} samples")
@@ -253,9 +107,8 @@ def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
     ef = ef_factory("multivariate_normal", x_shape=(3,))
     
     # Create and configure trainer
-    trainer = create_geometric_flow_et_network(
+    trainer = create_model_and_trainer(
         config=config,
-        architecture="mlp",
         matrix_rank=8,  # Reduced rank for efficiency
         n_time_steps=3,  # Minimal due to smoothness
         smoothness_weight=1e-3
@@ -265,7 +118,7 @@ def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
     trainer.set_exponential_family(ef)
     
     print(f"Geometric Flow ET Network Configuration:")
-    print(f"  Architecture: {trainer.architecture}")
+    print(f"  Architecture: {getattr(trainer.config.network, 'architecture', 'mlp')}")
     print(f"  Matrix rank: {trainer.matrix_rank}")
     print(f"  Time steps: {trainer.n_time_steps}")
     print(f"  Smoothness weight: {trainer.smoothness_weight}")
@@ -310,8 +163,19 @@ def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
     
     # Training
     print(f"\nStarting Geometric Flow ET training...")
+    
+    # Train using the model's specialized training method with progress tracking
+    print(f"Training Geometric Flow Network")
+    print(f"  Architecture: {getattr(trainer.config.network, 'architecture', 'mlp')}")
+    print(f"  Matrix rank: {trainer.matrix_rank}")
+    print(f"  Time steps: {trainer.n_time_steps}")
+    print(f"  Training samples: {eta_train.shape[0]}")
+    print(f"  η dimension: {eta_train.shape[1]}")
+    print(f"  μ dimension: estimated 12 for 3D Gaussian")
+    
     start_time = time.time()
     
+    print("🚂 Starting geometric flow training...")
     params, history = trainer.train(
         eta_targets_train=eta_train,
         eta_targets_val=eta_val,
@@ -321,7 +185,7 @@ def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
     )
     
     training_time = time.time() - start_time
-    print(f"Training completed in {training_time:.1f}s")
+    print(f"\n✓ Geometric Flow Network training completed in {training_time:.1f}s")
     
     # Save model and history
     model_file = save_dir / "geometric_flow_et_params.pkl"

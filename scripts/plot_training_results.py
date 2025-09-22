@@ -13,6 +13,40 @@ from typing import Dict, List, Optional, Any, Union
 import pickle
 
 
+def create_standardized_results(model_name, architecture_info, metrics, losses, 
+                               training_time, inference_stats, predictions, ground_truth):
+    """
+    Create a standardized results dictionary for all models.
+    
+    Args:
+        model_name: Name of the model (e.g., "MLP_ET_Medium", "MLP_LogZ_Medium")
+        architecture_info: Dictionary with architecture details (e.g., {"hidden_sizes": [64, 64]})
+        metrics: Dictionary with evaluation metrics (mse, mae, r2, etc.)
+        losses: List of training losses
+        training_time: Training time in seconds
+        inference_stats: Dictionary with inference timing stats
+        predictions: Model predictions (will be converted to list)
+        ground_truth: Ground truth values (will be converted to list)
+    
+    Returns:
+        Dictionary with standardized results structure
+    """
+    return {
+        **architecture_info,  # Include architecture details (hidden_sizes, etc.)
+        "mse": metrics["mse"],
+        "mae": metrics["mae"],
+        "r2": metrics.get("r2", np.nan),
+        "final_loss": metrics.get("final_loss", losses[-1] if losses else np.nan),
+        "losses": losses,
+        "training_time": training_time,
+        "avg_inference_time": inference_stats['avg_inference_time'],
+        "inference_per_sample": inference_stats['inference_per_sample'],
+        "samples_per_second": inference_stats['samples_per_second'],
+        "predictions": np.array(predictions).tolist(),
+        "ground_truth": np.array(ground_truth).tolist()
+    }
+
+
 def plot_training_results(
     trainer: Any,
     eta_data: jnp.ndarray,
@@ -232,10 +266,10 @@ def plot_model_comparison(
     show_plots: bool = False
 ) -> None:
     """
-    Create comparison plots for multiple models.
+    Create comprehensive comparison plots for multiple models.
     
     Args:
-        results: Dictionary of model results with structure {model_name: {metrics, losses, etc.}}
+        results: Dictionary of model results with structure {model_name: {metrics, losses, predictions, ground_truth, etc.}}
         output_dir: Directory to save plots
         save_plots: Whether to save plots to disk
         show_plots: Whether to display plots
@@ -245,68 +279,222 @@ def plot_model_comparison(
         print("No results to plot")
         return
     
-    # Create comparison plots
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    # Create comprehensive comparison plots
+    fig = plt.figure(figsize=(20, 15))
     
-    # 1. Training curves comparison
-    ax1 = axes[0, 0]
+    # 1. Training curves comparison (top left)
+    ax1 = plt.subplot(3, 3, 1)
     for model_name, result in results.items():
-        if 'losses' in result:
+        if 'losses' in result and result['losses']:
             ax1.plot(result['losses'], label=model_name, alpha=0.7, linewidth=2)
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
-    ax1.set_title('Training Curves Comparison')
-    ax1.legend()
+    ax1.set_title('Training Curves Comparison', fontsize=14, fontweight='bold')
+    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     ax1.set_yscale('log')
     ax1.grid(True, alpha=0.3)
     
-    # 2. MSE comparison
-    ax2 = axes[0, 1]
+    # 2. MSE comparison (top center)
+    ax2 = plt.subplot(3, 3, 2)
     model_names = list(results.keys())
     mse_values = [results[name].get('mse', np.nan) for name in model_names]
     bars = ax2.bar(range(len(model_names)), mse_values)
     ax2.set_xticks(range(len(model_names)))
-    ax2.set_xticklabels(model_names, rotation=45)
+    ax2.set_xticklabels(model_names, rotation=45, ha='right')
     ax2.set_ylabel('MSE')
-    ax2.set_title('MSE Comparison')
+    ax2.set_title('MSE Comparison', fontsize=14, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     
-    # Color bars by performance
-    for i, (bar, mse) in enumerate(zip(bars, mse_values)):
-        if not np.isnan(mse):
-            bar.set_color(plt.cm.viridis(1 - (mse - min(mse_values)) / (max(mse_values) - min(mse_values))))
+    # Color bars by performance (lower MSE is better)
+    valid_mse = [mse for mse in mse_values if not np.isnan(mse)]
+    if valid_mse:
+        mse_range = max(valid_mse) - min(valid_mse)
+        for i, (bar, mse) in enumerate(zip(bars, mse_values)):
+            if not np.isnan(mse) and mse_range > 0:
+                # Lower MSE gets better color (closer to 1 in viridis)
+                normalized_mse = 1 - (mse - min(valid_mse)) / mse_range
+                bar.set_color(plt.cm.viridis(normalized_mse))
+            elif not np.isnan(mse):
+                bar.set_color(plt.cm.viridis(0.5))
     
-    # 3. MAE comparison
-    ax3 = axes[1, 0]
+    # 3. MAE comparison (top right)
+    ax3 = plt.subplot(3, 3, 3)
     mae_values = [results[name].get('mae', np.nan) for name in model_names]
     bars = ax3.bar(range(len(model_names)), mae_values)
     ax3.set_xticks(range(len(model_names)))
-    ax3.set_xticklabels(model_names, rotation=45)
+    ax3.set_xticklabels(model_names, rotation=45, ha='right')
     ax3.set_ylabel('MAE')
-    ax3.set_title('MAE Comparison')
+    ax3.set_title('MAE Comparison', fontsize=14, fontweight='bold')
     ax3.grid(True, alpha=0.3)
     
-    # Color bars by performance
-    for i, (bar, mae) in enumerate(zip(bars, mae_values)):
-        if not np.isnan(mae):
-            bar.set_color(plt.cm.viridis(1 - (mae - min(mae_values)) / (max(mae_values) - min(mae_values))))
+    # Color bars by performance (lower MAE is better)
+    valid_mae = [mae for mae in mae_values if not np.isnan(mae)]
+    if valid_mae:
+        mae_range = max(valid_mae) - min(valid_mae)
+        for i, (bar, mae) in enumerate(zip(bars, mae_values)):
+            if not np.isnan(mae) and mae_range > 0:
+                normalized_mae = 1 - (mae - min(valid_mae)) / mae_range
+                bar.set_color(plt.cm.viridis(normalized_mae))
+            elif not np.isnan(mae):
+                bar.set_color(plt.cm.viridis(0.5))
     
-    # 4. R² comparison
-    ax4 = axes[1, 1]
+    # 4. R² comparison (middle left)
+    ax4 = plt.subplot(3, 3, 4)
     r2_values = [results[name].get('r2', np.nan) for name in model_names]
     bars = ax4.bar(range(len(model_names)), r2_values)
     ax4.set_xticks(range(len(model_names)))
-    ax4.set_xticklabels(model_names, rotation=45)
+    ax4.set_xticklabels(model_names, rotation=45, ha='right')
     ax4.set_ylabel('R²')
-    ax4.set_title('R² Comparison')
+    ax4.set_title('R² Comparison', fontsize=14, fontweight='bold')
     ax4.grid(True, alpha=0.3)
     
     # Color bars by performance (higher R² is better)
-    for i, (bar, r2) in enumerate(zip(bars, r2_values)):
-        if not np.isnan(r2):
-            # Normalize R² values for coloring (assume range [-1, 1])
-            normalized_r2 = (r2 + 1) / 2  # Map [-1, 1] to [0, 1]
-            bar.set_color(plt.cm.viridis(normalized_r2))
+    valid_r2 = [r2 for r2 in r2_values if not np.isnan(r2)]
+    if valid_r2:
+        r2_range = max(valid_r2) - min(valid_r2)
+        for i, (bar, r2) in enumerate(zip(bars, r2_values)):
+            if not np.isnan(r2) and r2_range > 0:
+                normalized_r2 = (r2 - min(valid_r2)) / r2_range
+                bar.set_color(plt.cm.viridis(normalized_r2))
+            elif not np.isnan(r2):
+                bar.set_color(plt.cm.viridis(0.5))
+    
+    # 5. Performance summary table (middle center)
+    ax5 = plt.subplot(3, 3, 5)
+    ax5.axis('off')
+    
+    # Create performance summary table
+    table_data = []
+    for name in model_names:
+        mse = results[name].get('mse', np.nan)
+        mae = results[name].get('mae', np.nan)
+        r2 = results[name].get('r2', np.nan)
+        table_data.append([
+            name,
+            f"{mse:.4f}" if not np.isnan(mse) else "N/A",
+            f"{mae:.4f}" if not np.isnan(mae) else "N/A",
+            f"{r2:.4f}" if not np.isnan(r2) else "N/A"
+        ])
+    
+    table = ax5.table(cellText=table_data,
+                     colLabels=['Model', 'MSE', 'MAE', 'R²'],
+                     cellLoc='center',
+                     loc='center',
+                     bbox=[0, 0, 1, 1])
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2)
+    ax5.set_title('Performance Summary', fontsize=14, fontweight='bold', pad=20)
+    
+    # 6. High performing model predictions vs ground truth (middle right)
+    ax6 = plt.subplot(3, 3, 6)
+    
+    # Find best performing model (lowest MSE)
+    best_model = None
+    best_mse = float('inf')
+    for name, result in results.items():
+        mse = result.get('mse', np.nan)
+        if not np.isnan(mse) and mse < best_mse:
+            best_mse = mse
+            best_model = name
+    
+    if best_model and 'predictions' in results[best_model] and 'ground_truth' in results[best_model]:
+        predictions = np.array(results[best_model]['predictions'])
+        ground_truth = np.array(results[best_model]['ground_truth'])
+        
+        # Flatten if multi-dimensional
+        if predictions.ndim > 1:
+            predictions = predictions.flatten()
+            ground_truth = ground_truth.flatten()
+        
+        ax6.scatter(ground_truth, predictions, alpha=0.6, s=20, color='green')
+        min_val = min(ground_truth.min(), predictions.min())
+        max_val = max(ground_truth.max(), predictions.max())
+        ax6.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
+        ax6.set_xlabel('Ground Truth')
+        ax6.set_ylabel('Predictions')
+        ax6.set_title(f'Best Model: {best_model}\nMSE: {best_mse:.4f}', fontsize=12, fontweight='bold')
+        ax6.grid(True, alpha=0.3)
+    else:
+        ax6.text(0.5, 0.5, 'No prediction data\navailable for best model', 
+                ha='center', va='center', transform=ax6.transAxes, fontsize=12)
+        ax6.set_title('Best Model Predictions', fontsize=12, fontweight='bold')
+    
+    # 7. Low performing model predictions vs ground truth (bottom left)
+    ax7 = plt.subplot(3, 3, 7)
+    
+    # Find worst performing model (highest MSE)
+    worst_model = None
+    worst_mse = float('-inf')
+    for name, result in results.items():
+        mse = result.get('mse', np.nan)
+        if not np.isnan(mse) and mse > worst_mse:
+            worst_mse = mse
+            worst_model = name
+    
+    if worst_model and 'predictions' in results[worst_model] and 'ground_truth' in results[worst_model]:
+        predictions = np.array(results[worst_model]['predictions'])
+        ground_truth = np.array(results[worst_model]['ground_truth'])
+        
+        # Flatten if multi-dimensional
+        if predictions.ndim > 1:
+            predictions = predictions.flatten()
+            ground_truth = ground_truth.flatten()
+        
+        ax7.scatter(ground_truth, predictions, alpha=0.6, s=20, color='red')
+        min_val = min(ground_truth.min(), predictions.min())
+        max_val = max(ground_truth.max(), predictions.max())
+        ax7.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
+        ax7.set_xlabel('Ground Truth')
+        ax7.set_ylabel('Predictions')
+        ax7.set_title(f'Worst Model: {worst_model}\nMSE: {worst_mse:.4f}', fontsize=12, fontweight='bold')
+        ax7.grid(True, alpha=0.3)
+    else:
+        ax7.text(0.5, 0.5, 'No prediction data\navailable for worst model', 
+                ha='center', va='center', transform=ax7.transAxes, fontsize=12)
+        ax7.set_title('Worst Model Predictions', fontsize=12, fontweight='bold')
+    
+    # 8. Training time comparison (bottom center)
+    ax8 = plt.subplot(3, 3, 8)
+    training_times = [results[name].get('training_time', np.nan) for name in model_names]
+    bars = ax8.bar(range(len(model_names)), training_times)
+    ax8.set_xticks(range(len(model_names)))
+    ax8.set_xticklabels(model_names, rotation=45, ha='right')
+    ax8.set_ylabel('Training Time (s)')
+    ax8.set_title('Training Time Comparison', fontsize=14, fontweight='bold')
+    ax8.grid(True, alpha=0.3)
+    
+    # Color bars by training time (shorter is better)
+    valid_times = [t for t in training_times if not np.isnan(t)]
+    if valid_times:
+        time_range = max(valid_times) - min(valid_times)
+        for i, (bar, time) in enumerate(zip(bars, training_times)):
+            if not np.isnan(time) and time_range > 0:
+                normalized_time = 1 - (time - min(valid_times)) / time_range
+                bar.set_color(plt.cm.viridis(normalized_time))
+            elif not np.isnan(time):
+                bar.set_color(plt.cm.viridis(0.5))
+    
+    # 9. Inference speed comparison (bottom right)
+    ax9 = plt.subplot(3, 3, 9)
+    inference_speeds = [results[name].get('inference_per_sample', np.nan) for name in model_names]
+    bars = ax9.bar(range(len(model_names)), inference_speeds)
+    ax9.set_xticks(range(len(model_names)))
+    ax9.set_xticklabels(model_names, rotation=45, ha='right')
+    ax9.set_ylabel('Inference Time (s/sample)')
+    ax9.set_title('Inference Speed Comparison', fontsize=14, fontweight='bold')
+    ax9.grid(True, alpha=0.3)
+    
+    # Color bars by inference speed (faster is better)
+    valid_speeds = [s for s in inference_speeds if not np.isnan(s)]
+    if valid_speeds:
+        speed_range = max(valid_speeds) - min(valid_speeds)
+        for i, (bar, speed) in enumerate(zip(bars, inference_speeds)):
+            if not np.isnan(speed) and speed_range > 0:
+                normalized_speed = 1 - (speed - min(valid_speeds)) / speed_range
+                bar.set_color(plt.cm.viridis(normalized_speed))
+            elif not np.isnan(speed):
+                bar.set_color(plt.cm.viridis(0.5))
     
     plt.tight_layout()
     

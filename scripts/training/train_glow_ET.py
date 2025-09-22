@@ -10,15 +10,18 @@ import sys
 from pathlib import Path
 import time
 import json
+import numpy as np
 import jax.numpy as jnp
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.config import get_glow_config, FullConfig
-from src.models.glow_net import create_glow_et_model_and_trainer
-from src.utils.data_utils import load_3d_gaussian_data, compute_ground_truth_3d_tril
-# from plotting.model_comparison import create_comprehensive_report  # TODO: Create plotting module
+from src.models.glow_net_ET import create_glow_et_model_and_trainer
+# Import standardized data loading from template
+sys.path.append(str(Path(__file__).parent))
+from src.utils.data_utils import load_standardized_ep_data
+from plot_training_results import plot_model_comparison, save_results_summary
 
 
 # =============================================================================
@@ -30,7 +33,7 @@ MODEL_CONFIG = "glow"  # Use predefined glow config
 
 # Custom configuration (used if MODEL_CONFIG is not in predefined configs)
 CUSTOM_CONFIG = FullConfig()
-CUSTOM_CONFIG.network.hidden_sizes = [64] * 4  # Base network layers
+CUSTOM_CONFIG.network.hidden_sizes = [64] * 8  # Deep 8-layer base network
 CUSTOM_CONFIG.network.activation = "tanh"
 CUSTOM_CONFIG.network.use_feature_engineering = True
 CUSTOM_CONFIG.network.output_dim = 9  # For tril format
@@ -58,6 +61,13 @@ LOSS_FUNCTION = "diffusion_mse"  # Diffusion-based MSE loss
 
 def main():
     """Main training and evaluation pipeline."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train Glow ET models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
     
     print("🌊 DEEP FLOW NETWORK TRAINING")
     print("=" * 50)
@@ -83,53 +93,16 @@ def main():
     print(f"Batch Size: {config.training.batch_size}")
     print(f"Loss Function: {LOSS_FUNCTION}")
     
-    # Load data
+    # Load data using standardized template function (dimension-agnostic)
     print("\n📊 Loading data...")
-    data_file = Path("data/easy_3d_gaussian.pkl")
+    data_file = args.data_file if args.data_file else "data/easy_3d_gaussian.pkl"
+    eta_data, ground_truth, metadata = load_standardized_ep_data(data_file)
     
-    import pickle
-    with open(data_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    # Create train/val/test splits with correct structure
-    # Convert 12D data to 9D format (3D mean + 6D upper triangular covariance)
-    import jax.numpy as jnp
-    
-    def convert_to_9d(eta_12d, mean_12d):
-        """Convert 12D data to 9D format for models expecting upper triangular covariance."""
-        # Extract components
-        eta1 = eta_12d[:, :3]  # 3D
-        eta2_flat = eta_12d[:, 3:12]  # 9D
-        mu = mean_12d[:, :3]  # 3D
-        mu_muT_plus_Sigma_flat = mean_12d[:, 3:12]  # 9D
-        
-        # Reshape to 3x3 matrices and extract upper triangular
-        eta2_matrices = eta2_flat.reshape(-1, 3, 3)
-        mu_muT_plus_Sigma_matrices = mu_muT_plus_Sigma_flat.reshape(-1, 3, 3)
-        
-        # Extract upper triangular elements (6 elements per matrix)
-        upper_indices = jnp.triu_indices(3)
-        eta2_upper = eta2_matrices[:, upper_indices[0], upper_indices[1]]  # (N, 6)
-        mu_muT_plus_Sigma_upper = mu_muT_plus_Sigma_matrices[:, upper_indices[0], upper_indices[1]]  # (N, 6)
-        
-        # Combine to 9D: [mu (3D), upper_elements (6D)]
-        eta_9d = jnp.concatenate([eta1, eta2_upper], axis=1)
-        mean_9d = jnp.concatenate([mu, mu_muT_plus_Sigma_upper], axis=1)
-        
-        return eta_9d, mean_9d
-    
-    train_eta_9d, train_mean_9d = convert_to_9d(data["train"]["eta"], data["train"]["mean"])
-    val_eta_9d, val_mean_9d = convert_to_9d(data["val"]["eta"], data["val"]["mean"])
-    
-    train_data = {"eta": train_eta_9d, "stats": train_mean_9d}
-    val_data = {"eta": val_eta_9d, "stats": val_mean_9d}
-    
-    # Purge cov_tt to save memory
-    if "cov" in data["train"]: del data["train"]["cov"]
-    if "cov" in data["val"]: del data["val"]["cov"]
-    if "cov" in data["test"]: del data["test"]["cov"]
-    import gc; gc.collect()
-    print("✅ Purged cov_tt elements from memory for optimization")
+    # Prepare data for BaseTrainer interface
+    train_data = {"eta": eta_data, "mu_T": ground_truth}
+    # Create validation split from training data for BaseTrainer
+    val_split = int(0.8 * len(eta_data))
+    val_data = {"eta": eta_data[val_split:], "mu_T": ground_truth[val_split:]}
     
     # Create test split from validation data
     n_val = val_data["eta"].shape[0]
@@ -137,19 +110,19 @@ def main():
     
     test_data = {
         "eta": val_data["eta"][:n_test],
-        "y": val_data["stats"][:n_test]
+        "mu_T": val_data["mu_T"][:n_test]
     }
     
     val_data = {
         "eta": val_data["eta"][n_test:],
-        "stats": val_data["stats"][n_test:]
+        "mu_T": val_data["mu_T"][n_test:]
     }
     
     print(f"Training samples: {train_data['eta'].shape[0]}")
     print(f"Validation samples: {val_data['eta'].shape[0]}")
     print(f"Test samples: {test_data['eta'].shape[0]}")
     print(f"Input dimension: {train_data['eta'].shape[1]}")
-    print(f"Output dimension: {train_data['stats'].shape[1]}")
+    print(f"Output dimension: {train_data['y'].shape[1]}")
     
     # Use test data directly (ground truth is already in test_data['y'])
     print("\n🎯 Using test data as ground truth...")
@@ -180,6 +153,36 @@ def main():
             print(f"Test MSE (vs Ground Truth): {metrics['ground_truth_mse']:.2f}")
             print(f"Test MAE (vs Ground Truth): {metrics['ground_truth_mae']:.2f}")
         
+        # Benchmark inference time
+        print("\n⏱️  Benchmarking inference time...")
+        def benchmark_inference(trainer, params, test_data, num_runs=50):
+            """Benchmark inference time with multiple runs for accuracy."""
+            # Warm-up run to ensure compilation is complete
+            _ = trainer.predict(params, test_data['eta'][:1])
+            
+            # Measure inference time over multiple runs
+            times = []
+            for _ in range(num_runs):
+                start_time = time.time()
+                _ = trainer.predict(params, test_data['eta'])
+                times.append(time.time() - start_time)
+            
+            # Return statistics
+            avg_time = sum(times) / len(times)
+            min_time = min(times)
+            max_time = max(times)
+            
+            return {
+                'avg_inference_time': avg_time,
+                'min_inference_time': min_time,
+                'max_inference_time': max_time,
+                'inference_per_sample': avg_time / len(test_data['eta']),
+                'samples_per_second': len(test_data['eta']) / avg_time
+            }
+        
+        inference_stats = benchmark_inference(trainer, best_params, test_data)
+        print(f"Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
         # Prepare results
         param_count = trainer.model.get_parameter_count(best_params)
         
@@ -189,6 +192,9 @@ def main():
                 'metrics': metrics,
                 'history': history,
                 'training_time': training_time,
+                'avg_inference_time': inference_stats['avg_inference_time'],
+                'inference_per_sample': inference_stats['inference_per_sample'],
+                'samples_per_second': inference_stats['samples_per_second'],
                 'architecture_info': {
                     'flow_layers': config.model_specific.num_flow_layers,
                     'flow_hidden_size': config.model_specific.flow_hidden_size,
@@ -206,11 +212,21 @@ def main():
             save_dir = Path(config.experiment.output_dir) / "model"
             trainer.save_model(best_params, save_dir)
         
-        # Create plots and report
-        if config.experiment.save_plots:
-            print("\n📊 Creating plots and report...")
-            output_dir = Path(config.experiment.output_dir)
-            create_comprehensive_report(results, output_dir, config.experiment.experiment_name)
+        # Create comprehensive plots
+        print("\n📊 Creating comprehensive plots...")
+        output_dir = Path(config.experiment.output_dir)
+        
+        # Add predictions and ground truth to results for plotting
+        results['Deep Flow Network']['predictions'] = np.array(predictions).tolist()
+        results['Deep Flow Network']['ground_truth'] = np.array(ground_truth).tolist()
+        
+        # Create model comparison plots using standardized plotting function
+        plot_model_comparison(
+            results=results,
+            output_dir=str(output_dir),
+            save_plots=True,
+            show_plots=False
+        )
         
         # Save detailed results
         results_file = Path(config.experiment.output_dir) / "results.json"
@@ -230,6 +246,13 @@ def main():
             
             json.dump(convert_for_json(results), f, indent=2)
         
+        # Save results summary using standardized function
+        save_results_summary(
+            results=results,
+            output_dir=str(output_dir),
+            experiment_name="glow_ET"
+        )
+        
         print(f"📁 Results saved to {config.experiment.output_dir}")
         
         # Final summary
@@ -239,15 +262,16 @@ def main():
         print(f"  Base Network: {len(config.network.hidden_sizes)} layers x {config.network.hidden_sizes[0] if config.network.hidden_sizes else 0} units")
         print(f"  Total Parameters: {param_count:,}")
         print(f"  Training Time: {training_time:.1f}s")
+        print(f"  Inference Time: {inference_stats['samples_per_second']:.1f} samples/sec")
         print(f"  Best MSE (Ground Truth): {metrics.get('ground_truth_mse', metrics['mse']):.2f}")
-        print(f"  MCMC Error Bound: {empirical_mse:.6f}")
+        print(f"  MCMC Error Bound: Not calculated")
         
-        # Performance analysis
-        improvement_factor = empirical_mse / metrics.get('ground_truth_mse', metrics['mse']) if metrics.get('ground_truth_mse', metrics['mse']) > 0 else float('inf')
-        if improvement_factor < 1:
-            print(f"  🎯 Model exceeds MCMC bound by {1/improvement_factor:.1f}x")
-        else:
-            print(f"  📈 Model within {improvement_factor:.1f}x of MCMC bound")
+        # Performance analysis (empirical_mse not available)
+        # improvement_factor = empirical_mse / metrics.get('ground_truth_mse', metrics['mse']) if metrics.get('ground_truth_mse', metrics['mse']) > 0 else float('inf')
+        # if improvement_factor < 1:
+        #     print(f"  🎯 Model exceeds MCMC bound by {1/improvement_factor:.1f}x")
+        # else:
+        #     print(f"  📈 Model within {improvement_factor:.1f}x of MCMC bound")
         
     except Exception as e:
         print(f"❌ Training failed: {str(e)}")
@@ -258,6 +282,9 @@ def main():
                 'status': 'failed',
                 'error': str(e),
                 'training_time': time.time() - start_time,
+                'avg_inference_time': None,
+                'inference_per_sample': None,
+                'samples_per_second': None,
                 'config': config.to_dict()
             }
         }
@@ -272,4 +299,11 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train Glow ET models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
     main()

@@ -12,6 +12,7 @@ import time
 import json
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import random
 # matplotlib import removed - now using standardized plotting
 
@@ -20,7 +21,13 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Import standardized plotting functions
 sys.path.append(str(Path(__file__).parent.parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
+
+# Import dimension inference utility and standardized data loading from template
+from src.utils.data_utils import infer_dimensions
+sys.path.append(str(Path(__file__).parent))
+from training_template_ET import SimpleTemplateET
+from src.utils.data_utils import load_standardized_ep_data
 
 # Simple configuration class
 class SimpleConfig:
@@ -29,115 +36,37 @@ class SimpleConfig:
         self.activation = activation
         self.use_layer_norm = False
 
-class SimpleStandardMLPET:
-    """Standard MLP ET using official implementation."""
+class SimpleStandardMLPET(SimpleTemplateET):
+    """Standard MLP ET using the new template."""
     
-    def __init__(self, hidden_sizes=[64, 64]):
-        self.hidden_sizes = hidden_sizes
-        self.config = SimpleConfig(hidden_sizes=hidden_sizes, activation="swish")
+    def __init__(self, hidden_sizes=[64, 64], eta_dim=None):
+        super().__init__(hidden_sizes=hidden_sizes, eta_dim=eta_dim, model_type="mlp")
     
-    def create_model(self):
-        """Create the model using the official implementation."""
-        from src.models.mlp_ET import MLPNetwork
-        # Create proper network config
-        from src.config import NetworkConfig
-        network_config = NetworkConfig()
-        network_config.hidden_sizes = self.hidden_sizes
-        network_config.activation = "swish"
-        network_config.use_layer_norm = True
-        network_config.output_dim = 12  # 3D Gaussian sufficient statistics
-        return MLPNetwork(config=network_config)
-    
-    def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
-        """Train the model."""
-        import optax
-        import flax.linen as nn
-        import jax
-        
-        model = self.create_model()
-        
-        # Initialize
-        rng = random.PRNGKey(42)
-        params = model.init(rng, eta_data[:1])
-        
-        # Optimizer
-        optimizer = optax.adam(learning_rate)
-        opt_state = optimizer.init(params)
-        
-        # Loss function
-        def loss_fn(params, eta_batch, target_batch):
-            predictions = model.apply(params, eta_batch)
-            return jnp.mean((predictions - target_batch) ** 2)
-        
-        # Training loop
-        losses = []
-        batch_size = 32
-        
-        for epoch in range(epochs):
-            epoch_losses = []
-            
-            # Shuffle data
-            indices = random.permutation(rng + epoch, len(eta_data))
-            eta_shuffled = eta_data[indices]
-            target_shuffled = ground_truth[indices]
-            
-            # Mini-batch training
-            for i in range(0, len(eta_data), batch_size):
-                eta_batch = eta_shuffled[i:i+batch_size]
-                target_batch = target_shuffled[i:i+batch_size]
-                
-                loss, grads = jax.value_and_grad(loss_fn)(params, eta_batch, target_batch)
-                updates, opt_state = optimizer.update(grads, opt_state)
-                params = optax.apply_updates(params, updates)
-                epoch_losses.append(loss)
-            
-            avg_loss = jnp.mean(jnp.array(epoch_losses))
-            losses.append(float(avg_loss))
-            
-            if epoch % 50 == 0 or epoch < 10:
-                print(f"  Epoch {epoch}: Loss = {avg_loss:.6f}")
-        
-        return params, losses
-    
-    def predict(self, model, params, eta_data):
-        """Make predictions."""
-        return model.apply(params, eta_data)
-    
-    def evaluate(self, predictions, ground_truth):
-        """Evaluate predictions."""
-        mse = jnp.mean((predictions - ground_truth) ** 2)
-        mae = jnp.mean(jnp.abs(predictions - ground_truth))
-        return {"mse": float(mse), "mae": float(mae)}
+    # All methods inherited from SimpleTemplateET
+    pass
 
 
 def main():
     """Main training and evaluation pipeline."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train MLP ET models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
+    
     print("Training Standard MLP ET Model")
     print("=" * 40)
     
-    # Load test data from easy_3d_gaussian
-    print("Loading test data from easy_3d_gaussian...")
-    data_file = Path("data/easy_3d_gaussian.pkl")
+    # Load data using standardized template function
+    data_file = args.data_file if args.data_file else "data/easy_3d_gaussian.pkl"
+    eta_data, ground_truth, metadata = load_standardized_ep_data(data_file)
     
-    import pickle
-    with open(data_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    eta_data = data["train"]["eta"]
-    ground_truth = data["train"]["mean"]
-    print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
-    
-    # Purge cov_tt to save memory
-    if "cov" in data["train"]: del data["train"]["cov"]
-    if "cov" in data["val"]: del data["val"]["cov"]
-    if "cov" in data["test"]: del data["test"]["cov"]
-    import gc; gc.collect()
-    print("✅ Purged cov_tt elements from memory for optimization")
-    
-    # Define architectures to test
+    # Define architectures to test (all variants for comprehensive comparison)
     architectures = {
         "Small": [32, 32],
-        "Medium": [64, 64], 
+        "Medium": [64, 64],
         "Large": [128, 128],
         "Deep": [64, 64, 64],
         "Wide": [128, 64, 128],
@@ -146,44 +75,51 @@ def main():
     
     results = {}
     
-    # Test each architecture
+    # Test the architecture
     for arch_name, hidden_sizes in architectures.items():
         print(f"\nTraining MLP_ET_{arch_name} with hidden sizes: {hidden_sizes}")
         
-        model_wrapper = SimpleStandardMLPET(hidden_sizes=hidden_sizes)
-        model = model_wrapper.create_model()
+        # Infer dimensions from metadata
+        eta_dim = infer_dimensions(eta_data, metadata=metadata)
+        model_wrapper = SimpleStandardMLPET(hidden_sizes=hidden_sizes, eta_dim=eta_dim)
         
-        # Train
-        params, losses = model_wrapper.train(eta_data, ground_truth, epochs=300)
+        trainer = model_wrapper.create_model_and_trainer()
         
-        # Evaluate
-        predictions = model_wrapper.predict(model, params, eta_data)
+        # Train and measure training time
+        params, losses, training_time = model_wrapper.train(eta_data, ground_truth, epochs=300)
+        
+        # Evaluate accuracy
+        predictions = model_wrapper.predict(trainer, params, eta_data)
         metrics = model_wrapper.evaluate(predictions, ground_truth)
         
-        results[f"MLP_ET_{arch_name}"] = {
-            "hidden_sizes": hidden_sizes,
-            "mse": metrics["mse"],
-            "mae": metrics["mae"],
-            "losses": losses
-        }
+        # Benchmark inference time
+        inference_stats = model_wrapper.benchmark_inference(trainer, params, eta_data, num_runs=50)
+        
+        results[f"MLP_ET_{arch_name}"] = create_standardized_results(
+            model_name=f"MLP_ET_{arch_name}",
+            architecture_info={"hidden_sizes": hidden_sizes},
+            metrics=metrics,
+            losses=losses,
+            training_time=training_time,
+            inference_stats=inference_stats,
+            predictions=predictions,
+            ground_truth=ground_truth
+        )
         
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
+        print(f"  Training time: {training_time:.2f}s")
+        print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
     
     # Print summary
     print("\n" + "=" * 60)
-    print("STANDARD MLP ET MODEL COMPARISON")
+    print("STANDARD MLP ET MODEL RESULTS")
     print("=" * 60)
-    
-    best_mse = float('inf')
-    best_model = None
     
     for model_name, result in results.items():
         print(f"{model_name:<20} : MSE={result['mse']:.6f}, MAE={result['mae']:.6f}, Architecture={result['hidden_sizes']}")
-        if result['mse'] < best_mse:
-            best_mse = result['mse']
-            best_model = model_name
+        print(f"{'':<20}   Training: {result['training_time']:.2f}s, Inference: {result['samples_per_second']:.1f} samples/sec")
     
-    print(f"\n🏆 Best Model: {best_model} with MSE={best_mse:.6f}")
+    print(f"\n✅ Model training completed successfully!")
     
     # Create output directory
     output_dir = Path("artifacts/ET_models/mlp_ET")
@@ -212,4 +148,11 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train MLP ET models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
     main()

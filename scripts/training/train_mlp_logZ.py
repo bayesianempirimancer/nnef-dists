@@ -27,6 +27,9 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 sys.path.append(str(Path(__file__).parent.parent))
 from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
 
+# Import dimension inference utility
+from src.utils.data_utils import infer_dimensions
+
 # Data generation function removed - now using easy_3d_gaussian data
 
 
@@ -40,8 +43,9 @@ class SimpleConfig:
 class SimpleMLPLogZ:
     """MLP Log Normalizer using official implementation."""
     
-    def __init__(self, hidden_sizes=[64, 64]):
+    def __init__(self, hidden_sizes=[64, 64], eta_dim=None):
         self.hidden_sizes = hidden_sizes
+        self.eta_dim = eta_dim
         # Create proper FullConfig
         from src.config import FullConfig
         self.config = FullConfig()
@@ -49,99 +53,122 @@ class SimpleMLPLogZ:
         self.config.network.activation = "swish"
         self.config.network.use_layer_norm = True
     
-    def create_model(self):
+    def create_model_and_trainer(self):
         """Create the model using the official implementation."""
-        from src.models.mlp_logZ import MLPLogNormalizerTrainer
-        # Create a dummy trainer to get the model
-        trainer = MLPLogNormalizerTrainer(self.config)
-        return trainer.model
+        from src.models.mlp_logZ import create_model_and_trainer
+        # Create proper network config using inferred dimensions
+        from src.config import NetworkConfig, FullConfig, TrainingConfig
+        
+        # Use inferred dimensions from data
+        # For LogZ models, input is eta, output is scalar log normalizer
+        # Target is mu_T - expectation of sufficient statistic
+        if self.eta_dim is None:
+            raise ValueError("eta_dim must be provided. Call infer_dimensions() first.")
+        
+        input_dim = self.eta_dim
+        output_dim = 1  # LogZ models output scalar log normalizer
+        
+        network_config = NetworkConfig(
+            hidden_sizes=self.hidden_sizes,
+            activation="swish",
+            use_layer_norm=True,
+            input_dim=input_dim,
+            output_dim=output_dim
+        )
+        training_config = TrainingConfig(num_epochs=300, learning_rate=1e-3)
+        full_config = FullConfig(network=network_config, training=training_config)
+        return create_model_and_trainer(full_config)
+    
     
     def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
-        """Train the model."""
-        import optax
-        import flax.linen as nn
-        import jax
+        """Train the model and measure training time."""
+        import time
+        start_time = time.time()
         
-        model = self.create_model()
+        trainer = self.create_model_and_trainer()
         
-        # Initialize
-        rng = random.PRNGKey(42)
-        params = model.init(rng, eta_data[:1])
+        # Prepare training data
+        # For LogZ models, ground_truth should be mu_T (same dimension as eta)
+        train_data = {
+            'eta': eta_data,
+            'mu_T': ground_truth  # This is the expectation of sufficient statistic
+        }
         
-        # Optimizer
-        optimizer = optax.adamw(learning_rate=learning_rate, weight_decay=1e-4)
-        opt_state = optimizer.init(params)
+        # Use the trainer's built-in training method
+        best_params, training_history = trainer.train(
+            train_data=train_data,
+            val_data=None,
+            epochs=epochs,
+            learning_rate=learning_rate
+        )
         
-        # Loss function
-        def loss_fn(params, eta_batch, target_batch):
-            log_norm = model.apply(params, eta_batch, training=True)
-            
-            def single_log_normalizer(eta_single):
-                return model.apply(params, eta_single[None, :], training=False)[0]
-            
-            grad_fn = jax.grad(single_log_normalizer)
-            network_mean = jax.vmap(grad_fn)(eta_batch)
-            mse_loss = jnp.mean(jnp.square(network_mean - target_batch))
-            l2_loss = jnp.mean(jnp.square(log_norm))
-            return mse_loss + 1e-6 * l2_loss
-        
-        # Training loop
-        losses = []
-        for epoch in range(epochs):
-            loss, grads = jax.value_and_grad(loss_fn)(params, eta_data, ground_truth)
-            updates, opt_state = optimizer.update(grads, opt_state, params)
-            params = optax.apply_updates(params, updates)
-            losses.append(float(loss))
-            
-            if epoch % 50 == 0 or epoch < 5:
-                print(f"  Epoch {epoch}: Loss = {loss:.6f}")
-        
-        return params, losses, model
+        training_time = time.time() - start_time
+        return best_params, training_history['train_loss'], training_time
     
-    def predict(self, model, params, eta_data):
+    def predict(self, trainer, params, eta_data):
         """Make predictions using the trained model."""
-        import jax
+        predictions = trainer.predict(params, eta_data)
+        return predictions['stats']  # Extract expected sufficient statistics from the prediction dictionary
+    
+    def benchmark_inference(self, trainer, params, eta_data, num_runs=100):
+        """Benchmark inference time with multiple runs for accuracy."""
+        import time
+        # Warm-up run to ensure compilation is complete
+        _ = trainer.predict(params, eta_data[:1])
         
-        def single_log_normalizer(eta_single):
-            return model.apply(params, eta_single[None, :], training=False)[0]
+        # Measure inference time over multiple runs
+        times = []
+        for _ in range(num_runs):
+            start_time = time.time()
+            _ = trainer.predict(params, eta_data)
+            end_time = time.time()
+            times.append(end_time - start_time)
         
-        grad_fn = jax.grad(single_log_normalizer)
-        predictions = jax.vmap(grad_fn)(eta_data)
-        return predictions
+        avg_time = sum(times) / len(times)
+        per_sample_time = avg_time / len(eta_data)
+        samples_per_second = len(eta_data) / avg_time
+        
+        return {
+            'avg_inference_time': avg_time,
+            'inference_per_sample': per_sample_time,
+            'samples_per_second': samples_per_second
+        }
+    
+    def evaluate(self, predictions, targets):
+        """Evaluate predictions against targets."""
+        import jax.numpy as jnp
+        
+        mse = jnp.mean((predictions - targets) ** 2)
+        mae = jnp.mean(jnp.abs(predictions - targets))
+        
+        return {
+            'mse': float(mse),
+            'mae': float(mae)
+        }
 
 # Plotting function removed - now using standardized plotting from scripts/plot_training_results.py
 
 def main():
     """Main training function."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train MLP LogZ models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
+    
     print("Training MLP LogZ Model")
     print("=" * 40)
     
-    # Load test data from easy_3d_gaussian
-    print("Loading test data from easy_3d_gaussian...")
-    data_file = Path("data/easy_3d_gaussian.pkl")
+    # Load test data using standardized function
+    from src.utils.data_utils import load_standardized_ep_data
+    data_file = args.data_file if args.data_file else "data/easy_3d_gaussian.pkl"
+    eta_data, ground_truth, metadata = load_standardized_ep_data(data_file)
     
-    import pickle
-    with open(data_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    eta_data = data["train"]["eta"]
-    ground_truth = data["train"]["mean"]
-    print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
-    
-    # Purge cov_tt to save memory
-    if "cov" in data["train"]: del data["train"]["cov"]
-    if "cov" in data["val"]: del data["val"]["cov"]
-    if "cov" in data["test"]: del data["test"]["cov"]
-    import gc; gc.collect()
-    print("✅ Purged cov_tt elements from memory for optimization")
-    
-    # Test different architectures
+    # Test single deep architecture
     architectures = {
-        'MLP_LogZ_Small': [32, 32],
-        'MLP_LogZ_Medium': [64, 64],
-        'MLP_LogZ_Large': [128, 128],
-        'MLP_LogZ_Deep': [64, 64, 64],
-        'MLP_LogZ_Wide': [128, 64, 128],
+        'MLP_LogZ_Deep': [64, 64, 64, 64, 64, 64, 64, 64],
     }
     
     results = {}
@@ -149,22 +176,30 @@ def main():
     for name, hidden_sizes in architectures.items():
         print(f"\nTraining {name} with hidden sizes: {hidden_sizes}")
         
-        model = SimpleMLPLogZ(hidden_sizes=hidden_sizes)
-        params, losses, trained_model = model.train(eta_data, ground_truth, epochs=300)
-        predictions = model.predict(trained_model, params, eta_data)
+        # Infer dimensions from metadata or data
+        eta_dim = infer_dimensions(eta_data, metadata=data.get('metadata'))
+        model = SimpleMLPLogZ(hidden_sizes=hidden_sizes, eta_dim=eta_dim)
         
-        # Calculate metrics
-        mse = float(jnp.mean(jnp.square(predictions - ground_truth)))
-        mae = float(jnp.mean(jnp.abs(predictions - ground_truth)))
+        trainer = model.create_model_and_trainer()
+        
+        # Train
+        params, losses, training_time = model.train(eta_data, ground_truth, epochs=300)
+        
+        # Evaluate
+        predictions = model.predict(trainer, params, eta_data)
+        metrics = model.evaluate(predictions, ground_truth)
+        
+        # Benchmark inference time
+        inference_stats = model.benchmark_inference(trainer, params, eta_data, num_runs=50)
         
         # Create plots using standardized plotting function
         metrics = plot_training_results(
-            trainer=model_wrapper,
+            trainer=model,
             eta_data=eta_data,
             ground_truth=ground_truth,
             predictions=predictions,
             losses=losses,
-            config=model_wrapper.config,
+            config=model.config,
             model_name=name,
             output_dir="artifacts/logZ_models/mlp_logZ",
             save_plots=True,
@@ -172,15 +207,24 @@ def main():
         )
         
         results[name] = {
+            'hidden_sizes': hidden_sizes,
             'mse': metrics['mse'], 
             'mae': metrics['mae'], 
-            'r2': metrics['r2'],
-            'final_loss': metrics['final_loss'],
-            'hidden_sizes': hidden_sizes,
-            'losses': losses
+            'losses': losses,
+            'training_time': training_time,
+            'avg_inference_time': inference_stats['avg_inference_time'],
+            'inference_per_sample': inference_stats['inference_per_sample'],
+            'samples_per_second': inference_stats['samples_per_second'],
+            'test_metrics': metrics,
+            'architecture': hidden_sizes,
+            'model_name': name,
+            'predictions': predictions,
+            'ground_truth': ground_truth
         }
         
-        print(f"  Final MSE: {mse:.6f}, MAE: {mae:.6f}")
+        print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
+        print(f"  Training time: {training_time:.2f}s")
+        print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
     
     # Summary
     print(f"\n{'='*60}")
@@ -213,4 +257,11 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train MLP LogZ models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
     main()

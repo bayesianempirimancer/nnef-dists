@@ -34,16 +34,16 @@ from plot_training_results import plot_training_results, plot_model_comparison, 
 
 from src.config import FullConfig
 from src.models.convex_nn_logZ import (
-    ConvexNeuralNetworkLogZ,
-    ConvexNeuralNetworkLogZTrainer
+    Convex_LogZ_Network,
+    Convex_LogZ_Trainer
 )
 
 def create_alternating_convex_config():
     """Create configuration for alternating convex architecture."""
     config = FullConfig()
     
-    # Mid-sized network with 6 layers for 3D Gaussian testing
-    config.network.hidden_sizes = [64, 48, 32, 24, 16, 8]  # 6 layers with decreasing size
+    # Deep 8-layer network for 3D Gaussian testing  
+    config.network.hidden_sizes = [64, 64, 64, 64, 64, 64, 64, 64]  # 8 layers with consistent size
     config.network.output_dim = 9  # 3D multivariate normal has 9 sufficient statistics
     config.network.activation = "softplus"  # Smooth convex/concave activations
     config.network.use_feature_engineering = False  # Disable for speed
@@ -98,42 +98,36 @@ def analyze_alternating_architecture(config):
 
 def main():
     """Main training function for alternating convex architecture."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train Convex NN LogZ models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
+    
     print("Training Alternating Convex Neural Network LogZ Model")
     print("=" * 65)
     
     # Load easy_3d_gaussian data
-    print("Loading easy_3d_gaussian dataset...")
-    from pathlib import Path
-    import pickle
+    # Load test data using standardized function
+    from src.utils.data_utils import load_standardized_ep_data
+    data_file = args.data_file if args.data_file else "data/easy_3d_gaussian.pkl"
+    eta, mu_T, metadata = load_standardized_ep_data(data_file)
     
-    data_file = Path("data/easy_3d_gaussian.pkl")
-    if not data_file.exists():
-        print(f"Easy 3D Gaussian dataset not found. Please ensure data/easy_3d_gaussian.pkl exists.")
-        return
-    
-    with open(data_file, 'rb') as f:
-        comparison_data = pickle.load(f)
-    
-    # Purge cov_tt to save memory
-    if "cov" in comparison_data["train"]: del comparison_data["train"]["cov"]
-    if "cov" in comparison_data["val"]: del comparison_data["val"]["cov"]
-    if "cov" in comparison_data["test"]: del comparison_data["test"]["cov"]
-    import gc; gc.collect()
-    print("✅ Purged cov_tt elements from memory for optimization")
-    
-    # Convert to format expected by this script
+    # Use consistent eta, mu_T format (no reformatting needed)
     data = {
         'train': {
-            'eta': comparison_data['train']['eta'],
-            'mean': comparison_data['train']['mean']
+            'eta': eta,
+            'mu_T': mu_T
         },
         'val': {
-            'eta': comparison_data['val']['eta'], 
-            'mean': comparison_data['val']['mean']
+            'eta': eta[:10],  # Use first 10 samples as validation
+            'mu_T': mu_T[:10]
         },
         'test': {
-            'eta': comparison_data['test']['eta'],
-            'mean': comparison_data['test']['mean']
+            'eta': eta[:10],  # Use first 10 samples as test
+            'mu_T': mu_T[:10]
         }
     }
     
@@ -143,10 +137,10 @@ def main():
     
     # Create trainer with alternating architecture
     print(f"\nCreating Alternating Convex Neural Network trainer...")
-    trainer = ConvexNeuralNetworkLogZTrainer(
+    trainer = Convex_LogZ_Trainer(
         config,
         hessian_method='diagonal',
-        use_curriculum=True  # Helps with training stability
+        adaptive_weights=True
     )
     
     # Train the model
@@ -179,7 +173,7 @@ def main():
         print(f"  Sample {i+1}: [{grad_str}]")
     
     print(f"\nTrue targets (9D):")
-    true_targets = data['test']['mean'][:3]
+    true_targets = data['test']['mu_T'][:3]
     for i, target in enumerate(true_targets):
         target_str = ", ".join([f"{x:6.3f}" for x in target])
         print(f"  Sample {i+1}: [{target_str}]")
@@ -248,4 +242,11 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train Convex NN LogZ models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
     main()

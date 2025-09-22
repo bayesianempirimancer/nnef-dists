@@ -3,7 +3,8 @@
 Training script for Invertible Neural Network ET model.
 
 This script trains, evaluates, and plots results for an Invertible NN ET
-on the natural parameter to statistics mapping task.
+on the natural parameter to statistics mapping task using standardized
+template-based data loading and dimension-agnostic processing.
 """
 
 import sys
@@ -25,7 +26,7 @@ from plot_training_results import plot_training_results, plot_model_comparison, 
 # Import dimension inference utility and standardized data loading from template
 from src.utils.data_utils import infer_dimensions
 sys.path.append(str(Path(__file__).parent))
-from src.utils.data_utils import load_standardized_ep_data
+from ET_training_template import load_standard_data
 
 # Simple configuration class
 class SimpleConfig:
@@ -73,24 +74,13 @@ class SimpleInvertibleNNET:
         full_config = FullConfig(network=network_config, training=training_config)
         return create_model_and_trainer(full_config)
     
-    def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
-        """Train the model and measure training time."""
+    def train(self, train_data, val_data, epochs=300, learning_rate=1e-3):
+        """Train the model using pre-split data and measure training time."""
         start_time = time.time()
         
         trainer = self.create_model_and_trainer()
         
-        # Create validation split from training data (BaseTrainer requires validation)
-        split_idx = len(eta_data) * 4 // 5  # 80% train, 20% val
-        train_data = {
-            'eta': eta_data[:split_idx],
-            'y': ground_truth[:split_idx]
-        }
-        val_data = {
-            'eta': eta_data[split_idx:],
-            'y': ground_truth[split_idx:]
-        }
-        
-        # Train model (BaseTrainer doesn't take epochs/learning_rate as arguments)
+        # Train model using the pre-split data (BaseTrainer doesn't take epochs/learning_rate as arguments)
         best_params, training_history = trainer.train(
             train_data=train_data,
             val_data=val_data
@@ -146,8 +136,13 @@ def main():
     print("Training Invertible NN ET Model")
     print("=" * 40)
     
+    # Load test data from specified file
+    data_file = Path(args.data_file) if args.data_file else Path("data/easy_3d_gaussian.pkl")
+    print(f"Loading test data from {data_file}...")
+    
     # Load data using standardized template function (dimension-agnostic)
-    eta_data, ground_truth, metadata = load_standardized_ep_data()
+    data_file_override = args.data_file if args.data_file else None
+    train_data, val_data, metadata = load_standard_data(data_file_override)
     
     # Define architecture to test (deep 8-layer network)
     architectures = {
@@ -161,22 +156,22 @@ def main():
         print(f"\nTraining InvertibleNN_ET_{arch_name} with hidden sizes: {hidden_sizes}")
         
         # Infer dimensions from metadata
-        eta_dim = infer_dimensions(eta_data, metadata=metadata)
+        eta_dim = infer_dimensions(train_data['eta'], metadata=metadata)
         model_wrapper = SimpleInvertibleNNET(hidden_sizes=hidden_sizes, eta_dim=eta_dim)
         
         trainer = model_wrapper.create_model_and_trainer()
         
         # Train
         print("🚂 Training...")
-        params, losses, training_time = model_wrapper.train(eta_data, ground_truth, epochs=300)
+        params, losses, training_time = model_wrapper.train(train_data, val_data, epochs=300)
         
         # Evaluate
         print("📊 Evaluating...")
-        metrics = model_wrapper.evaluate(trainer, params, eta_data, ground_truth)
+        metrics = model_wrapper.evaluate(trainer, params, train_data['eta'], train_data['y'])
         
         # Benchmark inference
         print("⚡ Benchmarking inference...")
-        inference_stats = model_wrapper.benchmark_inference(trainer, params, eta_data)
+        inference_stats = model_wrapper.benchmark_inference(trainer, params, train_data['eta'])
         
         results[f"InvertibleNN_ET_{arch_name}"] = {
             "hidden_sizes": hidden_sizes,
@@ -195,7 +190,7 @@ def main():
             "architecture": hidden_sizes,
             "model_name": f"InvertibleNN_ET_{arch_name}",
             "predictions": predictions,
-            "ground_truth": ground_truth,
+            "ground_truth": train_data['y'],
             "training_time": training_time,
             "inference_stats": inference_stats
         }
@@ -211,16 +206,8 @@ def main():
     output_dir = Path("artifacts/ET_models/invertible_nn_ET")
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create model comparison plots using standardized plotting function
-    plot_model_comparison(
-        results=results,
-        output_dir=str(output_dir),
-        save_plots=True,
-        show_plots=False
-    )
-    
     # Save results
-    results_file = output_dir / "results.json"
+    results_file = output_dir / "training_results.json"
     with open(results_file, 'w') as f:
         # Convert numpy arrays to lists for JSON serialization
         json_results = {}
@@ -232,13 +219,6 @@ def main():
                 else:
                     json_results[key][k] = v
         json.dump(json_results, f, indent=2)
-    
-    # Save results summary using standardized function
-    save_results_summary(
-        results=results,
-        output_dir=str(output_dir),
-        experiment_name="invertible_nn_ET"
-    )
     
     print(f"\n✅ Invertible NN ET training complete!")
     print(f"📁 Results saved to {output_dir}")

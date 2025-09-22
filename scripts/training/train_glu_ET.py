@@ -9,6 +9,7 @@ on the natural parameter to statistics mapping task.
 import sys
 import json
 import pickle
+import time
 from pathlib import Path
 import jax
 import jax.numpy as jnp
@@ -18,99 +19,59 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import standardized plotting functions
 sys.path.append(str(Path(__file__).parent.parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
-from src.config import FullConfig, NetworkConfig
-from src.models.glu_ET import GLUNetwork, GLUTrainer
+# Import dimension inference utility and standardized data loading from template
+from src.utils.data_utils import infer_dimensions
+sys.path.append(str(Path(__file__).parent))
+from training_template_ET import SimpleTemplateET
+from src.utils.data_utils import load_standardized_ep_data
 
-
-def convert_to_9d(eta_12d, mean_12d):
-    """Convert 12D data to 9D format for models expecting upper triangular covariance."""
-    # Extract components
-    eta1 = eta_12d[:, :3]  # 3D
-    eta2_flat = eta_12d[:, 3:12]  # 9D
-    mu = mean_12d[:, :3]  # 3D
-    mu_muT_plus_Sigma_flat = mean_12d[:, 3:12]  # 9D
-    
-    # Reshape to 3x3 matrices and extract upper triangular
-    eta2_matrices = eta2_flat.reshape(-1, 3, 3)
-    mu_muT_plus_Sigma_matrices = mu_muT_plus_Sigma_flat.reshape(-1, 3, 3)
-    
-    # Extract upper triangular elements (6 elements per matrix)
-    upper_indices = jnp.triu_indices(3)
-    eta2_upper = eta2_matrices[:, upper_indices[0], upper_indices[1]]  # (N, 6)
-    mu_muT_plus_Sigma_upper = mu_muT_plus_Sigma_matrices[:, upper_indices[0], upper_indices[1]]  # (N, 6)
-    
-    # Combine to 9D: [mu (3D), upper_elements (6D)]
-    eta_9d = jnp.concatenate([eta1, eta2_upper], axis=1)
-    mean_9d = jnp.concatenate([mu, mu_muT_plus_Sigma_upper], axis=1)
-    
-    return eta_9d, mean_9d
-
-
-class SimpleGLUET:
-    """GLU ET model wrapper using official implementation."""
-    
-    def __init__(self, hidden_sizes=[64, 64]):
+# Simple configuration class
+class SimpleConfig:
+    def __init__(self, hidden_sizes, activation="swish"):
         self.hidden_sizes = hidden_sizes
-        # Create proper FullConfig
-        self.config = FullConfig()
-        self.config.network.hidden_sizes = hidden_sizes
-        self.config.network.activation = "swish"
-        self.config.network.use_layer_norm = True
-        self.config.network.output_dim = 9  # 3D mean + 6D upper triangular covariance
-        self.config.training.learning_rate = 1e-3
-        self.config.training.num_epochs = 300
-        self.config.training.batch_size = 32
-        
-    def create_model(self):
-        """Create the model using the official implementation."""
-        from src.models.glu_ET import GLUNetwork
-        # Create proper network config
-        network_config = NetworkConfig()
-        network_config.hidden_sizes = self.hidden_sizes
-        network_config.activation = "swish"
-        network_config.use_layer_norm = True
-        network_config.output_dim = 9  # 3D mean + 6D upper triangular covariance
-        return GLUNetwork(config=network_config)
+        self.activation = activation
+        self.use_layer_norm = False
+
+
+
+class SimpleGLUET(SimpleTemplateET):
+    """GLU ET using the new template with minimal GLU-specific adapter."""
     
-    def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
-        """Train the model."""
-        import optax
-        import flax.linen as nn
-        from jax import random
+    def __init__(self, hidden_sizes=[64, 64], eta_dim=None):
+        super().__init__(hidden_sizes=hidden_sizes, eta_dim=eta_dim, model_type="glu")
+    
+    # train() method now inherited from SimpleTemplateET (uses standard mu_T key)
+    
+    def predict(self, trainer, params, eta_data):
+        """Make predictions using GLU-specific model.apply() method."""
+        return trainer.model.apply(params, eta_data)
+    
+    def benchmark_inference(self, trainer, params, eta_data, num_runs=50):
+        """Benchmark inference time using GLU-specific model.apply() method."""
+        # Warm-up run to ensure compilation is complete
+        _ = trainer.model.apply(params, eta_data[:1])
         
-        model = self.create_model()
+        # Measure inference time over multiple runs
+        times = []
+        for _ in range(num_runs):
+            start_time = time.time()
+            _ = trainer.model.apply(params, eta_data)
+            times.append(time.time() - start_time)
         
-        # Initialize model
-        rng = random.PRNGKey(42)
-        params = model.init(rng, eta_data[:1])
+        # Return statistics
+        avg_time = sum(times) / len(times)
+        min_time = min(times)
+        max_time = max(times)
         
-        # Create optimizer
-        optimizer = optax.adam(learning_rate)
-        opt_state = optimizer.init(params)
-        
-        # Training loop
-        losses = []
-        for epoch in range(epochs):
-            # Forward pass
-            predictions = model.apply(params, eta_data)
-            loss = jnp.mean((predictions - ground_truth) ** 2)
-            
-            # Backward pass
-            loss_grad = jax.grad(lambda p: jnp.mean((model.apply(p, eta_data) - ground_truth) ** 2))
-            grads = loss_grad(params)
-            
-            # Update parameters
-            updates, opt_state = optimizer.update(grads, opt_state)
-            params = optax.apply_updates(params, updates)
-            
-            losses.append(float(loss))
-            
-            if epoch % 50 == 0:
-                print(f"Epoch {epoch}, Loss: {loss:.6f}")
-        
-        return params, losses, model
+        return {
+            'avg_inference_time': avg_time,
+            'min_inference_time': min_time,
+            'max_inference_time': max_time,
+            'inference_per_sample': avg_time / len(eta_data),
+            'samples_per_second': len(eta_data) / avg_time
+        }
 
 
 def main():
@@ -118,34 +79,12 @@ def main():
     print("Training Standard GLU ET Model")
     print("=" * 40)
     
-    # Load test data from easy_3d_gaussian
-    print("Loading test data from easy_3d_gaussian...")
-    data_file = Path("data/easy_3d_gaussian.pkl")
+    # Load data using standardized template function
+    eta_data, ground_truth, metadata = load_standardized_ep_data()
     
-    with open(data_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    eta_data = data["train"]["eta"]
-    ground_truth = data["train"]["mean"]
-    print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
-    
-    # Purge cov_tt to save memory
-    if "cov" in data["train"]: del data["train"]["cov"]
-    if "cov" in data["val"]: del data["val"]["cov"]
-    if "cov" in data["test"]: del data["test"]["cov"]
-    import gc; gc.collect()
-    print("✅ Purged cov_tt elements from memory for optimization")
-    
-    # Convert 12D data to 9D for models expecting upper triangular covariance
-    eta_9d, ground_truth_9d = convert_to_9d(eta_data, ground_truth)
-    print(f"Converted to 9D: eta={eta_9d.shape}, ground_truth={ground_truth_9d.shape}")
-    
-    # Define architectures to test
+    # Define architecture to test (deep 8-layer network)
     architectures = {
-        "Small": [32, 32],
-        "Medium": [64, 64], 
-        "Large": [128, 64],
-        "Deep": [64, 64, 32]
+        "Deep": [64, 64, 64, 64, 64, 64, 64, 64]
     }
     
     results = {}
@@ -155,33 +94,41 @@ def main():
     for name, hidden_sizes in architectures.items():
         print(f"\nTraining GLU_ET_{name} with hidden sizes: {hidden_sizes}")
         
-        # Create and train model
-        model_wrapper = SimpleGLUET(hidden_sizes=hidden_sizes)
-        params, losses, trained_model = model_wrapper.train(eta_9d, ground_truth_9d, epochs=300)
+        # Infer dimensions from metadata
+        eta_dim = infer_dimensions(eta_data, metadata=metadata)
+        model_wrapper = SimpleGLUET(hidden_sizes=hidden_sizes, eta_dim=eta_dim)
         
-        # Evaluate
-        predictions = trained_model.apply(params, eta_9d)
-        mse = float(jnp.mean((predictions - ground_truth_9d) ** 2))
-        mae = float(jnp.mean(jnp.abs(predictions - ground_truth_9d)))
+        trainer = model_wrapper.create_model_and_trainer()
         
-        print(f"GLU_ET_{name} - MSE: {mse:.6f}, MAE: {mae:.6f}")
+        # Train and measure training time
+        params, losses, training_time = model_wrapper.train(eta_data, ground_truth, epochs=300)
         
-        # Store results
-        results[f"GLU_ET_{name}"] = {
-            "train_loss": losses,
-            "test_metrics": {
-                "mse": mse,
-                "mae": mae
-            },
-            "config": model_wrapper.config,
-            "model_name": f"GLU_ET_{name}",
-            "predictions": predictions,
-            "ground_truth": ground_truth_9d
-        }
+        # Evaluate accuracy
+        predictions = model_wrapper.predict(trainer, params, eta_data)
+        metrics = model_wrapper.evaluate(predictions, ground_truth)
+        
+        # Benchmark inference time
+        inference_stats = model_wrapper.benchmark_inference(trainer, params, eta_data, num_runs=50)
+        
+        print(f"GLU_ET_{name} - MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
+        print(f"  Training time: {training_time:.2f}s")
+        print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
+        # Store results using standardized function
+        results[f"GLU_ET_{name}"] = create_standardized_results(
+            model_name=f"GLU_ET_{name}",
+            architecture_info={"hidden_sizes": hidden_sizes},
+            metrics=metrics,
+            losses=losses,
+            training_time=training_time,
+            inference_stats=inference_stats,
+            predictions=predictions,
+            ground_truth=ground_truth
+        )
         
         # Track best model
-        if mse < best_mse:
-            best_mse = mse
+        if metrics['mse'] < best_mse:
+            best_mse = metrics['mse']
             best_model = f"GLU_ET_{name}"
     
     print(f"\n🏆 Best Model: {best_model} with MSE={best_mse:.6f}")
@@ -213,4 +160,11 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train GLU ET models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
     main()

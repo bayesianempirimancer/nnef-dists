@@ -1,205 +1,56 @@
 """
-LogZ Network - A unified neural network for learning log normalizers.
+LogZ Network Base Classes - Core training functionality for LogZ models.
 
-This module provides a flexible neural network architecture specifically designed
-for learning log normalizers A(η) of exponential families. The network outputs
-a scalar log normalizer whose gradients and Hessians provide the mean and 
-covariance of sufficient statistics.
+This module provides the base training functionality for LogZ networks that learn
+log normalizers A(η) of exponential families. The network outputs a scalar log 
+normalizer whose gradients and Hessians provide the mean and covariance of 
+sufficient statistics.
 
-Key features:
-- Flexible architecture (MLP, GLU, Quadratic ResNet)
-- Automatic gradient/Hessian computation via JAX
-- Numerically stable training with regularization
-- Support for various activation functions
-- Layer normalization for stability
+Note: Architecture-specific LogZ networks are now in individual model files:
+- MLP: src/models/mlp_logZ.py
+- GLU: src/models/glu_logZ.py  
+- Quadratic ResNet: src/models/quadratic_resnet_logZ.py
+- Convex NN: src/models/convex_nn_logZ.py
 """
 
 import jax
 import jax.numpy as jnp
-import flax.linen as nn
 from jax import random, grad, hessian, jacfwd
-from typing import Dict, Any, Tuple, Optional, Union, List
+from typing import Dict, Any, Tuple, Optional
 import optax
-import time
 from tqdm import tqdm
 
-from ..base_model import BaseNeuralNetwork, BaseTrainer
-from ..config import FullConfig, NetworkConfig
-from ..ef import ExponentialFamily
-
-
-class LogZNetwork(nn.Module):
-    """
-    Unified LogZ Network for learning log normalizers.
-    
-    This network can be configured to use different architectures:
-    - MLP: Standard multi-layer perceptron
-    - GLU: Gated linear unit architecture
-    - Quadratic: Quadratic ResNet architecture
-    
-    The network outputs a scalar log normalizer A(η) whose derivatives
-    provide the moments of the exponential family distribution.
-    """
-    
-    config: NetworkConfig
-    architecture: str = "mlp"  # Default architecture
-    
-    @nn.compact
-    def __call__(self, eta: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        """
-        Forward pass through the logZ network.
-        
-        Args:
-            eta: Natural parameters [batch_size, eta_dim]
-            training: Whether in training mode
-            
-        Returns:
-            Log normalizer values [batch_size,]
-        """
-        # Apply feature engineering if enabled
-        if hasattr(self.config, 'use_feature_engineering') and self.config.use_feature_engineering:
-            from ..eta_features import compute_eta_features
-            x = compute_eta_features(eta, method='default')
-        else:
-            x = eta
-        
-        if self.architecture == "mlp":
-            x = self._mlp_forward(x, training)
-        elif self.architecture == "glu":
-            x = self._glu_forward(x, training)
-        elif self.architecture == "quadratic":
-            x = self._quadratic_forward(x, training)
-        else:
-            raise ValueError(f"Unknown architecture: {self.architecture}")
-        
-        # Final projection to scalar log normalizer
-        x = nn.Dense(1, name='logZ_output')(x)
-        return jnp.squeeze(x, axis=-1)
-    
-    def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
-                            predicted_mean: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        """
-        Compute model-specific internal losses (e.g., regularization, smoothness penalties).
-        
-        Base implementation returns 0. Subclasses can override to add specific penalties.
-        
-        Args:
-            params: Model parameters
-            eta: Natural parameters [batch_size, eta_dim]
-            predicted_mean: Predicted mean statistics [batch_size, mu_dim] 
-            training: Whether in training mode
-            
-        Returns:
-            Internal loss value (scalar)
-        """
-        return 0.0
-    
-    def _mlp_forward(self, x: jnp.ndarray, training: bool) -> jnp.ndarray:
-        """MLP architecture forward pass."""
-        for i, hidden_size in enumerate(self.config.hidden_sizes):
-            x = nn.Dense(hidden_size, name=f'mlp_hidden_{i}')(x)
-            x = nn.swish(x)
-            if getattr(self.config, 'use_layer_norm', True):
-                x = nn.LayerNorm(name=f'mlp_layer_norm_{i}')(x)
-            
-            dropout_rate = getattr(self.config, 'dropout_rate', 0.0)
-            if dropout_rate > 0:
-                x = nn.Dropout(rate=dropout_rate, deterministic=not training)(x)
-        
-        return x
-    
-    def _glu_forward(self, x: jnp.ndarray, training: bool) -> jnp.ndarray:
-        """GLU architecture forward pass."""
-        # Input projection
-        x = nn.Dense(self.config.hidden_sizes[0], name='glu_input_proj')(x)
-        x = nn.swish(x)
-        
-        # GLU blocks
-        for i, hidden_size in enumerate(self.config.hidden_sizes):
-            residual = x
-            if residual.shape[-1] != hidden_size:
-                residual = nn.Dense(hidden_size, name=f'glu_residual_proj_{i}')(residual)
-            
-            # GLU layer
-            linear1 = nn.Dense(hidden_size, name=f'glu_linear1_{i}')(x)
-            linear2 = nn.Dense(hidden_size, name=f'glu_linear2_{i}')(x)
-            gate = nn.sigmoid(linear1)
-            glu_out = gate * linear2
-            
-            # Residual connection
-            x = residual + glu_out
-            
-            # Layer normalization
-            if getattr(self.config, 'use_layer_norm', True):
-                x = nn.LayerNorm(name=f'glu_layer_norm_{i}')(x)
-            
-            dropout_rate = getattr(self.config, 'dropout_rate', 0.0)
-            if dropout_rate > 0:
-                x = nn.Dropout(rate=dropout_rate, deterministic=not training)(x)
-        
-        return x
-    
-    def _quadratic_forward(self, x: jnp.ndarray, training: bool) -> jnp.ndarray:
-        """Quadratic ResNet architecture forward pass."""
-        # Input projection
-        if len(self.config.hidden_sizes) > 0:
-            x = nn.Dense(self.config.hidden_sizes[0], name='quad_input_proj')(x)
-        else:
-            x = nn.Dense(64, name='quad_input_proj')(x)
-        
-        # Quadratic residual blocks
-        for i, hidden_size in enumerate(self.config.hidden_sizes):
-            x = self._quadratic_residual_block(x, hidden_size, i, training)
-        
-        return x
-    
-    def _quadratic_residual_block(self, x: jnp.ndarray, hidden_size: int, 
-                                 block_idx: int, training: bool) -> jnp.ndarray:
-        """Single quadratic residual block."""
-        # Store input for residual connection
-        residual = x
-        if residual.shape[-1] != hidden_size:
-            residual = nn.Dense(hidden_size, name=f'quad_residual_proj_{block_idx}')(residual)
-        
-        # Linear transformation
-        linear_out = nn.Dense(hidden_size, name=f'quad_linear_{block_idx}')(x)
-        linear_out = nn.swish(linear_out)
-        
-        # Quadratic transformation with smaller initialization
-        quadratic_out = nn.Dense(hidden_size, 
-                                kernel_init=nn.initializers.normal(stddev=0.01),
-                                name=f'quad_quadratic_{block_idx}')(x)
-        quadratic_out = nn.swish(quadratic_out)
-        
-        # Combine: y = residual + Ax + (Bx)x (updated formula)
-        output = residual + linear_out - residual * quadratic_out
-        
-        # Layer normalization
-        if getattr(self.config, 'use_layer_norm', True):
-            output = nn.LayerNorm(name=f'quad_layer_norm_{block_idx}')(output)
-        
-        return output
-    
-    def get_parameter_count(self, params: Dict) -> int:
-        """Count total number of parameters."""
-        return sum(x.size for x in jax.tree_leaves(params))
+from ..base_model import BaseTrainer
+from ..config import FullConfig
 
 
 class LogZTrainer(BaseTrainer):
     """
-    Trainer for LogZ Networks with gradient/Hessian computation.
+    Base trainer for LogZ Networks with gradient/Hessian computation.
     
-    This trainer specializes in training networks that output log normalizers,
-    using automatic differentiation to compute gradients (mean) and Hessians
-    (covariance) for loss computation.
+    This trainer provides the core training functionality for networks that output log normalizers,
+    using automatic differentiation to compute gradients (mean) and Hessians (covariance) 
+    for loss computation.
+    
+    Architecture-specific implementations should inherit from this class and provide
+    their own model instances.
     """
     
-    def __init__(self, config: FullConfig, architecture: str = "mlp", 
+    def __init__(self, model, config: FullConfig, 
                  loss_type: str = "mse_mean_only", hessian_method: str = 'diagonal', 
                  adaptive_weights: bool = True, l1_reg_weight: float = 1e-4):
-        model = LogZNetwork(config=config.network)
+        """
+        Initialize LogZ trainer.
+        
+        Args:
+            model: The LogZ network model (should be an instance of BaseNeuralNetwork)
+            config: Full configuration object
+            loss_type: Type of loss function to use
+            hessian_method: Method for computing Hessian ('diagonal' or 'full')
+            adaptive_weights: Whether to use adaptive weighting for covariance loss
+            l1_reg_weight: Weight for L1 regularization
+        """
         super().__init__(model, config)
-        self.architecture = architecture
         self.loss_type = loss_type
         self.adaptive_weights = adaptive_weights
         self.l1_reg_weight = l1_reg_weight
@@ -208,93 +59,102 @@ class LogZTrainer(BaseTrainer):
         # Determine if we need Hessian computation based on loss type
         self.needs_hessian = loss_type in ["mse_mean_and_cov", "mse_mean_and_diag_cov", "KLqp", "KLqp_diag", "KLpq", "KLpq_diag"]
         self.hessian_method = "diagonal" if loss_type in ["mse_mean_and_diag_cov", "KLqp_diag", "KLpq_diag"] else "full"
+        
         # Precompiled functions for efficiency (will be set after model initialization)
         self._compiled_gradient_fn = None
         self._compiled_hessian_fn = None
+        self._last_params_hash = None
     
-    def _compile_functions(self):
+    def _compile_functions(self, params: Dict):
         """Precompile gradient and Hessian functions for efficiency."""
-        # Precompile the function structure (not bound to specific params)
-        def batch_gradient_fn(params, eta_batch):
+        # Create functions that are bound to the specific params
+        def batch_gradient_fn(eta_batch):
             def single_log_normalizer(eta_single):
-                return self.model.apply(params, eta_single[None, :], training=False)[0]
-            return jax.vmap(jax.grad(single_log_normalizer))(eta_batch)
+                return self.model.apply(params, eta_single, training=False)
+            grad_fn = jax.grad(single_log_normalizer)
+            return jax.vmap(grad_fn)(eta_batch)
         
         self._compiled_gradient_fn = jax.jit(batch_gradient_fn)
         
         # Precompile Hessian function based on method
         if self.hessian_method == 'diagonal':
-            def batch_hessian_diag_fn(params, eta_batch):
+            def batch_hessian_diag_fn(eta_batch):
                 def single_log_normalizer(eta_single):
-                    return self.model.apply(params, eta_single[None, :], training=False)[0]
+                    return self.model.apply(params, eta_single, training=False)
                 def diagonal_hessian_fn(eta_single):
                     grad_fn = jax.grad(single_log_normalizer)
                     return jnp.diag(jax.jacfwd(grad_fn)(eta_single))
                 return jax.vmap(diagonal_hessian_fn)(eta_batch)
             self._compiled_hessian_fn = jax.jit(batch_hessian_diag_fn)
         else:
-            def batch_hessian_full_fn(params, eta_batch):
+            def batch_hessian_full_fn(eta_batch):
                 def single_log_normalizer(eta_single):
-                    return self.model.apply(params, eta_single[None, :], training=False)[0]
+                    return self.model.apply(params, eta_single, training=False)
                 return jax.vmap(jax.hessian(single_log_normalizer))(eta_batch)
             self._compiled_hessian_fn = jax.jit(batch_hessian_full_fn)
     
     def compute_gradient(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
-        """Compute gradient of log normalizer (mean of sufficient statistics)."""
-        # Use precompiled function if available, otherwise compile on first use
-        if self._compiled_gradient_fn is None:
-            self._compile_functions()
+        """Compute gradient of log normalizer (expectation of sufficient statistics)."""
+        # Compute gradients directly without compilation for now
+        def single_log_normalizer(eta_single):
+            return self.model.apply(params, eta_single, training=False)
         
-        return self._compiled_gradient_fn(params, eta)
+        # Compute gradient w.r.t. all components (expectation of sufficient statistics)
+        grad_fn = jax.grad(single_log_normalizer, argnums=0)
+        return jax.vmap(grad_fn)(eta)
     
     def compute_hessian(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
         """Compute Hessian of log normalizer (covariance of sufficient statistics)."""
-        # Use precompiled function if available, otherwise compile on first use
-        if self._compiled_hessian_fn is None:
-            self._compile_functions()
+        # Compute Hessian directly without compilation for now
+        def single_log_normalizer(eta_single):
+            return self.model.apply(params, eta_single, training=False)
         
-        return self._compiled_hessian_fn(params, eta)
+        if self.hessian_method == 'diagonal':
+            def diagonal_hessian_fn(eta_single):
+                grad_fn = jax.grad(single_log_normalizer)
+                return jnp.diag(jax.jacfwd(grad_fn)(eta_single))
+            return jax.vmap(diagonal_hessian_fn)(eta)
+        else:
+            return jax.vmap(jax.hessian(single_log_normalizer))(eta)
     
-    def logZ_loss_fn(self, params: Dict, eta: jnp.ndarray, 
-                     target_mean: jnp.ndarray, target_cov: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+    def loss_fn(self, params: Dict, eta: jnp.ndarray, 
+                target_mu_T: jnp.ndarray, target_cov_TT: Optional[jnp.ndarray] = None) -> jnp.ndarray:
         """
         Compute loss based on log normalizer derivatives.
         
         Args:
             params: Model parameters
             eta: Natural parameters
-            target_mean: Target mean of sufficient statistics
-            target_cov: Target covariance of sufficient statistics (optional)
+            target_mu_T: Target mean of sufficient statistics
+            target_cov_tt: Target covariance of sufficient statistics (optional)
             
         Returns:
             Loss value
         """
-
         # Always compute mean prediction and loss
         predicted_mean = self.compute_gradient(params, eta)
-        mean_loss = jnp.mean((predicted_mean - target_mean) ** 2)
-        total_loss = mean_loss
+        total_loss = 0.0
         
         # Add covariance loss based on loss type
         if self.loss_type == "mse_mean_only":
-            # Only use mean loss - no Hessian needed
-            pass
+            mse_loss = jnp.mean((predicted_mean - target_mu_T) ** 2)
+            total_loss += mse_loss
         elif self.loss_type in ["mse_mean_and_cov", "mse_mean_and_diag_cov"]:             
-            if target_cov is None:
+            if target_cov_TT is None:
                 raise ValueError("Target covariance is required for mse_mean_and_cov or mse_mean_and_diag_cov loss type")
             # Compute covariance loss
             predicted_cov = self.compute_hessian(params, eta)
             
             if self.hessian_method == 'diagonal':
                 # Only compare diagonal elements
-                if target_cov.ndim == 3:  # Full covariance matrix [batch, dim, dim]
-                    target_diag = jnp.diagonal(target_cov, axis1=-2, axis2=-1)
+                if target_cov_TT.ndim == 3:  # Full covariance matrix [batch, dim, dim]
+                    target_diag = jnp.diagonal(target_cov_TT, axis1=-2, axis2=-1)
                 else:  # Already diagonal [batch, dim]
-                    target_diag = target_cov
+                    target_diag = target_cov_TT
                 cov_loss = jnp.mean((predicted_cov - target_diag) ** 2)
             else:
                 # Compare full covariance matrices
-                cov_loss = jnp.mean((predicted_cov - target_cov) ** 2)
+                cov_loss = jnp.mean((predicted_cov - target_cov_TT) ** 2)
             
             # Weight covariance loss
             cov_weight = 0.1 if not self.adaptive_weights else max(0.01, 1.0 / (1.0 + 0.1 * self.epoch))
@@ -316,106 +176,89 @@ class LogZTrainer(BaseTrainer):
     def train_step(self, params: Dict, opt_state: Any, batch: Dict[str, jnp.ndarray], 
                    optimizer: Any) -> Tuple[Dict, Any, float]:
         """Single training step with epoch tracking."""
-        loss_value, grads = jax.value_and_grad(self.logZ_loss_fn)(
-            params, batch['eta'], batch['mean'], batch.get('cov')
+        loss_value, grads = jax.value_and_grad(self.loss_fn)(
+            params, batch['eta'], batch['mu_T'], batch.get('cov_TT')
         )
         
-        # Gradient clipping for stability
-        grads = jax.tree_map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
+        # Update parameters
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
         
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        
-        return params, opt_state, float(loss_value)
+        return new_params, new_opt_state, float(loss_value)
     
     def train(self, train_data: Dict[str, jnp.ndarray], 
               val_data: Optional[Dict[str, jnp.ndarray]] = None,
               epochs: int = 300, learning_rate: float = 1e-3) -> Tuple[Dict, Dict]:
-        """Train the LogZ network."""
-        # Initialize model
-        rng = random.PRNGKey(42)
-        params = self.model.init(rng, train_data['eta'][:1])
+        """
+        Train the LogZ network.
         
-        # Optimizer
+        Args:
+            train_data: Training data with 'eta', 'mean', and optionally 'cov' keys
+            val_data: Validation data (optional)
+            epochs: Number of training epochs
+            learning_rate: Learning rate for optimizer
+            
+        Returns:
+            Tuple of (best_params, training_history)
+        """
+        # Initialize optimizer
         optimizer = optax.adam(learning_rate)
+        
+        # Initialize parameters
+        self.rng, init_rng = random.split(self.rng)
+        params = self.model.init(init_rng, train_data['eta'][:1])
         opt_state = optimizer.init(params)
         
         # Training loop
-        history = {'train_loss': [], 'val_loss': []}
         best_params = params
         best_loss = float('inf')
+        patience_counter = 0
+        training_history = {'train_loss': [], 'val_loss': []}
         
-        print(f"Training LogZ Network ({self.architecture}) for {epochs} epochs")
-        print(f"Loss type: {self.loss_type}")
-        if self.needs_hessian:
-            print(f"Hessian method: {self.hessian_method}")
-        print(f"Adaptive weights: {self.adaptive_weights}")
-        
-        # Start timing
-        start_time = time.time()
-        
-        # Training loop with progress bar
-        with tqdm(range(epochs), desc="Training", unit="epoch") as pbar:
-            for epoch in pbar:
-                self.epoch = epoch
+        pbar = tqdm(range(epochs), desc="Training LogZ Network")
+        for epoch in pbar:
+            self.epoch = epoch  # Update epoch for adaptive weighting
+            
+            # Training step
+            params, opt_state, train_loss = self.train_step(
+                params, opt_state, train_data, optimizer
+            )
+            training_history['train_loss'].append(train_loss)
+            
+            # Validation
+            if val_data is not None:
+                val_loss = float(self.loss_fn(
+                    params, val_data['eta'], val_data['mean'], val_data.get('cov')
+                ))
+                training_history['val_loss'].append(val_loss)
                 
-                # Training step
-                train_loss = 0.0
-                batch_size = 32
-                n_train = train_data['eta'].shape[0]
+                # Update progress bar with both train and validation loss
+                pbar.set_postfix({
+                    'train_loss': f'{train_loss:.6f}',
+                    'val_loss': f'{val_loss:.6f}'
+                })
+            else:
+                # Update progress bar with training loss only
+                pbar.set_postfix({'train_loss': f'{train_loss:.6f}'})
                 
-                # Mini-batch training
-                for i in range(0, n_train, batch_size):
-                    batch = {
-                        'eta': train_data['eta'][i:i+batch_size],
-                        'mean': train_data['mean'][i:i+batch_size]
-                    }
-                    # Only add covariance if it exists in training data
-                    if 'cov' in train_data:
-                        batch['cov'] = train_data['cov'][i:i+batch_size]
-                    
-                    params, opt_state, batch_loss = self.train_step(params, opt_state, batch, optimizer)
-                    train_loss += batch_loss
-                
-                train_loss /= (n_train // batch_size)
-                history['train_loss'].append(train_loss)
-                
-                # Validation
-                if val_data is not None:
-                    val_loss = self.logZ_loss_fn(params, val_data['eta'], 
-                                               val_data['mean'], val_data.get('cov'))
-                    history['val_loss'].append(float(val_loss))
-                    
-                    if val_loss < best_loss:
-                        best_loss = val_loss
-                        best_params = params
-                    
-                    # Update progress bar
-                    pbar.set_postfix({'Train Loss': f'{train_loss:.4f}', 'Val Loss': f'{val_loss:.4f}'})
+                # No validation data, use training loss for early stopping
+                if train_loss < best_loss:
+                    best_loss = train_loss
+                    best_params = params
+                    patience_counter = 0
                 else:
-                    pbar.set_postfix({'Train Loss': f'{train_loss:.4f}'})
-                
-                # Detailed progress reporting
-                if epoch % 50 == 0 or epoch < 10:
-                    if val_data is not None:
-                        print(f"  Epoch {epoch}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
-                    else:
-                        print(f"  Epoch {epoch}: Train Loss = {train_loss:.6f}")
+                    patience_counter += 1
+                    if patience_counter >= self.config.training.patience:
+                        print(f"Early stopping at epoch {epoch}")
+                        break
         
-        # Calculate total training time
-        total_training_time = time.time() - start_time
-        print(f"\n✓ Training completed in {total_training_time:.1f}s")
-        
-        # Add timing to history
-        history['total_training_time'] = total_training_time
-        
-        return best_params, history
+        return best_params, training_history
     
     def predict(self, params: Dict, eta: jnp.ndarray, compute_covariance: bool = False) -> Dict[str, jnp.ndarray]:
         """Make predictions using the trained model."""
         predicted_mean = self.compute_gradient(params, eta)
         
-        result = {'mean': predicted_mean}
+        result = {'stats': predicted_mean}
         
         if compute_covariance:
             predicted_cov = self.compute_hessian(params, eta)
@@ -429,31 +272,19 @@ class LogZTrainer(BaseTrainer):
         compute_cov = 'cov' in test_data
         predictions = self.predict(params, test_data['eta'], compute_covariance=compute_cov)
         
-        # Mean evaluation
-        mean_mse = jnp.mean((predictions['mean'] - test_data['mean']) ** 2)
-        mean_mae = jnp.mean(jnp.abs(predictions['mean'] - test_data['mean']))
+        # Compute statistics metrics
+        stats_mse = float(jnp.mean((predictions['stats'] - test_data['mu_T']) ** 2))
+        stats_mae = float(jnp.mean(jnp.abs(predictions['stats'] - test_data['mu_T'])))
         
-        results = {
-            'mean_mse': float(mean_mse),
-            'mean_mae': float(mean_mae)
+        result = {
+            'mse': stats_mse,
+            'mae': stats_mae,
+            'component_errors': jnp.mean((predictions['stats'] - test_data['mu_T']) ** 2, axis=0)
         }
         
-        # Covariance evaluation if available
-        if compute_cov:
-            if self.hessian_method == 'diagonal':
-                if test_data['cov'].ndim == 3:  # Full covariance matrix
-                    target_diag = jnp.diagonal(test_data['cov'], axis1=1, axis2=2)
-                else:  # Already diagonal
-                    target_diag = test_data['cov']
-                cov_mse = jnp.mean((predictions['covariance'] - target_diag) ** 2)
-            else:
-                cov_mse = jnp.mean((predictions['covariance'] - test_data['cov']) ** 2)
-            
-            results['cov_mse'] = float(cov_mse)
+        # Compute covariance metrics if available
+        if compute_cov and 'covariance' in predictions:
+            cov_mse = float(jnp.mean((predictions['covariance'] - test_data['cov']) ** 2))
+            result['cov_mse'] = cov_mse
         
-        return results
-
-
-def create_logZ_network_and_trainer(config: FullConfig, architecture: str = "mlp", l1_reg_weight: float = 1e-4) -> LogZTrainer:
-    """Factory function to create LogZ network and trainer."""
-    return LogZTrainer(config, architecture=architecture, l1_reg_weight=l1_reg_weight)
+        return result

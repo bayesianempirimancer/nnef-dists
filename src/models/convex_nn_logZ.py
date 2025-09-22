@@ -1,9 +1,10 @@
 """
-Convex Neural Network for log normalizer A(η).
+Convex NN LogZ implementation with dedicated architecture.
 
-This module implements an Input Convex Neural Network (ICNN) that parameterizes
-convex functions, ensuring that the learned log normalizer A(η) maintains 
-convexity properties essential for exponential family distributions.
+This module provides a standalone Convex NN-based LogZ model for learning log normalizers.
+It implements an Input Convex Neural Network (ICNN) that parameterizes convex functions,
+ensuring that the learned log normalizer A(η) maintains convexity properties essential 
+for exponential family distributions.
 
 Key features:
 - Non-negative weights in hidden layers to maintain convexity
@@ -21,12 +22,11 @@ Theoretical foundation:
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from typing import Dict, Any, Tuple, Optional, Union
+from jax import random, grad, hessian, jacfwd
+from typing import Dict, Any, Tuple, Optional, Union, List
 
 from ..base_model import BaseNeuralNetwork, BaseTrainer
-from ..config import FullConfig
-from ..ef import ExponentialFamily
-from .logZ_Net import LogZNetwork, LogZTrainer
+from ..config import FullConfig, NetworkConfig
 
 
 class ConvexLayer(nn.Module):
@@ -198,57 +198,72 @@ class ConvexNeuralNetwork(nn.Module):
         return output
 
 
-class ConvexNeuralNetworkLogZ(LogZNetwork):
+class Convex_LogZ_Network(BaseNeuralNetwork):
     """
-    Input Convex Neural Network for learning log normalizer A(η).
+    Convex NN-based LogZ Network for learning log normalizers.
     
-    Uses the generic ConvexNeuralNetwork with LogZ-specific preprocessing
-    and ensures scalar output for log normalizer values. Convexity is
-    guaranteed by the underlying ConvexNeuralNetwork architecture.
+    This network ensures convexity of the log normalizer A(η) by using
+    non-negative weights and convex activation functions.
     """
-    
-    # Inherit from LogZNetwork - architecture is always "convex" for this class
     
     @nn.compact
     def __call__(self, eta: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """
-        Forward pass through convex neural network for log normalizer.
-    
-    Args:
-            eta: Natural parameters [batch_size, eta_dim]
-            training: Whether in training mode
+        Forward pass through convex network.
         
-    Returns:
-            Log normalizer values [batch_size,]
+        Args:
+            eta: Natural parameters of shape (batch_size, input_dim)
+            training: Whether in training mode (affects dropout)
+            
+        Returns:
+            Log normalizer A(η) of shape (batch_size,)
         """
-        # Apply feature engineering if enabled - use convex_only features for convex networks
-        if hasattr(self.config, 'use_feature_engineering') and self.config.use_feature_engineering:
-            from ..eta_features import compute_eta_features
-            x_input = compute_eta_features(eta, method='convex_only')
-        else:
-            x_input = eta
+        x = eta
         
-        # Use the generic convex neural network with scalar output
-        convex_net = ConvexNeuralNetwork(config=self.config, output_dim=1)
-        log_normalizer = convex_net(x_input, training=training)
+        # First layer with skip connection
+        z = nn.Dense(self.config.hidden_sizes[0], name='convex_hidden_0')(x)
+        z = nn.relu(z)  # Convex activation
         
-        # Ensure scalar output
-        return jnp.squeeze(log_normalizer, axis=-1)
+        # Convex layers with skip connections
+        for i, hidden_size in enumerate(self.config.hidden_sizes[1:], 1):
+            # Convex layer with skip connection from input
+            z = ConvexLayer(hidden_size, name=f'convex_layer_{i}')(z, x, training)
+        
+        # Final projection to scalar log normalizer
+        z = nn.Dense(1, name='logZ_output')(z)
+        return jnp.squeeze(z, axis=-1)
 
-class ConvexNeuralNetworkLogZTrainer(LogZTrainer):
-    """Trainer for Convex Neural Network Log Normalizer."""
+class Convex_LogZ_Trainer(BaseTrainer):
+    """Trainer for Convex LogZ Network."""
     
-    def __init__(self, config: FullConfig, loss_type: str = "mse_mean_only", 
-                 hessian_method='diagonal', use_curriculum=True):
-        # Initialize LogZTrainer with convex architecture, then override model
-        super().__init__(config, architecture="convex", loss_type=loss_type,
-                        hessian_method=hessian_method, adaptive_weights=use_curriculum, 
-                        l1_reg_weight=1e-4)
+    def __init__(self, config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
+        model = Convex_LogZ_Network(config=config.network)
+        super().__init__(model, config)
+        self.hessian_method = hessian_method
+        self.adaptive_weights = adaptive_weights
         
-        # Override with our specialized convex model
-        self.model = ConvexNeuralNetworkLogZ(config=config.network)
+        # Compile gradient and Hessian functions
+        self._compiled_gradient_fn = jax.jit(grad(self.model.apply, argnums=1))
+        if hessian_method == 'diagonal':
+            self._compiled_hessian_fn = jax.jit(jax.hessian(self.model.apply, argnums=1))
+        elif hessian_method == 'full':
+            self._compiled_hessian_fn = jax.jit(hessian(self.model.apply, argnums=1))
+        else:
+            raise ValueError(f"Unknown hessian_method: {hessian_method}")
+    
+    def predict_mean(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
+        """Predict mean statistics using gradients of log normalizer."""
+        return self._compiled_gradient_fn(params, eta)
+    
+    def predict_covariance(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
+        """Predict covariance using Hessian of log normalizer."""
+        if self.hessian_method == 'diagonal':
+            hess = self._compiled_hessian_fn(params, eta)
+            return jnp.diagonal(hess, axis1=-2, axis2=-1)
+        else:  # full
+            return self._compiled_hessian_fn(params, eta)
 
 
 def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
-    """Factory function to create Convex NN LogZ model and trainer."""
-    return ConvexNeuralNetworkLogZTrainer(config, hessian_method=hessian_method, use_curriculum=adaptive_weights)
+    """Factory function to create Convex LogZ model and trainer."""
+    return Convex_LogZ_Trainer(config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)

@@ -97,7 +97,7 @@ class BaseTrainer:
     def loss_fn(self, params: Dict, batch: Dict[str, jnp.ndarray], training: bool = True) -> jnp.ndarray:
         """Compute loss for a batch."""
         predictions = self.model.apply(params, batch['eta'], training=training)
-        return jnp.mean(jnp.square(predictions - batch['y']))
+        return jnp.mean(jnp.square(predictions - batch['mu_T']))
     
     def train_step(self, params: Dict, opt_state: optax.OptState, batch: Dict[str, jnp.ndarray], 
                    optimizer: optax.GradientTransformation) -> Tuple[Dict, optax.OptState, float]:
@@ -146,7 +146,7 @@ class BaseTrainer:
                 batch_idx = perm[i:i + batch_size]
                 batch = {
                     'eta': train_data['eta'][batch_idx],
-                    'y': train_data['y'][batch_idx]
+                    'mu_T': train_data['mu_T'][batch_idx]
                 }
                 
                 params, opt_state, loss = self.train_step(params, opt_state, batch, optimizer)
@@ -157,7 +157,7 @@ class BaseTrainer:
             
             # Validation
             if epoch % tc.validation_freq == 0:
-                val_batch = {'eta': val_data['eta'], 'y': val_data['y']}
+                val_batch = {'eta': val_data['eta'], 'mu_T': val_data['mu_T']}
                 val_loss = float(self.eval_step(params, val_batch))
                 history['val_loss'].append(val_loss)
                 
@@ -188,8 +188,8 @@ class BaseTrainer:
         predictions = self.model.apply(params, test_data['eta'], training=False)
         
         # Compute metrics
-        mse = float(jnp.mean(jnp.square(predictions - test_data['y'])))
-        mae = float(jnp.mean(jnp.abs(predictions - test_data['y'])))
+        mse = float(jnp.mean(jnp.square(predictions - test_data['mu_T'])))
+        mae = float(jnp.mean(jnp.abs(predictions - test_data['mu_T'])))
         
         metrics = {'mse': mse, 'mae': mae}
         

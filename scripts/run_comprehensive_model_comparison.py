@@ -343,25 +343,25 @@ def train_model(model_name, model_config, eta_data, ground_truth, training_confi
 def create_et_trainer(model_name, config):
     """Create ET trainer based on model name."""
     if model_name == 'mlp_ET':
-        from src.models.ET_Net import create_mlp_et
-        return create_mlp_et(config)
+        from src.models.mlp_ET import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'glu_ET':
-        from src.models.ET_Net import create_glu_et
-        return create_glu_et(config)
+        from src.models.glu_ET import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'quadratic_resnet_ET':
-        from src.models.ET_Net import create_quadratic_et
-        return create_quadratic_et(config)
+        from src.models.quadratic_resnet_ET import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'invertible_nn_ET':
-        from src.models.ET_Net import create_invertible_et
-        return create_invertible_et(config)
+        from src.models.invertible_nn_ET import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'noprop_ct_ET':
-        from src.models.ET_Net import create_nopropct_et
-        return create_nopropct_et(config)
+        from src.models.noprop_ct_ET import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'geometric_flow_ET':
-        from src.models.geometric_flow_net import create_geometric_flow_et_network
-        return create_geometric_flow_et_network(config)
+        from src.models.geometric_flow_net import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'glow_ET':
-        from src.models.glow_net import create_glow_et_model_and_trainer
+        from src.models.glow_net_ET import create_glow_et_model_and_trainer
         return create_glow_et_model_and_trainer(config)
     else:
         raise ValueError(f"Unknown ET model: {model_name}")
@@ -370,17 +370,17 @@ def create_et_trainer(model_name, config):
 def create_logz_trainer(model_name, config):
     """Create LogZ trainer based on model name."""
     if model_name == 'mlp_logZ':
-        from src.models.logZ_Net import LogZTrainer
-        return LogZTrainer(config, architecture="mlp", loss_type="mse_mean_only")
+        from src.models.mlp_logZ import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'glu_logZ':
-        from src.models.logZ_Net import LogZTrainer
-        return LogZTrainer(config, architecture="glu", loss_type="mse_mean_only")
+        from src.models.glu_logZ import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'quadratic_resnet_logZ':
-        from src.models.logZ_Net import LogZTrainer
-        return LogZTrainer(config, architecture="quadratic", loss_type="mse_mean_only")
+        from src.models.quadratic_resnet_logZ import create_model_and_trainer
+        return create_model_and_trainer(config)
     elif model_name == 'convex_nn_logZ':
-        from src.models.convex_nn_logZ import ConvexNeuralNetworkLogZTrainer
-        return ConvexNeuralNetworkLogZTrainer(config)
+        from src.models.convex_nn_logZ import create_model_and_trainer
+        return create_model_and_trainer(config)
     else:
         raise ValueError(f"Unknown LogZ model: {model_name}")
 

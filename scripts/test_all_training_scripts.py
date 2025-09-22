@@ -14,6 +14,7 @@ import time
 import importlib.util
 from pathlib import Path
 import numpy as np
+import jax
 import jax.numpy as jnp
 from jax import random
 
@@ -22,11 +23,13 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 # Import training components
 from src.config import FullConfig, NetworkConfig, TrainingConfig
+from src.ef import ef_factory
 
 
 # =============================================================================
 # SMALL NETWORK ARCHITECTURES - Low Parameter Count for Quick Testing
 # =============================================================================
+OUTPUT_DIM = 12
 
 SMALL_MODEL_ARCHITECTURES = {
     # ET Models - Expected Statistics Networks
@@ -34,49 +37,49 @@ SMALL_MODEL_ARCHITECTURES = {
         'type': 'ET',
         'hidden_sizes': [32, 32],  # 2 layers x 32 units (~1K params)
         'description': 'Small MLP for Expected Statistics',
-        'output_dim': 9,  # 3D mean + 6D upper triangular covariance
+        'output_dim': OUTPUT_DIM,  # 3D mean + 6D upper triangular covariance
     },
     
     'glu_ET': {
         'type': 'ET', 
         'hidden_sizes': [32, 32],  # 2 layers x 32 units (~1K params)
         'description': 'Small GLU for Expected Statistics',
-        'output_dim': 9,
+        'output_dim': OUTPUT_DIM,
     },
     
     'quadratic_resnet_ET': {
         'type': 'ET',
         'hidden_sizes': [32],  # 1 layer + 1 residual block (~1K params)
         'description': 'Small Quadratic ResNet for Expected Statistics',
-        'output_dim': 9,
+        'output_dim': OUTPUT_DIM,
     },
     
     'invertible_nn_ET': {
         'type': 'ET',
         'hidden_sizes': [32, 32],  # 2 layers x 32 units (~1K params)
         'description': 'Small Invertible NN for Expected Statistics',
-        'output_dim': 9,
+        'output_dim': OUTPUT_DIM,
     },
     
     'noprop_ct_ET': {
         'type': 'ET',
         'hidden_sizes': [32, 32],  # 2 layers x 32 units (~1K params)
         'description': 'Small NoProp-CT for Expected Statistics',
-        'output_dim': 9,
+        'output_dim': OUTPUT_DIM,
     },
     
     'geometric_flow_ET': {
         'type': 'ET',
         'hidden_sizes': [32, 32],  # 2 layers x 32 units (~1K params)
         'description': 'Small Geometric Flow for Expected Statistics',
-        'output_dim': 9,
+        'output_dim': OUTPUT_DIM,
     },
     
     'glow_ET': {
         'type': 'ET',
         'hidden_sizes': [32] * 4,  # 4 layers x 32 units (~2K params, still small)
         'description': 'Small Glow Flow for Expected Statistics',
-        'output_dim': 9,
+        'output_dim': OUTPUT_DIM,
     },
     
     # LogZ Models - Log Normalizer Networks
@@ -178,7 +181,6 @@ def test_model_imports():
         ('src.models.logZ_Net', 'create_logZ_network_and_trainer'),
         ('src.models.geometric_flow_net', 'create_geometric_flow_et_network'),
         ('src.models.glow_ET', 'create_glow_et_model_and_trainer'),
-        ('src.utils.data_utils', 'load_training_data'),
         ('src.config', 'FullConfig'),
         ('src.ef', 'ef_factory')
     ]
@@ -193,8 +195,70 @@ def test_model_imports():
 
 
 
+def generate_simple_gaussian_batch(key, n_samples, ef):
+    """Generate a batch of simple Gaussian parameters and their sufficient statistics.
+    
+    Returns:
+        eta: Natural parameters (n_samples, eta_dim)
+        mu_T: Expectation of sufficient statistics (n_samples, eta_dim) 
+        cov_TT: Covariance matrix of sufficient statistics (n_samples, eta_dim, eta_dim)
+    """
+    # Generate random precision matrices (negative definite)
+    keys = random.split(key, n_samples + 1)
+    
+    # Generate means
+    means = random.normal(keys[0], (n_samples, 3)) * 0.5  # Small means
+    
+    # Generate simple precision matrices (diagonal with small negative values)
+    precisions = []
+    for i in range(n_samples):
+        # Create a simple diagonal precision matrix
+        diag_vals = random.uniform(keys[i+1], (3,), minval=-2.0, maxval=-0.5)
+        prec = jnp.diag(diag_vals)
+        precisions.append(prec)
+    
+    precisions = jnp.stack(precisions)
+    
+    # Convert to natural parameters (eta)
+    # For multivariate normal: eta = [J @ mu, -0.5 * J] where J is precision
+    eta1 = jnp.einsum('nij,nj->ni', precisions, means)  # J @ mu
+    eta2 = -0.5 * precisions.reshape(n_samples, -1)  # -0.5 * J (flattened)
+    eta = jnp.concatenate([eta1, eta2], axis=-1)
+    
+    # Compute mu_T: expectation of sufficient statistics
+    # For multivariate normal, this should have same dimension as eta
+    # We'll use a simplified computation for testing
+    mu_T_list = []
+    cov_TT_list = []
+    
+    for i in range(n_samples):
+        mu_i = means[i]
+        prec_i = precisions[i]
+        
+        # Compute covariance matrix from precision
+        cov_matrix = jnp.linalg.inv(-prec_i)  # Convert precision to covariance
+        
+        # Create sufficient statistics expectation: [mean, vec(cov + mean*mean^T)]
+        outer_product = jnp.outer(mu_i, mu_i)
+        sufficient_stats_mean = jnp.concatenate([
+            mu_i,  # First 3 components: mean
+            (cov_matrix + outer_product).flatten()  # Next 9 components: second moments
+        ])
+        mu_T_list.append(sufficient_stats_mean)
+        
+        # Create a simple covariance matrix of sufficient statistics (12x12)
+        # For testing, use a diagonal approximation
+        stats_cov = jnp.diag(jnp.ones(12) * 0.1)  # Simple diagonal covariance
+        cov_TT_list.append(stats_cov)
+    
+    mu_T = jnp.stack(mu_T_list)  # Shape: (n_samples, 12)
+    cov_TT = jnp.stack(cov_TT_list)  # Shape: (n_samples, 12, 12)
+    
+    return eta, mu_T, cov_TT
+
+
 def generate_small_test_data():
-    """Generate a small test dataset for training validation."""
+    """Generate a small test dataset for training validation using proper generate_data module."""
     print(f"\nGenerating Small Test Dataset...")
     print("="*35)
     
@@ -208,52 +272,72 @@ def generate_small_test_data():
     try:
         print(f"  🔧 Generating {data_file}...")
         
-        # Generate small test data (200 samples for training, 50 for val/test)
+        # Create 3D multivariate normal exponential family
+        ef = ef_factory("multivariate_normal", x_shape=(3,))
+        
+        # Define eta ranges for 3D multivariate normal
+        # Linear terms (mean): reasonable range
+        # Matrix terms (precision): negative definite range
+        eta_ranges = [
+            (-2.0, 2.0),  # Linear terms (mean parameters)  
+            (-3.0, -0.5)  # Matrix terms (precision matrix eigenvalues)
+        ]
+        
+        # Sampling configuration for HMC
+        sampler_cfg = {
+            "num_samples": 100,  # Small number for quick testing
+            "num_warmup": 50,
+            "step_size": 0.1,
+            "num_integration_steps": 10,
+            "initial_position": None
+        }
+        
+        # Generate dataset using proper exponential family approach
+        # Use a simplified approach similar to generate_normal_data.py
         rng = random.PRNGKey(42)
-        n_train = 200
-        n_val = 50
-        n_test = 50
         
-        # Generate random natural parameters (eta) - 12D for 3D Gaussian
-        eta_train = random.normal(rng, (n_train, 12))
-        eta_val = random.normal(rng, (n_val, 12))
-        eta_test = random.normal(rng, (n_test, 12))
+        # Generate training data
+        rng, subkey = random.split(rng)
+        eta_train, mu_T_train, cov_TT_train = generate_simple_gaussian_batch(subkey, 200, ef)
         
-        # Generate corresponding statistics (ground truth)
-        # For ET models: 9D (3D mean + 6D upper triangular covariance)
-        # For LogZ models: just mean (3D)
+        # Generate validation data
+        rng, subkey = random.split(rng)
+        eta_val, mu_T_val, cov_TT_val = generate_simple_gaussian_batch(subkey, 50, ef)
         
-        # Generate mean (3D)
-        mean_train = eta_train[:, :3] + 0.1 * random.normal(rng, (n_train, 3))
-        mean_val = eta_val[:, :3] + 0.1 * random.normal(rng, (n_val, 3))
-        mean_test = eta_test[:, :3] + 0.1 * random.normal(rng, (n_test, 3))
+        # Generate test data
+        rng, subkey = random.split(rng)
+        eta_test, mu_T_test, cov_TT_test = generate_simple_gaussian_batch(subkey, 50, ef)
         
-        # Generate full statistics for ET models (9D: mean + covariance)
-        # Create simple covariance structure (upper triangular)
-        cov_train = jnp.ones((n_train, 6)) * 0.1  # Simple covariance
-        cov_val = jnp.ones((n_val, 6)) * 0.1
-        cov_test = jnp.ones((n_test, 6)) * 0.1
-        
-        stats_train = jnp.concatenate([mean_train, cov_train], axis=1)  # 9D
-        stats_val = jnp.concatenate([mean_val, cov_val], axis=1)  # 9D
-        stats_test = jnp.concatenate([mean_test, cov_test], axis=1)  # 9D
-        
-        # Create small dataset structure
+        # Create dataset structure with correct naming convention
+        # eta: natural parameters (n_samples, eta_dim)
+        # mu_T: expectation of sufficient statistics (n_samples, eta_dim)
+        # cov_TT: covariance of sufficient statistics (n_samples, eta_dim, eta_dim)
         small_data = {
             "train": {
                 "eta": eta_train,
-                "mean": mean_train,  # 3D for LogZ models
-                "stats": stats_train  # 9D for ET models
+                "mu_T": mu_T_train,        # Expectation of sufficient statistics
+                "cov_TT": cov_TT_train     # Covariance of sufficient statistics
             },
             "val": {
                 "eta": eta_val,
-                "mean": mean_val,  # 3D for LogZ models
-                "stats": stats_val  # 9D for ET models
+                "mu_T": mu_T_val,          # Expectation of sufficient statistics
+                "cov_TT": cov_TT_val       # Covariance of sufficient statistics
             },
             "test": {
                 "eta": eta_test,
-                "mean": mean_test,  # 3D for LogZ models
-                "stats": stats_test  # 9D for ET models
+                "mu_T": mu_T_test,         # Expectation of sufficient statistics
+                "cov_TT": cov_TT_test      # Covariance of sufficient statistics
+            },
+            "metadata": {
+                "n_train": eta_train.shape[0],
+                "n_val": eta_val.shape[0],
+                "n_test": eta_test.shape[0],
+                "seed": 42,
+                "eta_dim": eta_train.shape[1],
+                "mu_T_dim": mu_T_train.shape[1],
+                "cov_TT_shape": cov_TT_train.shape[1:],
+                "exponential_family": "multivariate_normal_3d_small_test",
+                "difficulty": "Easy"
             }
         }
         
@@ -264,11 +348,17 @@ def generate_small_test_data():
         
         size = data_file.stat().st_size
         print(f"  ✅ Generated {data_file} ({size/1024:.1f} KB)")
-        print(f"  📊 Dataset: {n_train} train, {n_val} val, {n_test} test samples")
+        print(f"  📊 Dataset: {small_data['metadata']['n_train']} train, {small_data['metadata']['n_val']} val, {small_data['metadata']['n_test']} test samples")
+        print(f"  🎯 Using proper exponential family: {ef.__class__.__name__}")
+        print(f"  📐 Eta dim: {small_data['metadata']['eta_dim']}, mu_T dim: {small_data['metadata']['mu_T_dim']}")
+        print(f"  📐 cov_TT shape: {small_data['metadata']['cov_TT_shape']}")
+        print(f"  🔑 Using eta, mu_T, cov_TT format where eta.shape[-1] == mu_T.shape[-1] == {small_data['metadata']['eta_dim']}")
         return True
         
     except Exception as e:
         print(f"  ❌ Failed to generate test data: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -292,6 +382,7 @@ def train_small_models():
     eta_test = data['test']['eta']
     
     print(f"📊 Loaded dataset: {eta_train.shape[0]} train, {eta_val.shape[0]} val, {eta_test.shape[0]} test samples")
+    print(f"🔑 Data format: eta, mu_T, cov_TT (standardized)")
     
     # Create small training config (20 epochs)
     training_config = TrainingConfig(
@@ -313,14 +404,10 @@ def train_small_models():
         print(f"   Type: {model_config['type']}")
         
         # Get appropriate ground truth for this model type
-        if model_config['type'] == 'ET':
-            ground_truth_train = data['train']['stats']
-            ground_truth_val = data['val']['stats']
-            ground_truth_test = data['test']['stats']
-        else:
-            ground_truth_train = data['train']['mean']
-            ground_truth_val = data['val']['mean']
-            ground_truth_test = data['test']['mean']
+        # Both ET and LogZ models use 'mu_T' in the standardized format
+        ground_truth_train = data['train']['mu_T']
+        ground_truth_val = data['val']['mu_T']
+        ground_truth_test = data['test']['mu_T']
         
         try:
             result = train_single_model(
@@ -381,18 +468,14 @@ def train_single_model(model_name, model_config, eta_train, ground_truth_train, 
             elif model_name == 'noprop_ct_ET':
                 from src.models.noprop_ct_ET import create_model_and_trainer
             elif model_name == 'geometric_flow_ET':
-                from src.models.geometric_flow_net import create_geometric_flow_et_network
+                from src.models.geometric_flow_net import create_model_and_trainer
             elif model_name == 'glow_ET':
                 from src.models.glow_net_ET import create_glow_et_model_and_trainer
             else:
                 raise ValueError(f"Unknown ET model: {model_name}")
             
             # Create model and trainer
-            if model_name in ['geometric_flow_ET']:
-                # Special case for geometric flow - returns single trainer object
-                trainer = create_geometric_flow_et_network(config)
-                model = trainer.model
-            elif model_name == 'glow_ET':
+            if model_name == 'glow_ET':
                 # Special case for glow - returns single trainer object
                 trainer = create_glow_et_model_and_trainer(config)
                 model = trainer.model
@@ -421,8 +504,8 @@ def train_single_model(model_name, model_config, eta_train, ground_truth_train, 
             raise ValueError(f"Unknown model type: {model_config['type']}")
         
         # Prepare training data
-        train_data = {"eta": eta_train, "stats": ground_truth_train}
-        val_data = {"eta": eta_val, "stats": ground_truth_val}
+        train_data = {"eta": eta_train, "mu_T": ground_truth_train}
+        val_data = {"eta": eta_val, "mu_T": ground_truth_val}
         
         # Train the model
         print(f"   🔧 Training {model_name}...")

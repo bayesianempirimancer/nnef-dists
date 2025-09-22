@@ -12,7 +12,6 @@ from .exact_covariance import (
     supports_exact_covariance
 )
 from .data_utils import (
-    load_training_data,
     load_3d_gaussian_data,
     compute_ground_truth_3d_tril,
     list_data_files,
@@ -34,7 +33,6 @@ __all__ = [
     'compute_covariance_for_eta', 
     'verify_covariance_properties',
     'supports_exact_covariance',
-    'load_training_data',
     'load_3d_gaussian_data',
     'compute_ground_truth_3d_tril',
     'list_data_files',

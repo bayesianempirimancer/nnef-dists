@@ -234,7 +234,7 @@ def get_data_hash(cfg):
     return hashlib.md5(config_str.encode()).hexdigest()
 
 
-def save_training_data(train_data, val_data, data_file, config_hash):
+def save_training_data(train_data, val_data, data_file, config_hash, ef=None):
     """Save training data to file with metadata using JAX native format."""
     data_to_save = {
         "config_hash": config_hash,
@@ -249,6 +249,18 @@ def save_training_data(train_data, val_data, data_file, config_hash):
             "val_y": list(val_data["y"].shape)
         }
     }
+    
+    # Add exponential family metadata if ef is provided
+    if ef is not None:
+        import jax.numpy as jnp
+        data_to_save["metadata"] = {
+            "eta_dim": ef.eta_dim,
+            "mu_T_dim": ef.eta_dim,  # Same as eta_dim for expectation parameters
+            "ef_distribution_name": ef.__class__.__name__.lower().replace('_', '_'),  # e.g., multivariate_normal
+            "x_shape": list(ef.x_shape),
+            "x_dim": int(jnp.prod(jnp.array(ef.x_shape))),
+            "exponential_family": f"{ef.__class__.__name__.lower()}_{ef.x_shape[0]}d" if len(ef.x_shape) == 1 else f"{ef.__class__.__name__.lower()}_{ef.x_shape}"
+        }
     
     # Include covariance data if available
     if "cov" in train_data:
@@ -320,7 +332,7 @@ def main():
     # Save the data
     print(f"\nSaving data to {data_file}")
     data_file.parent.mkdir(parents=True, exist_ok=True)
-    save_training_data(train_data, val_data, data_file, config_hash)
+    save_training_data(train_data, val_data, data_file, config_hash, ef=ef)
     
     print("✅ Data generation complete!")
 

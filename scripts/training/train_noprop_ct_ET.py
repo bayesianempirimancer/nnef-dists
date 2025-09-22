@@ -1,258 +1,301 @@
 #!/usr/bin/env python3
 """
-Training script for NoProp-CT (No Propagation Continuous Time) model.
+Training script for NoProp-CT ET model.
 
-This script trains, evaluates, and plots results for a NoProp-CT network
-on the natural parameter to statistics mapping task.
+This script trains, evaluates, and plots results for a NoProp-CT ET network
+on the natural parameter to statistics mapping task using standardized 
+template-based data loading and dimension-agnostic processing.
 """
 
 import sys
 from pathlib import Path
 import time
 import json
+import jax
 import jax.numpy as jnp
+from jax import random
+# matplotlib import removed - now using standardized plotting
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add src to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
+sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent))
 
-from src.config import FullConfig
+# Import standardized plotting functions
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+
+# Import dimension inference utility and standardized data loading from template
+from src.utils.data_utils import infer_dimensions
+from src.utils.data_utils import load_standardized_ep_data
 from src.models.noprop_ct_ET import create_model_and_trainer
-from src.utils.data_utils import load_3d_gaussian_data, compute_ground_truth_3d_tril
+from src.config import NetworkConfig, FullConfig, TrainingConfig
 
-# =============================================================================
-# CONFIGURATION - Edit these parameters to modify the experiment
-# =============================================================================
+# Simple configuration class
+class SimpleConfig:
+    def __init__(self, hidden_sizes, activation="swish", dt=0.2):
+        self.hidden_sizes = hidden_sizes
+        self.activation = activation
+        self.use_layer_norm = False
+        self.dt = dt  # ODE integration step size
 
-# Deep narrow NoProp-CT configuration
-CONFIG = FullConfig()
-
-# Network architecture - Deep narrow for continuous time
-CONFIG.network.hidden_sizes = [96] * 8  # 8 time evolution layers x 96 units each
-CONFIG.network.activation = "swish"  # Swish works well for continuous dynamics
-CONFIG.network.use_feature_engineering = True
-CONFIG.network.output_dim = 9  # For tril format
-
-# NoProp-CT specific parameters
-CONFIG.model_specific.num_time_steps = 10
-CONFIG.model_specific.time_horizon = 1.0
-CONFIG.model_specific.ode_solver = "euler"
-CONFIG.model_specific.noise_scale = 0.01
-
-# Training parameters optimized for CT dynamics
-CONFIG.training.learning_rate = 6e-4  # Moderate LR for stability
-CONFIG.training.num_epochs = 120
-CONFIG.training.batch_size = 32
-CONFIG.training.patience = 25
-CONFIG.training.weight_decay = 1e-5
-CONFIG.training.gradient_clip_norm = 0.8
-
-# Experiment settings
-CONFIG.experiment.experiment_name = "noprop_ct_deep_narrow"
-CONFIG.experiment.output_dir = "artifacts/ET_models/noprop_ct_ET"
-
-# Loss Function
-LOSS_FUNCTION = "mse"  # Standard MSE loss
-
-# =============================================================================
+class SimpleNoPropCTET:
+    """NoProp-CT ET using official implementation."""
+    
+    def __init__(self, hidden_sizes=[64, 64], eta_dim=None, dt=0.2):
+        self.hidden_sizes = hidden_sizes
+        self.eta_dim = eta_dim
+        self.dt = dt
+        self.config = SimpleConfig(hidden_sizes=hidden_sizes, activation="swish", dt=dt)
+    
+    def create_model_and_trainer(self):
+        """Create the model and trainer using the official implementation."""
+        
+        # Use inferred dimensions from data
+        # For ET models, input and output dimensions should be the same
+        if self.eta_dim is None:
+            raise ValueError("eta_dim must be provided. Call infer_dimensions() first.")
+        
+        input_dim = self.eta_dim
+        output_dim = self.eta_dim  # Same as input for ET models
+        
+        network_config = NetworkConfig(
+            hidden_sizes=self.hidden_sizes,
+            activation="swish",
+            use_layer_norm=True,
+            input_dim=input_dim,
+            output_dim=output_dim
+        )
+        # Add dt parameter for NoProp-CT ODE integration
+        network_config.dt = self.dt
+        training_config = TrainingConfig(num_epochs=300, learning_rate=1e-3)
+        full_config = FullConfig(network=network_config, training=training_config)
+        return create_model_and_trainer(full_config)
+    
+    def train(self, train_data, val_data, epochs=300, learning_rate=1e-3):
+        """Train the model using pre-split data with progress bars and detailed reporting."""
+        import time
+        from tqdm import tqdm
+        import jax
+        
+        start_time = time.time()
+        trainer = self.create_model_and_trainer()
+        
+        # Initialize training
+        sample_input = train_data['eta'][:1]
+        params, opt_state = trainer.initialize_model(sample_input)
+        optimizer = trainer.create_optimizer()
+        
+        # Training state
+        best_val_loss = float('inf')
+        patience_counter = 0
+        best_params = params
+        history = {'train_loss': [], 'val_loss': []}
+        
+        tc = trainer.config.training
+        batch_size = tc.batch_size
+        n_train = train_data['eta'].shape[0]
+        
+        print(f"Training {trainer.model.__class__.__name__} for {tc.num_epochs} epochs")
+        print(f"Architecture: {trainer.config.network.hidden_sizes}")
+        print(f"Parameters: {trainer.model.get_parameter_count(params):,}")
+        print(f"ODE Step Size (dt): {getattr(trainer.config.network, 'dt', 0.2)}")
+        
+        # Training loop with progress bar
+        with tqdm(range(tc.num_epochs), desc="Training NoProp-CT ET") as pbar:
+            for epoch in pbar:
+                # Shuffle training data
+                key = jax.random.PRNGKey(epoch)
+                perm = jax.random.permutation(key, n_train)
+                train_data_shuffled = {k: v[perm] for k, v in train_data.items()}
+                
+                # Mini-batch training
+                epoch_losses = []
+                for i in range(0, n_train, batch_size):
+                    batch_data = {k: v[i:i+batch_size] for k, v in train_data_shuffled.items()}
+                    params, opt_state, batch_loss = trainer.train_step(params, opt_state, batch_data, optimizer)
+                    epoch_losses.append(batch_loss)
+                
+                # Average training loss for epoch
+                avg_train_loss = sum(epoch_losses) / len(epoch_losses)
+                history['train_loss'].append(avg_train_loss)
+                
+                # Validation loss
+                val_loss = float(trainer.eval_step(params, val_data))
+                history['val_loss'].append(val_loss)
+                
+                # Update progress bar with current losses
+                pbar.set_postfix({
+                    'Train': f'{avg_train_loss:.2f}',
+                    'Val': f'{val_loss:.2f}',
+                    'Best': f'{best_val_loss:.2f}'
+                })
+                
+                # Print detailed loss every 20 epochs
+                if epoch % 20 == 0:
+                    print(f"    Epoch {epoch:3d}: Train={avg_train_loss:.2f}, Val={val_loss:.2f}")
+                
+                # Early stopping
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_params = params
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= tc.patience:
+                        print(f"\nEarly stopping at epoch {epoch} (patience={tc.patience})")
+                        break
+        
+        training_time = time.time() - start_time
+        print(f"\nTraining completed in {training_time:.1f}s")
+        print(f"Best validation loss: {best_val_loss:.4f}")
+        
+        return best_params, history['train_loss'], training_time
+    
+    def benchmark_inference(self, trainer, params, eta_data, num_runs=50):
+        """Benchmark inference time with multiple runs for accuracy."""
+        # Warm-up run to ensure compilation is complete
+        _ = trainer.predict(params, eta_data[:1])
+        
+        # Measure inference time over multiple runs
+        times = []
+        for _ in range(num_runs):
+            start_time = time.time()
+            _ = trainer.predict(params, eta_data)
+            times.append(time.time() - start_time)
+        
+        # Return statistics
+        avg_time = sum(times) / len(times)
+        min_time = min(times)
+        max_time = max(times)
+        
+        return {
+            'avg_inference_time': avg_time,
+            'min_inference_time': min_time,
+            'max_inference_time': max_time,
+            'samples_per_second': len(eta_data) / avg_time,
+            'std_inference_time': jnp.std(jnp.array(times))
+        }
+    
+    def predict(self, trainer, params, eta_data):
+        """Make predictions."""
+        return trainer.predict(params, eta_data)
+    
+    def evaluate(self, trainer, params, eta_data, ground_truth):
+        """Evaluate model performance."""
+        predictions = self.predict(trainer, params, eta_data)
+        mse = float(jnp.mean((predictions - ground_truth) ** 2))
+        mae = float(jnp.mean(jnp.abs(predictions - ground_truth)))
+        
+        return {
+            "mse": mse,
+            "mae": mae,
+            "predictions": predictions
+        }
 
 
 def main():
     """Main training and evaluation pipeline."""
+    print("Training NoProp-CT ET Model")
+    print("=" * 40)
     
-    print("⏰ NOPROP-CT NETWORK TRAINING")
-    print("=" * 50)
+    # Load test data from specified file
+    data_file = Path(args.data_file) if args.data_file else Path("data/easy_3d_gaussian.pkl")
+    print(f"Loading test data from {data_file}...")
     
-    config = CONFIG
+    # Load data using standardized template function (dimension-agnostic)
+    eta_data, ground_truth, metadata = load_standardized_ep_data()
     
-    print(f"Experiment: {config.experiment.experiment_name}")
-    print(f"Architecture: {len(config.network.hidden_sizes)} CT layers x {config.network.hidden_sizes[0]} units")
-    print(f"Time Steps: {config.model_specific.num_time_steps}")
-    print(f"Time Horizon: {config.model_specific.time_horizon}")
-    print(f"ODE Solver: {config.model_specific.ode_solver}")
-    print(f"Learning Rate: {config.training.learning_rate}")
-    print(f"Batch Size: {config.training.batch_size}")
-    print(f"Loss Function: {LOSS_FUNCTION}")
-    
-    # Load data
-    print("\n📊 Loading data...")
-    data_file = Path("data/easy_3d_gaussian.pkl")
-    
-    import pickle
-    with open(data_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    # Create train/val/test splits with correct structure
-    # Convert 12D data to 9D format (3D mean + 6D upper triangular covariance)
-    import jax.numpy as jnp
-    
-    def convert_to_9d(eta_12d, mean_12d):
-        """Convert 12D data to 9D format for models expecting upper triangular covariance."""
-        # Extract components
-        eta1 = eta_12d[:, :3]  # 3D
-        eta2_flat = eta_12d[:, 3:12]  # 9D
-        mu = mean_12d[:, :3]  # 3D
-        mu_muT_plus_Sigma_flat = mean_12d[:, 3:12]  # 9D
-        
-        # Reshape to 3x3 matrices and extract upper triangular
-        eta2_matrices = eta2_flat.reshape(-1, 3, 3)
-        mu_muT_plus_Sigma_matrices = mu_muT_plus_Sigma_flat.reshape(-1, 3, 3)
-        
-        # Extract upper triangular elements (6 elements per matrix)
-        upper_indices = jnp.triu_indices(3)
-        eta2_upper = eta2_matrices[:, upper_indices[0], upper_indices[1]]  # (N, 6)
-        mu_muT_plus_Sigma_upper = mu_muT_plus_Sigma_matrices[:, upper_indices[0], upper_indices[1]]  # (N, 6)
-        
-        # Combine to 9D: [mu (3D), upper_elements (6D)]
-        eta_9d = jnp.concatenate([eta1, eta2_upper], axis=1)
-        mean_9d = jnp.concatenate([mu, mu_muT_plus_Sigma_upper], axis=1)
-        
-        return eta_9d, mean_9d
-    
-    train_eta_9d, train_mean_9d = convert_to_9d(data["train"]["eta"], data["train"]["mean"])
-    val_eta_9d, val_mean_9d = convert_to_9d(data["val"]["eta"], data["val"]["mean"])
-    
-    train_data = {"eta": train_eta_9d, "stats": train_mean_9d}
-    val_data = {"eta": val_eta_9d, "stats": val_mean_9d}
-    
-    # Purge cov_tt to save memory
-    if "cov" in data["train"]: del data["train"]["cov"]
-    if "cov" in data["val"]: del data["val"]["cov"]
-    if "cov" in data["test"]: del data["test"]["cov"]
-    import gc; gc.collect()
-    print("✅ Purged cov_tt elements from memory for optimization")
-    
-    # Create test split from validation data
-    n_val = val_data["eta"].shape[0]
-    n_test = min(n_val // 2, 500)
-    
-    test_data = {
-        "eta": val_data["eta"][:n_test],
-        "y": val_data["stats"][:n_test]
+    # Create train/val splits manually since this function doesn't provide them
+    split_idx = len(eta_data) * 4 // 5  # 80% train, 20% val
+    train_data = {
+        'eta': eta_data[:split_idx],
+        'y': ground_truth[:split_idx]
     }
-    
     val_data = {
-        "eta": val_data["eta"][n_test:],
-        "stats": val_data["stats"][n_test:]
+        'eta': eta_data[split_idx:],
+        'y': ground_truth[split_idx:]
     }
     
-    print(f"Training samples: {train_data['eta'].shape[0]}")
-    print(f"Validation samples: {val_data['eta'].shape[0]}")
-    print(f"Test samples: {test_data['eta'].shape[0]}")
-    print(f"Input dimension: {train_data['eta'].shape[1]}")
-    print(f"Output dimension: {train_data['stats'].shape[1]}")
+    # Define architecture to test (4-layer network for faster ODE integration)
+    architectures = {
+        "Deep": [64, 64, 64, 64]
+    }
     
-    # Use test data directly (ground truth is already in test_data['y'])
-    print("\n🎯 Using test data as ground truth...")
-    ground_truth = test_data['y']
-    print(f"Ground truth shape: {ground_truth.shape}")
+    results = {}
     
-    # Create model and trainer
-    print("\n🏗️  Creating NoProp-CT Network...")
-    trainer = create_model_and_trainer(config)
-    
-    # Train model
-    print("\n🚂 Training model...")
-    start_time = time.time()
-    
-    try:
-        best_params, history = trainer.train(train_data, val_data)
-        training_time = time.time() - start_time
+    # Test the architecture
+    for arch_name, hidden_sizes in architectures.items():
+        print(f"\nTraining NoPropCT_ET_{arch_name} with hidden sizes: {hidden_sizes}")
         
-        print(f"✅ Training completed in {training_time:.1f}s")
+        # Infer dimensions from metadata
+        eta_dim = infer_dimensions(eta_data, metadata=metadata)
+        # Use dt=0.2 for faster computation (doubled from original 0.1)
+        model_wrapper = SimpleNoPropCTET(hidden_sizes=hidden_sizes, eta_dim=eta_dim, dt=0.2)
         
-        # Evaluate model
-        print("\n📈 Evaluating model...")
-        metrics = trainer.evaluate(best_params, test_data, ground_truth)
+        trainer = model_wrapper.create_model_and_trainer()
         
-        print(f"Test MSE (vs Empirical): {metrics['mse']:.2f}")
-        print(f"Test MAE (vs Empirical): {metrics['mae']:.2f}")
-        if 'ground_truth_mse' in metrics:
-            print(f"Test MSE (vs Ground Truth): {metrics['ground_truth_mse']:.2f}")
-            print(f"Test MAE (vs Ground Truth): {metrics['ground_truth_mae']:.2f}")
+        # Train
+        params, losses, training_time = model_wrapper.train(train_data, val_data, epochs=300)
         
-        # Prepare results
-        param_count = trainer.model.get_parameter_count(best_params)
+        # Evaluate
+        print("📊 Evaluating...")
+        metrics = model_wrapper.evaluate(trainer, params, train_data['eta'], train_data['y'])
         
-        results = {
-            'NoProp-CT Network': {
-                'status': 'success',
-                'metrics': metrics,
-                'history': history,
-                'training_time': training_time,
-                'architecture_info': {
-                    'hidden_sizes': config.network.hidden_sizes,
-                    'parameter_count': param_count,
-                    'depth': len(config.network.hidden_sizes),
-                    'width': config.network.hidden_sizes[0] if config.network.hidden_sizes else 0,
-                    'time_steps': config.model_specific.num_time_steps,
-                    'time_horizon': config.model_specific.time_horizon,
-                    'activation': config.network.activation
-                },
-                'config': config.to_dict()
-            }
+        # Benchmark inference time
+        inference_stats = model_wrapper.benchmark_inference(trainer, params, train_data['eta'], num_runs=50)
+        
+        results[f"NoPropCT_ET_{arch_name}"] = {
+            "hidden_sizes": hidden_sizes,
+            "mse": metrics["mse"],
+            "mae": metrics["mae"],
+            "training_time": training_time,
+            "inference_stats": inference_stats,
+            "final_train_loss": losses[-1] if losses else float('inf'),
+            "test_metrics": metrics,
+            "architecture": hidden_sizes,
+            "model_name": f"NoPropCT_ET_{arch_name}",
+            "predictions": metrics["predictions"],
+            "ground_truth": train_data['y']
         }
         
-        # Save model
-        if config.experiment.save_model:
-            save_dir = Path(config.experiment.output_dir) / "model"
-            trainer.save_model(best_params, save_dir)
-        
-        # Create plots and report
-        if config.experiment.save_plots:
-            print("\n📊 Creating plots and report...")
-            output_dir = Path(config.experiment.output_dir)
-            create_comprehensive_report(results, output_dir, config.experiment.experiment_name)
-        
-        # Save detailed results
-        results_file = Path(config.experiment.output_dir) / "results.json"
-        results_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(results_file, 'w') as f:
-            def convert_for_json(obj):
-                if hasattr(obj, 'tolist'):
-                    return obj.tolist()
-                elif isinstance(obj, dict):
-                    return {k: convert_for_json(v) for k, v in obj.items()}
-                elif isinstance(obj, (list, tuple)):
-                    return [convert_for_json(item) for item in obj]
-                else:
-                    return obj
-            
-            json.dump(convert_for_json(results), f, indent=2)
-        
-        print(f"📁 Results saved to {config.experiment.output_dir}")
-        
-        # Final summary
-        print(f"\n🏆 FINAL RESULTS:")
-        print(f"  Model: NoProp-CT Network")
-        print(f"  Architecture: {len(config.network.hidden_sizes)} CT layers x {config.network.hidden_sizes[0]} units")
-        print(f"  Time Steps: {config.model_specific.num_time_steps}")
-        print(f"  Parameters: {param_count:,}")
-        print(f"  Training Time: {training_time:.1f}s")
-        print(f"  Best MSE (Ground Truth): {metrics.get('ground_truth_mse', metrics['mse']):.2f}")
-        print(f"  MCMC Error Bound: {empirical_mse:.6f}")
-        
-    except Exception as e:
-        print(f"❌ Training failed: {str(e)}")
-        
-        # Save failure information
-        results = {
-            'NoProp-CT Network': {
-                'status': 'failed',
-                'error': str(e),
-                'training_time': time.time() - start_time,
-                'config': config.to_dict()
-            }
-        }
-        
-        results_file = Path(config.experiment.output_dir) / "results.json"
-        results_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(results_file, 'w') as f:
+        print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
+        print(f"  Training time: {training_time:.2f}s")
+        print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+    
+    print(f"\n🏆 Best Model: NoPropCT_ET_Deep with MSE={results['NoPropCT_ET_Deep']['mse']:.6f}")
+    
+    # Create output directory
+    output_dir = Path("artifacts/ET_models/noprop_ct_ET")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create model comparison plots using standardized plotting function
+    plot_model_comparison(
+        results=results,
+        output_dir=str(output_dir),
+        save_plots=True,
+        show_plots=False
+    )
+    
+    # Save results
+    with open(output_dir / 'results.json', 'w') as f:
             json.dump(results, f, indent=2)
+    
+    # Save results summary using standardized function
+    save_results_summary(
+        results=results,
+        output_dir=str(output_dir)
+    )
         
-        raise
+    print(f"\n✅ NoProp-CT ET training complete!")
+    print(f"📁 Results saved to {output_dir}")
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train NoProp-CT ET models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
     main()

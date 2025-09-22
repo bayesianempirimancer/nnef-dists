@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Generate a more challenging dataset for model comparison.
+Generate a dataset for model comparison.
 
-This script creates a more difficult exponential family dataset that will
-better differentiate between model capabilities.
 """
 
 import os
@@ -120,6 +118,7 @@ def generate_gaussian_data(dim: int = 3, n_train: int = 1000, n_val: int = 250,
             eta_dict = ef.unflatten_stats_or_eta(eta_batch[i])
             mu_i = -0.5 * jnp.linalg.solve(eta_dict['xxT'], eta_dict['x'])
             Sigma_i = -0.5 * jnp.linalg.inv(eta_dict['xxT'])
+            # cov_TT should be the covariance matrix of the 12D sufficient statistics T = [X, X⊗X]
             cov_i = compute_exact_covariance_matrix(mu_i, Sigma_i)
             cov_batch.append(cov_i)
         return jnp.array(cov_batch)
@@ -135,17 +134,20 @@ def generate_gaussian_data(dim: int = 3, n_train: int = 1000, n_val: int = 250,
     
     # Create data dictionary
     data = {
-        'train': {'eta': eta_train, 'mean': mu_train, 'cov': cov_train},
-        'val': {'eta': eta_val, 'mean': mu_val, 'cov': cov_val},
-        'test': {'eta': eta_test, 'mean': mu_test, 'cov': cov_test},
+        'train': {'eta': eta_train, 'mu_T': mu_train, 'cov_TT': cov_train},
+        'val': {'eta': eta_val, 'mu_T': mu_val, 'cov_TT': cov_val},
+        'test': {'eta': eta_test, 'mu_T': mu_test, 'cov_TT': cov_test},
         'metadata': {
             'n_train': n_train,
             'n_val': n_val,
             'n_test': n_test,
             'seed': seed,
             'eta_dim': eta_train.shape[1],
-            'mu_dim': mu_train.shape[1],
+            'mu_T_dim': mu_train.shape[1],
             'exponential_family': f'multivariate_normal_{dim}d_{difficulty.lower()}',
+            'ef_distribution_name': 'multivariate_normal',  # Name for ef_factory
+            'x_shape': [dim],  # Shape of the data samples x
+            'x_dim': dim,  # Product of x_shape dimensions
             'difficulty': difficulty
         }
     }
@@ -289,14 +291,14 @@ def main(dim=3, difficulty='Easy', n_train=500, n_val=100, n_test=100, seed=42, 
     print(f"\n{difficulty} dataset saved to: {data_file}")
     print(f"Dataset statistics:")
     print(f"  η dimension: {data['metadata']['eta_dim']}")
-    print(f"  μ dimension: {data['metadata']['mu_dim']}")
+    print(f"  μ dimension: {data['metadata']['mu_T_dim']}")
     print(f"  Training samples: {data['metadata']['n_train']}")
     print(f"  Validation samples: {data['metadata']['n_val']}")
     print(f"  Test samples: {data['metadata']['n_test']}")
     
     # Print some statistics
     eta_train = data['train']['eta']
-    mu_train = data['train']['mean']
+    mu_train = data['train']['mu_T']
     
     print(f"\nData ranges:")
     print(f"  η range: [{jnp.min(eta_train):.3f}, {jnp.max(eta_train):.3f}]")

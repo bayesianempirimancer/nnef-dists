@@ -26,6 +26,9 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 sys.path.append(str(Path(__file__).parent.parent))
 from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
 
+# Import dimension inference utility
+from src.utils.data_utils import infer_dimensions
+
 # Data generation function removed - now using easy_3d_gaussian data
 
 
@@ -40,108 +43,98 @@ class SimpleConfig:
 class SimpleQuadraticResNetLogZ:
     """Quadratic ResNet Log Normalizer using official implementation."""
     
-    def __init__(self, hidden_sizes=[64, 64]):
+    def __init__(self, hidden_sizes=[64, 64], eta_dim=None):
         self.hidden_sizes = hidden_sizes
-        self.config = SimpleConfig(hidden_sizes=hidden_sizes, activation="swish")
+        self.eta_dim = eta_dim
+        # Create proper FullConfig
+        from src.config import FullConfig
+        self.config = FullConfig()
+        self.config.network.hidden_sizes = hidden_sizes
+        self.config.network.activation = "swish"
+        self.config.network.use_layer_norm = True
     
-    def create_model(self):
+    def create_model_and_trainer(self):
         """Create the model using the official implementation."""
-        from src.models.quadratic_resnet_logZ import QuadraticResNetLogNormalizer
-        # Create proper network config
-        from src.config import NetworkConfig
-        network_config = NetworkConfig()
-        network_config.hidden_sizes = self.hidden_sizes
-        network_config.activation = "swish"
-        network_config.use_layer_norm = True
-        network_config.output_dim = 1  # Log normalizer is scalar
-        return QuadraticResNetLogNormalizer(config=network_config)
+        from src.models.quadratic_resnet_logZ import create_model_and_trainer
+        # Create proper network config using inferred dimensions
+        from src.config import NetworkConfig, FullConfig, TrainingConfig
+        
+        # Use inferred dimensions from data
+        # For LogZ models, input is eta, output is scalar log normalizer
+        # Target is mu_T - expectation of sufficient statistic
+        if self.eta_dim is None:
+            raise ValueError("eta_dim must be provided. Call infer_dimensions() first.")
+        
+        input_dim = self.eta_dim
+        output_dim = 1  # LogZ models output scalar log normalizer
+        
+        network_config = NetworkConfig(
+            hidden_sizes=self.hidden_sizes,
+            activation="swish",
+            use_layer_norm=True,
+            input_dim=input_dim,
+            output_dim=output_dim
+        )
+        training_config = TrainingConfig(num_epochs=300, learning_rate=1e-3)
+        full_config = FullConfig(network=network_config, training=training_config)
+        return create_model_and_trainer(full_config)
+    
     
     def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
         """Train the model."""
-        import optax
-        import flax.linen as nn
-        import jax
+        trainer = self.create_model_and_trainer()
         
-        model = self.create_model()
+        # Prepare training data
+        # For LogZ models, ground_truth should be mu_T (same dimension as eta)
+        train_data = {
+            'eta': eta_data,
+            'mu_T': ground_truth  # This is the expectation of sufficient statistic
+        }
         
-        # Initialize
-        rng = random.PRNGKey(42)
-        params = model.init(rng, eta_data[:1])
+        # Use the trainer's built-in training method
+        best_params, training_history = trainer.train(
+            train_data=train_data,
+            val_data=None
+        )
         
-        # Optimizer
-        optimizer = optax.adamw(learning_rate=learning_rate, weight_decay=1e-4)
-        opt_state = optimizer.init(params)
-        
-        # Loss function
-        def loss_fn(params, eta_batch, target_batch):
-            log_norm = model.apply(params, eta_batch, training=True)
-            
-            def single_log_normalizer(eta_single):
-                return model.apply(params, eta_single[None, :], training=False)[0]
-            
-            grad_fn = jax.grad(single_log_normalizer)
-            network_mean = jax.vmap(grad_fn)(eta_batch)
-            mse_loss = jnp.mean(jnp.square(network_mean - target_batch))
-            l2_loss = jnp.mean(jnp.square(log_norm))
-            return mse_loss + 1e-6 * l2_loss
-        
-        # Training loop
-        losses = []
-        for epoch in range(epochs):
-            loss, grads = jax.value_and_grad(loss_fn)(params, eta_data, ground_truth)
-            updates, opt_state = optimizer.update(grads, opt_state, params)
-            params = optax.apply_updates(params, updates)
-            losses.append(float(loss))
-            
-            if epoch % 50 == 0 or epoch < 5:
-                print(f"  Epoch {epoch}: Loss = {loss:.6f}")
-        
-        return params, losses, model
+        return best_params, training_history['train_loss']
     
-    def predict(self, model, params, eta_data):
+    def predict(self, trainer, params, eta_data):
         """Make predictions using the trained model."""
-        import jax
-        
-        def single_log_normalizer(eta_single):
-            return model.apply(params, eta_single[None, :], training=False)[0]
-        
-        grad_fn = jax.grad(single_log_normalizer)
-        predictions = jax.vmap(grad_fn)(eta_data)
-        return predictions
+        predictions = trainer.predict(params, eta_data)
+        return predictions['stats']  # Extract expected sufficient statistics from the prediction dictionary
+
+    def evaluate(self, predictions, targets):
+        """Evaluate predictions against targets."""
+        mse = jnp.mean((predictions - targets) ** 2)
+        mae = jnp.mean(jnp.abs(predictions - targets))
+        return {
+            'mse': float(mse),
+            'mae': float(mae)
+        }
 
 
 def main():
     """Main training function."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train Quadratic ResNet LogZ models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
+    
     print("Training Quadratic ResNet LogZ Model")
     print("=" * 40)
     
-    # Load test data from easy_3d_gaussian
-    print("Loading test data from easy_3d_gaussian...")
-    data_file = Path("data/easy_3d_gaussian.pkl")
+    # Load test data using standardized function
+    from src.utils.data_utils import load_standardized_ep_data
+    data_file = args.data_file if args.data_file else "data/easy_3d_gaussian.pkl"
+    eta_data, ground_truth, metadata = load_standardized_ep_data(data_file)
     
-    import pickle
-    with open(data_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    eta_data = data["train"]["eta"]
-    ground_truth = data["train"]["mean"]
-    print(f"Data shapes: eta={eta_data.shape}, ground_truth={ground_truth.shape}")
-    
-    # Purge cov_tt to save memory
-    if "cov" in data["train"]: del data["train"]["cov"]
-    if "cov" in data["val"]: del data["val"]["cov"]
-    if "cov" in data["test"]: del data["test"]["cov"]
-    import gc; gc.collect()
-    print("✅ Purged cov_tt elements from memory for optimization")
-    
-    # Test different architectures
+    # Test single deep architecture
     architectures = {
-        'QuadResNet_LogZ_Small': [32, 32],
-        'QuadResNet_LogZ_Medium': [64, 64],
-        'QuadResNet_LogZ_Large': [128, 128],
-        'QuadResNet_LogZ_Deep': [64, 64, 64],
-        'QuadResNet_LogZ_Wide': [128, 64, 128],
-        'QuadResNet_LogZ_Max': [128, 128, 128],  # Maximum performance from our earlier work
+        'QuadResNet_LogZ_Deep': [64, 64, 64, 64, 64, 64, 64, 64],
     }
     
     results = {}
@@ -149,8 +142,12 @@ def main():
     for name, hidden_sizes in architectures.items():
         print(f"\nTraining {name} with hidden sizes: {hidden_sizes}")
         
-        model = SimpleQuadraticResNetLogZ(hidden_sizes=hidden_sizes)
-        params, losses, trained_model = model.train(eta_data, ground_truth, epochs=300)
+        # Infer dimensions from metadata or data
+        eta_dim = infer_dimensions(eta_data, metadata=data.get('metadata'))
+        model = SimpleQuadraticResNetLogZ(hidden_sizes=hidden_sizes, eta_dim=eta_dim)
+        
+        params, losses = model.train(eta_data, ground_truth, epochs=300)
+        trained_model = model.create_model_and_trainer()
         predictions = model.predict(trained_model, params, eta_data)
         
         # Calculate metrics
@@ -159,12 +156,12 @@ def main():
         
         # Create plots using standardized plotting function
         metrics = plot_training_results(
-            trainer=model_wrapper,
+            trainer=model,
             eta_data=eta_data,
             ground_truth=ground_truth,
             predictions=predictions,
             losses=losses,
-            config=model_wrapper.config,
+            config=model.config,
             model_name=name,
             output_dir="artifacts/logZ_models/quadratic_resnet_logZ",
             save_plots=True,
@@ -213,4 +210,11 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train Quadratic ResNet LogZ models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    
+    args = parser.parse_args()
     main()
