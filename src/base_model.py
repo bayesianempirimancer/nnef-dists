@@ -31,7 +31,7 @@ class BaseNeuralNetwork(nn.Module):
     
     def get_parameter_count(self, params: Dict) -> int:
         """Count total number of parameters."""
-        return sum(x.size for x in jax.tree_leaves(params))
+        return sum(x.size for x in jax.tree.leaves(params))
 
 
 class BaseTrainer:

@@ -75,7 +75,3 @@ class MLP_ET_Trainer(ETTrainer):
         model = MLP_ET_Network(config=config.network)
         super().__init__(model, config)
 
-
-def create_model_and_trainer(config: FullConfig) -> MLP_ET_Trainer:
-    """Factory function to create MLP ET model and trainer."""
-    return MLP_ET_Trainer(config)

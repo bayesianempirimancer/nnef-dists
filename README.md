@@ -27,7 +27,7 @@ pip install -e .
 2. Generate training data for a 3D Gaussian model:
 
 ```bash
-python src/generate_data.py --config configs/gaussian_3d_large.yaml
+python src/generate_data.py --config data/configs/gaussian_3d_large.yaml
 ```
 
 3. Test all models with small architectures (quick validation):
@@ -114,7 +114,7 @@ Artifacts (learned parameters, training history, and plots) will be saved under 
   - `list_available_models.py`: Model listing and configuration overview
   - `plot_training_results.py`: Standardized plotting functions
   - `debug/`: Outdated and experimental scripts
-- `configs/`: Configuration files
+- `data/configs/`: Configuration files
   - `gaussian_1d_large.yaml`: Large-scale 1D Gaussian configuration
   - `multivariate_3d_large.yaml`: Large-scale 3D multivariate Gaussian configuration
 - `artifacts/`: Saved models, training history, and plots

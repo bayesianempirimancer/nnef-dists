@@ -97,7 +97,10 @@ class LogZTrainer(BaseTrainer):
         """Compute gradient of log normalizer (expectation of sufficient statistics)."""
         # Compute gradients directly without compilation for now
         def single_log_normalizer(eta_single):
-            return self.model.apply(params, eta_single, training=False)
+            # Ensure eta_single has batch dimension for the model
+            eta_batch = jnp.expand_dims(eta_single, axis=0)
+            result = self.model.apply(params, eta_batch, training=False)
+            return jnp.squeeze(result)  # Remove batch dimension
         
         # Compute gradient w.r.t. all components (expectation of sufficient statistics)
         grad_fn = jax.grad(single_log_normalizer, argnums=0)
@@ -107,7 +110,10 @@ class LogZTrainer(BaseTrainer):
         """Compute Hessian of log normalizer (covariance of sufficient statistics)."""
         # Compute Hessian directly without compilation for now
         def single_log_normalizer(eta_single):
-            return self.model.apply(params, eta_single, training=False)
+            # Ensure eta_single has batch dimension for the model
+            eta_batch = jnp.expand_dims(eta_single, axis=0)
+            result = self.model.apply(params, eta_batch, training=False)
+            return jnp.squeeze(result)  # Remove batch dimension
         
         if self.hessian_method == 'diagonal':
             def diagonal_hessian_fn(eta_single):
@@ -167,7 +173,7 @@ class LogZTrainer(BaseTrainer):
         # Add L1 regularization if enabled
         if self.l1_reg_weight > 0.0:
             l1_reg = 0.0
-            for param in jax.tree_leaves(params):
+            for param in jax.tree.leaves(params):
                 l1_reg += jnp.sum(jnp.abs(param))
             total_loss += self.l1_reg_weight * l1_reg
         
@@ -193,7 +199,7 @@ class LogZTrainer(BaseTrainer):
         Train the LogZ network.
         
         Args:
-            train_data: Training data with 'eta', 'mean', and optionally 'cov' keys
+            train_data: Training data with 'eta', 'mu_T', and optionally 'cov_TT' keys
             val_data: Validation data (optional)
             epochs: Number of training epochs
             learning_rate: Learning rate for optimizer
@@ -206,7 +212,9 @@ class LogZTrainer(BaseTrainer):
         
         # Initialize parameters
         self.rng, init_rng = random.split(self.rng)
-        params = self.model.init(init_rng, train_data['eta'][:1])
+        # Ensure consistent initialization shape for gradient computation
+        init_batch = jnp.expand_dims(train_data['eta'][0], axis=0)  # Shape (1, input_dim)
+        params = self.model.init(init_rng, init_batch, training=True)
         opt_state = optimizer.init(params)
         
         # Training loop
@@ -228,7 +236,7 @@ class LogZTrainer(BaseTrainer):
             # Validation
             if val_data is not None:
                 val_loss = float(self.loss_fn(
-                    params, val_data['eta'], val_data['mean'], val_data.get('cov')
+                    params, val_data['eta'], val_data['mu_T'], val_data.get('cov_TT')
                 ))
                 training_history['val_loss'].append(val_loss)
                 

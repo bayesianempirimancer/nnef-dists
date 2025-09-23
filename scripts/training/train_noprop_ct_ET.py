@@ -22,7 +22,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 sys.path.append(str(Path(__file__).parent))
 
 # Import standardized plotting functions
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 # Import dimension inference utility and standardized data loading from template
 from src.utils.data_utils import infer_dimensions
@@ -32,7 +32,7 @@ from src.config import NetworkConfig, FullConfig, TrainingConfig
 
 # Simple configuration class
 class SimpleConfig:
-    def __init__(self, hidden_sizes, activation="swish", dt=0.2):
+    def __init__(self, hidden_sizes, activation="swish", dt=0.1):
         self.hidden_sizes = hidden_sizes
         self.activation = activation
         self.use_layer_norm = False
@@ -41,7 +41,7 @@ class SimpleConfig:
 class SimpleNoPropCTET:
     """NoProp-CT ET using official implementation."""
     
-    def __init__(self, hidden_sizes=[64, 64], eta_dim=None, dt=0.2):
+    def __init__(self, hidden_sizes=[64, 64], eta_dim=None, dt=0.1):
         self.hidden_sizes = hidden_sizes
         self.eta_dim = eta_dim
         self.dt = dt
@@ -98,7 +98,7 @@ class SimpleNoPropCTET:
         print(f"Training {trainer.model.__class__.__name__} for {tc.num_epochs} epochs")
         print(f"Architecture: {trainer.config.network.hidden_sizes}")
         print(f"Parameters: {trainer.model.get_parameter_count(params):,}")
-        print(f"ODE Step Size (dt): {getattr(trainer.config.network, 'dt', 0.2)}")
+        print(f"ODE Step Size (dt): {getattr(trainer.config.network, 'dt', 0.1)}")
         
         # Training loop with progress bar
         with tqdm(range(tc.num_epochs), desc="Training NoProp-CT ET") as pbar:
@@ -120,7 +120,7 @@ class SimpleNoPropCTET:
                 history['train_loss'].append(avg_train_loss)
                 
                 # Validation loss
-                val_loss = float(trainer.eval_step(params, val_data))
+                val_loss = float(trainer.loss_fn(params, val_data['eta'], val_data['mu_T']))
                 history['val_loss'].append(val_loss)
                 
                 # Update progress bar with current losses
@@ -173,6 +173,7 @@ class SimpleNoPropCTET:
             'min_inference_time': min_time,
             'max_inference_time': max_time,
             'samples_per_second': len(eta_data) / avg_time,
+            'inference_per_sample': avg_time / len(eta_data),
             'std_inference_time': jnp.std(jnp.array(times))
         }
     
@@ -209,16 +210,21 @@ def main():
     split_idx = len(eta_data) * 4 // 5  # 80% train, 20% val
     train_data = {
         'eta': eta_data[:split_idx],
-        'y': ground_truth[:split_idx]
+        'mu_T': ground_truth[:split_idx]
     }
     val_data = {
         'eta': eta_data[split_idx:],
-        'y': ground_truth[split_idx:]
+        'mu_T': ground_truth[split_idx:]
     }
     
-    # Define architecture to test (4-layer network for faster ODE integration)
+    # Define architectures to test (all variants for comprehensive comparison)
     architectures = {
-        "Deep": [64, 64, 64, 64]
+        "Small": [32, 32],
+        "Medium": [64, 64],
+        "Large": [128, 128],
+        "Deep": [64, 64, 64],
+        "Wide": [128, 64, 128],
+        "Max": [128, 128, 128]
     }
     
     results = {}
@@ -229,8 +235,8 @@ def main():
         
         # Infer dimensions from metadata
         eta_dim = infer_dimensions(eta_data, metadata=metadata)
-        # Use dt=0.2 for faster computation (doubled from original 0.1)
-        model_wrapper = SimpleNoPropCTET(hidden_sizes=hidden_sizes, eta_dim=eta_dim, dt=0.2)
+        # Use dt=0.1 for proper ODE integration (time_horizon=1.0 / num_time_steps=10)
+        model_wrapper = SimpleNoPropCTET(hidden_sizes=hidden_sizes, eta_dim=eta_dim, dt=0.1)
         
         trainer = model_wrapper.create_model_and_trainer()
         
@@ -239,24 +245,21 @@ def main():
         
         # Evaluate
         print("📊 Evaluating...")
-        metrics = model_wrapper.evaluate(trainer, params, train_data['eta'], train_data['y'])
+        metrics = model_wrapper.evaluate(trainer, params, train_data['eta'], train_data['mu_T'])
         
         # Benchmark inference time
         inference_stats = model_wrapper.benchmark_inference(trainer, params, train_data['eta'], num_runs=50)
         
-        results[f"NoPropCT_ET_{arch_name}"] = {
-            "hidden_sizes": hidden_sizes,
-            "mse": metrics["mse"],
-            "mae": metrics["mae"],
-            "training_time": training_time,
-            "inference_stats": inference_stats,
-            "final_train_loss": losses[-1] if losses else float('inf'),
-            "test_metrics": metrics,
-            "architecture": hidden_sizes,
-            "model_name": f"NoPropCT_ET_{arch_name}",
-            "predictions": metrics["predictions"],
-            "ground_truth": train_data['y']
-        }
+        results[f"NoPropCT_ET_{arch_name}"] = create_standardized_results(
+            model_name=f"NoPropCT_ET_{arch_name}",
+            architecture_info={"hidden_sizes": hidden_sizes},
+            metrics=metrics,
+            losses=losses,
+            training_time=training_time,
+            inference_stats=inference_stats,
+            predictions=metrics["predictions"],
+            ground_truth=train_data['mu_T']
+        )
         
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")

@@ -182,7 +182,7 @@ class LogZNetwork(nn.Module):
     
     def get_parameter_count(self, params: Dict) -> int:
         """Count total number of parameters."""
-        return sum(x.size for x in jax.tree_leaves(params))
+        return sum(x.size for x in jax.tree.leaves(params))
 
 
 class LogZTrainer(BaseTrainer):
@@ -307,7 +307,7 @@ class LogZTrainer(BaseTrainer):
         # Add L1 regularization if enabled
         if self.l1_reg_weight > 0.0:
             l1_reg = 0.0
-            for param in jax.tree_leaves(params):
+            for param in jax.tree.leaves(params):
                 l1_reg += jnp.sum(jnp.abs(param))
             total_loss += self.l1_reg_weight * l1_reg
         
@@ -321,7 +321,7 @@ class LogZTrainer(BaseTrainer):
         )
         
         # Gradient clipping for stability
-        grads = jax.tree_map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
+        grads = jax.tree.map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
         
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)

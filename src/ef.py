@@ -215,16 +215,16 @@ class MultivariateNormal(ExponentialFamily):
         eta1_nearest = eta_target['x']  # Linear part [d,]
         eta2_nearest_diag = jnp.diag(eta_target['xxT'])
         
-        Sigma_target_diag = jnp.real(-0.5 / eta2_nearest_diag)
-        mu_target = jnp.real(Sigma_target_diag * eta1_nearest)
-        
+        Sigma_target_diag = -0.5 / eta2_nearest_diag
+        mu_nearest = Sigma_target_diag * eta1_nearest
+
         mu_nearest_dict = {
-            'x': jnp.real(mu_target),
-            'xxT': jnp.real(jnp.diag(Sigma_target_diag) + jnp.outer(mu_target, mu_target))
+            'x': mu_nearest,
+            'xxT': jnp.diag(Sigma_target_diag) + jnp.outer(mu_nearest, mu_nearest)
         }
         eta_nearest_dict = {
-            'x': jnp.real(eta1_nearest),
-            'xxT': jnp.real(jnp.diag(eta2_nearest_diag))
+            'x': eta1_nearest,
+            'xxT': jnp.diag(eta2_nearest_diag)
         }
 
         return eta_nearest_dict, mu_nearest_dict

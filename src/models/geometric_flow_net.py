@@ -42,34 +42,99 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
     """
     
     matrix_rank: int = None  # Rank of matrix A (if None, use output dimension)
-    n_time_steps: int = 3  # Minimal time steps due to smoothness
+    n_time_steps: int = 10  # Increased time steps for better integration
     smoothness_weight: float = 1e-3  # Penalty for large du/dt
-    time_embed_dim: int = 16  # Dimension of time embedding
+    time_embed_dim: int = None  # Will be set to match eta/mu dimensions
     max_freq: float = 10.0  # Maximum frequency for time embedding
     
-    def _time_embedding(self, t: float) -> jnp.ndarray:
+    def _time_embedding(self, t: float, target_dim: int) -> jnp.ndarray:
         """
-        Create sinusoidal time embedding.
+        Create Fourier time embedding with dimensions matching eta/mu.
         
         Args:
             t: Time value ∈ [0, 1]
+            target_dim: Target dimension for the embedding (should match eta/mu dim)
             
         Returns:
-            Time embedding [time_embed_dim,]
+            Time embedding [target_dim,]
         """
-        # Create frequency schedule
-        freqs = jnp.logspace(0, jnp.log10(self.max_freq), self.time_embed_dim // 2)
+        # Use target_dim as the embedding dimension
+        embed_dim = target_dim
         
-        # Compute sin and cos embeddings
+        # Create frequency schedule - use fewer frequencies for better generalization
+        n_freqs = max(1, embed_dim // 4)  # Use 1/4 of the dimension for frequencies
+        freqs = jnp.logspace(0, jnp.log10(self.max_freq), n_freqs)
+        
+        # Create sin and cos embeddings
         sin_embeddings = jnp.sin(2 * jnp.pi * freqs * t)
         cos_embeddings = jnp.cos(2 * jnp.pi * freqs * t)
         
-        # Interleave sin and cos
-        embeddings = jnp.empty(self.time_embed_dim)
-        embeddings = embeddings.at[::2].set(sin_embeddings)
-        embeddings = embeddings.at[1::2].set(cos_embeddings[:len(embeddings[1::2])])
+        # Combine sin and cos
+        freq_embeddings = jnp.concatenate([sin_embeddings, cos_embeddings])
         
-        return embeddings
+        # If we need more dimensions, repeat and add phase shifts
+        if len(freq_embeddings) < embed_dim:
+            # Repeat the embeddings with different phase shifts
+            n_repeats = (embed_dim + len(freq_embeddings) - 1) // len(freq_embeddings)
+            repeated_embeddings = jnp.tile(freq_embeddings, n_repeats)
+            embeddings = repeated_embeddings[:embed_dim]
+        else:
+            # Truncate if we have too many
+            embeddings = freq_embeddings[:embed_dim]
+        
+        # Add a linear component for time progression
+        linear_component = jnp.linspace(0, t, embed_dim)
+        
+        # Combine frequency and linear components
+        final_embedding = embeddings + 0.1 * linear_component
+        
+        return final_embedding
+    
+    def _diagonal_favorable_init(self, mu_dim: int, matrix_rank: int):
+        """
+        Initialize matrix A such that A@A.T is closer to a diagonal matrix.
+        
+        Strategy:
+        1. Initialize A with small random values
+        2. Add a diagonal bias to make A@A.T more diagonal
+        3. Scale appropriately to avoid vanishing/exploding gradients
+        
+        Args:
+            mu_dim: Dimension of the output space
+            matrix_rank: Rank of matrix A
+            
+        Returns:
+            Initialization function for Flax Dense layer
+        """
+        def init_fn(key, shape, dtype=jnp.float32):
+            # Standard small random initialization
+            std = 0.1  # Small standard deviation
+            random_part = random.normal(key, shape, dtype) * std
+            
+            # Create a matrix that will make A@A.T more diagonal
+            # We want A to have structure that leads to diagonal A@A.T
+            if len(shape) == 2:  # [input_dim, output_dim]
+                input_dim, output_dim = shape
+                
+                # Reshape to [input_dim, mu_dim, matrix_rank]
+                if output_dim == mu_dim * matrix_rank:
+                    # Create initialization that favors diagonal A@A.T
+                    # Strategy: make A have strong diagonal components
+                    A_reshaped = random_part.reshape(input_dim, mu_dim, matrix_rank)
+                    
+                    # Add diagonal bias: for each i, make A[i,i,:] larger
+                    for i in range(min(mu_dim, matrix_rank)):
+                        # Add extra weight to diagonal elements
+                        diagonal_bias = 0.5  # Additional weight for diagonal
+                        A_reshaped = A_reshaped.at[:, i, i].add(diagonal_bias)
+                    
+                    return A_reshaped.reshape(input_dim, output_dim)
+                else:
+                    return random_part
+            else:
+                return random_part
+        
+        return init_fn
     
     
     @nn.compact  
@@ -100,28 +165,26 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
         dt = 1.0 / self.n_time_steps
         u_current = mu_init
         
-        # Store derivatives for smoothness penalty
-        derivatives = []
+        # Store derivative norms squared for smoothness penalty
+        derivative_norms_squared = []
         
         for i in range(self.n_time_steps):
             t = i * dt
             
-            # Current position along η path
-            eta_t = (1 - t) * eta_init + t * eta_target
+            # Fourier time embedding with dimensions matching mu
+            t_embed = self._time_embedding(t, mu_dim)  # [mu_dim,]
+            t_embed_batch = jnp.broadcast_to(t_embed, (batch_size, mu_dim))
             
-            # Sinusoidal time embedding
-            t_embed = self._time_embedding(t)  # [time_embed_dim,]
-            t_embed_batch = jnp.broadcast_to(t_embed, (batch_size, self.time_embed_dim))
-            
-            # Network input: [u, sin/cos(t), η_t]
-            net_input = jnp.concatenate([u_current, t_embed_batch, eta_t], axis=-1)
+            # Network input: [u, sin/cos(t), η_init, η_target]
+            # This gives the network direct access to both endpoints instead of interpolated values
+            net_input = jnp.concatenate([u_current, t_embed_batch, eta_init, eta_target], axis=-1)
             
             # Use inherited ET network architecture to predict matrix A
             A_flat = self.predict_matrix_A(net_input, training)
             A = A_flat.reshape(batch_size, mu_dim, matrix_rank)
             
             # Compute flow matrix: Σ = A @ A^T (guaranteed PSD)
-            Sigma = jnp.matmul(A, jnp.transpose(A, (0, 2, 1)))
+            Sigma = A@A.mT
             
             # Direction vector
             delta_eta = eta_target - eta_init
@@ -135,15 +198,16 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
             # Flow field: du/dt = Σ @ (η_target - η_init)
             du_dt = jnp.matmul(Sigma, delta_eta_proj[:, :, None]).squeeze(-1)
             
-            # Store for smoothness penalty
-            derivatives.append(du_dt)
+            # Store norm squared for smoothness penalty (memory efficient)
+            du_dt_norm_squared = jnp.sum(du_dt ** 2, axis=-1)  # [batch_size,]
+            derivative_norms_squared.append(du_dt_norm_squared)
             
             # Forward Euler step
             u_current = u_current + dt * du_dt
         
-        # Store derivatives for potential smoothness loss computation
+        # Store derivative norms squared for potential smoothness loss computation
         if training:
-            self.sow('intermediates', 'derivatives', jnp.array(derivatives))
+            self.sow('intermediates', 'derivative_norms_squared', jnp.array(derivative_norms_squared))
         
         return u_current
     
@@ -151,7 +215,10 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
         """MLP architecture forward pass for matrix A prediction."""
         x = net_input
         for i, hidden_size in enumerate(self.config.hidden_sizes):
-            x = nn.Dense(hidden_size, name=f'mlp_hidden_{i}')(x)
+            # Use LeCun normal initialization and zero bias for better conditioning
+            x = nn.Dense(hidden_size, name=f'mlp_hidden_{i}',
+                        kernel_init=nn.initializers.lecun_normal(),
+                        bias_init=nn.initializers.zeros)(x)
             x = nn.swish(x)
             if getattr(self.config, 'use_layer_norm', True):
                 x = nn.LayerNorm(name=f'mlp_layer_norm_{i}')(x)
@@ -160,19 +227,27 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
     def _glu_forward(self, net_input: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """GLU architecture forward pass for matrix A prediction."""
         x = net_input
-        # Input projection
-        x = nn.Dense(self.config.hidden_sizes[0], name='glu_input_proj')(x)
+        # Input projection with LeCun normal initialization
+        x = nn.Dense(self.config.hidden_sizes[0], name='glu_input_proj',
+                    kernel_init=nn.initializers.lecun_normal(),
+                    bias_init=nn.initializers.zeros)(x)
         x = nn.swish(x)
         
         # GLU blocks with residual connections
         for i, hidden_size in enumerate(self.config.hidden_sizes):
             residual = x
             if residual.shape[-1] != hidden_size:
-                residual = nn.Dense(hidden_size, name=f'glu_residual_proj_{i}')(residual)
+                residual = nn.Dense(hidden_size, name=f'glu_residual_proj_{i}',
+                                   kernel_init=nn.initializers.lecun_normal(),
+                                   bias_init=nn.initializers.zeros)(residual)
             
-            # GLU layer
-            linear1 = nn.Dense(hidden_size, name=f'glu_linear1_{i}')(x)
-            linear2 = nn.Dense(hidden_size, name=f'glu_linear2_{i}')(x)
+            # GLU layer with LeCun normal initialization
+            linear1 = nn.Dense(hidden_size, name=f'glu_linear1_{i}',
+                              kernel_init=nn.initializers.lecun_normal(),
+                              bias_init=nn.initializers.zeros)(x)
+            linear2 = nn.Dense(hidden_size, name=f'glu_linear2_{i}',
+                              kernel_init=nn.initializers.lecun_normal(),
+                              bias_init=nn.initializers.zeros)(x)
             gate = nn.sigmoid(linear1)
             glu_out = gate * linear2
             
@@ -189,14 +264,20 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
         x = net_input
         
         for i, hidden_size in enumerate(self.config.hidden_sizes):
-            # Residual connection
+            # Residual connection with LeCun normal initialization
             residual = x
             if residual.shape[-1] != hidden_size:
-                residual = nn.Dense(hidden_size, name=f'quad_residual_proj_{i}')(residual)
+                residual = nn.Dense(hidden_size, name=f'quad_residual_proj_{i}',
+                                   kernel_init=nn.initializers.lecun_normal(),
+                                   bias_init=nn.initializers.zeros)(residual)
             
-            # Quadratic transformation
-            linear_out = nn.Dense(hidden_size, name=f'quad_linear_{i}')(x)
-            quadratic_out = nn.Dense(hidden_size, name=f'quad_quadratic_{i}')(x * x)
+            # Quadratic transformation with LeCun normal initialization
+            linear_out = nn.Dense(hidden_size, name=f'quad_linear_{i}',
+                                 kernel_init=nn.initializers.lecun_normal(),
+                                 bias_init=nn.initializers.zeros)(x)
+            quadratic_out = nn.Dense(hidden_size, name=f'quad_quadratic_{i}',
+                                    kernel_init=nn.initializers.lecun_normal(),
+                                    bias_init=nn.initializers.zeros)(x * x)
             
             # Combine linear and quadratic terms
             x = residual + linear_out + quadratic_out
@@ -231,22 +312,34 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
         else:
             raise ValueError(f"Architecture {architecture} not supported for geometric flow")
         
-        # Get matrix rank
-        matrix_rank = self.matrix_rank if self.matrix_rank is not None else net_input.shape[1]
-        mu_dim = net_input.shape[1] - self.time_embed_dim - net_input.shape[1] + self.time_embed_dim + 12  # This is getting complex, let me simplify
+        # Calculate dimensions from input
+        # Input format: [u, t_embed, eta_init, eta_target]
+        # where u and t_embed are mu_dim, eta_init and eta_target are eta_dim
+        # So total input dim = 2 * mu_dim + 2 * eta_dim
+        # For 3D case: eta_dim = 12, mu_dim = 12, so total = 2*12 + 2*12 = 48
+        total_input_dim = net_input.shape[1]
         
-        # For now, assume mu_dim = 12 for 3D case
-        mu_dim = 12
+        # For 3D case, we know eta_dim = mu_dim = 12
+        # So: total_input_dim = 2 * 12 + 2 * 12 = 48
+        # Therefore: mu_dim = eta_dim = total_input_dim / 4
+        mu_dim = total_input_dim // 4
+        eta_dim = mu_dim  # For multivariate normal, eta_dim = mu_dim
+        
         if self.matrix_rank is None:
             matrix_rank = mu_dim
         else:
             matrix_rank = self.matrix_rank
         
-        # Final layer to get matrix A elements
-        A_flat = nn.Dense(mu_dim * matrix_rank, name='matrix_A_output')(A_flat)
+        # Final layer to get matrix A elements with LeCun normal initialization
+        A_flat = nn.Dense(mu_dim * matrix_rank, name='matrix_A_output',
+                         kernel_init=nn.initializers.lecun_normal(),
+                         bias_init=nn.initializers.zeros)(A_flat)
         
         # Reshape to matrix form
         A = A_flat.reshape(batch_size, mu_dim, matrix_rank)
+        
+        # Post-hoc normalization by matrix rank to control magnitude
+        A = A / jnp.sqrt(matrix_rank)
         
         return A
     
@@ -264,14 +357,15 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
         Returns:
             du_dt: Flow field [batch_size, mu_dim]
         """
-        # Current position along η path
-        eta_t = (1 - t) * eta_init + t * eta_target
-        
         # Prepare network input
         batch_size = u.shape[0]
-        t_embed = self._time_embedding(t)
-        t_embed_batch = jnp.broadcast_to(t_embed, (batch_size, self.time_embed_dim))
-        net_input = jnp.concatenate([u, t_embed_batch, eta_t], axis=-1)
+        mu_dim = u.shape[1]
+        t_embed = self._time_embedding(t, mu_dim)
+        t_embed_batch = jnp.broadcast_to(t_embed, (batch_size, mu_dim))
+        
+        # Network input: [u, sin/cos(t), η_init, η_target]
+        # This gives the network direct access to both endpoints instead of interpolated values
+        net_input = jnp.concatenate([u, t_embed_batch, eta_init, eta_target], axis=-1)
         
         # Predict matrix A
         A_flat = self.predict_matrix_A(net_input, training=True)
@@ -314,18 +408,56 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
         Returns:
             mu_target: Predicted expectations at eta_target [batch_size, mu_dim]
         """
-        # Simple forward Euler integration (efficient for smooth flows)
+        # Simple forward Euler integration with intermediate collection
         dt = 1.0 / self.n_time_steps
         u_current = mu_init
+        batch_size, mu_dim = mu_init.shape
+        eta_dim = eta_init.shape[-1]
+        matrix_rank = self.matrix_rank or mu_dim
+        
+        # Store derivative norms squared for smoothness penalty
+        derivative_norms_squared = []
         
         for i in range(self.n_time_steps):
             t = i * dt
             
-            # Compute flow field at current state
-            du_dt = self.compute_flow_field(u_current, t, eta_init, eta_target)
+            # Fourier time embedding with dimensions matching mu
+            t_embed = self._time_embedding(t, mu_dim)  # [mu_dim,]
+            t_embed_batch = jnp.broadcast_to(t_embed, (batch_size, mu_dim))
+            
+            # Network input: [u, sin/cos(t), η_init, η_target]
+            # This gives the network direct access to both endpoints instead of interpolated values
+            net_input = jnp.concatenate([u_current, t_embed_batch, eta_init, eta_target], axis=-1)
+            
+            # Use inherited ET network architecture to predict matrix A
+            A_flat = self.predict_matrix_A(net_input, training)
+            A = A_flat.reshape(batch_size, mu_dim, matrix_rank)
+            
+            # Compute flow matrix: Σ = A @ A^T (guaranteed PSD)
+            Sigma = A@A.mT
+            
+            # Direction vector
+            delta_eta = eta_target - eta_init
+            
+            # Handle dimension mismatch
+            if eta_dim != mu_dim:
+                delta_eta_proj = nn.Dense(mu_dim, name=f'eta_proj_step_{i}')(delta_eta)
+            else:
+                delta_eta_proj = delta_eta
+            
+            # Flow field: du/dt = Σ @ (η_target - η_init)
+            du_dt = jnp.matmul(Sigma, delta_eta_proj[:, :, None]).squeeze(-1)
+            
+            # Store norm squared for smoothness penalty (memory efficient)
+            du_dt_norm_squared = jnp.sum(du_dt ** 2, axis=-1)  # [batch_size,]
+            derivative_norms_squared.append(du_dt_norm_squared)
             
             # Forward Euler step
             u_current = u_current + dt * du_dt
+        
+        # Store derivative norms squared for potential smoothness loss computation
+        if training:
+            self.sow('intermediates', 'derivative_norms_squared', jnp.array(derivative_norms_squared))
         
         return u_current
     
@@ -350,12 +482,12 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
             )
             
             # Smoothness penalty: penalize large derivatives du/dt
-            if 'derivatives' in intermediates and self.smoothness_weight > 0:
-                derivatives = intermediates['derivatives']  # [n_time_steps, batch_size, mu_dim]
+            if 'derivative_norms_squared' in intermediates and self.smoothness_weight > 0:
+                derivative_norms_squared = intermediates['derivative_norms_squared']  # tuple of [n_time_steps, batch_size]
                 
-                # Penalty for large derivatives (encourages smooth dynamics)
-                derivative_magnitudes = jnp.linalg.norm(derivatives, axis=-1)  # [n_time_steps, batch_size]
-                smoothness_loss = jnp.mean(derivative_magnitudes ** 2)
+                # Convert tuple to array and compute penalty for large derivatives
+                derivative_norms_squared_array = jnp.array(derivative_norms_squared)
+                smoothness_loss = jnp.mean(derivative_norms_squared_array)
                 
                 return self.smoothness_weight * smoothness_loss
             
@@ -377,7 +509,7 @@ class Geometric_Flow_ET_Trainer(BaseTrainer):
     """
     
     def __init__(self, config: FullConfig, matrix_rank: int = None, 
-                 n_time_steps: int = 3, smoothness_weight: float = 1e-3):
+                 n_time_steps: int = 10, smoothness_weight: float = 1e-3):
         model = Geometric_Flow_ET_Network(
             config=config.network,
             matrix_rank=matrix_rank,
@@ -463,12 +595,12 @@ class Geometric_Flow_ET_Trainer(BaseTrainer):
         total_loss = endpoint_loss
         
         # Smoothness penalty: penalize large derivatives du/dt
-        if 'derivatives' in intermediates and self.smoothness_weight > 0:
-            derivatives = intermediates['derivatives']  # [n_time_steps, batch_size, mu_dim]
+        if 'derivative_norms_squared' in intermediates and self.smoothness_weight > 0:
+            derivative_norms_squared = intermediates['derivative_norms_squared']  # tuple of [n_time_steps, batch_size]
             
-            # Penalty for large derivatives (encourages smooth dynamics)
-            derivative_magnitudes = jnp.linalg.norm(derivatives, axis=-1)  # [n_time_steps, batch_size]
-            smoothness_loss = jnp.mean(derivative_magnitudes ** 2)
+            # Convert tuple to array and compute penalty for large derivatives
+            derivative_norms_squared_array = jnp.array(derivative_norms_squared)
+            smoothness_loss = jnp.mean(derivative_norms_squared_array)
             
             total_loss += self.smoothness_weight * smoothness_loss
         
@@ -477,7 +609,7 @@ class Geometric_Flow_ET_Trainer(BaseTrainer):
         if reg_weight > 0:
             # L2 regularization on parameters
             l2_reg = 0.0
-            for param in jax.tree_leaves(params):
+            for param in jax.tree.leaves(params):
                 l2_reg += jnp.sum(param ** 2)
             total_loss += reg_weight * l2_reg
         
@@ -489,7 +621,7 @@ class Geometric_Flow_ET_Trainer(BaseTrainer):
         loss_value, grads = jax.value_and_grad(self.geometric_flow_loss)(params, batch)
         
         # Gradient clipping
-        grads = jax.tree_map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
+        grads = jax.tree.map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
         
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
@@ -520,13 +652,21 @@ class Geometric_Flow_ET_Trainer(BaseTrainer):
         optimizer = optax.adam(learning_rate)
         opt_state = optimizer.init(params)
         
-        # Simple training loop
+        # Training loop with progress bar
         history = {'train_loss': [], 'val_loss': []}
         best_params = params
         best_loss = float('inf')
         n_train = eta_targets_train.shape[0]
         
-        for epoch in range(epochs):
+        # Print training details
+        print(f"Training {self.model.__class__.__name__} for {epochs} epochs")
+        print(f"Architecture: {self.model.config.hidden_sizes}")
+        print(f"Matrix rank: {getattr(self.model, 'matrix_rank', 'None')}")
+        print(f"Time steps: {getattr(self.model, 'n_time_steps', 'None')}")
+        print(f"Parameters: {sum(p.size for p in jax.tree_util.tree_flatten(params)[0]):,}")
+        
+        pbar = tqdm(range(epochs), desc="Training Geometric Flow ET")
+        for epoch in pbar:
             # Training
             train_loss = 0.0
             n_batches = 0
@@ -547,8 +687,26 @@ class Geometric_Flow_ET_Trainer(BaseTrainer):
                 val_loss = float(self.geometric_flow_loss(params, val_batch))
                 history['val_loss'].append(val_loss)
                 
+                # Update progress bar with loss information
+                pbar.set_postfix({
+                    'train_loss': f'{train_loss:.6f}',
+                    'val_loss': f'{val_loss:.6f}',
+                    'best': f'{best_loss:.6f}'
+                })
+                
                 if val_loss < best_loss:
                     best_loss = val_loss
+                    best_params = params
+            else:
+                # Update progress bar with training loss only
+                pbar.set_postfix({
+                    'train_loss': f'{train_loss:.6f}',
+                    'best': f'{best_loss:.6f}'
+                })
+                
+                # No validation data, use training loss for early stopping
+                if train_loss < best_loss:
+                    best_loss = train_loss
                     best_params = params
         
         return best_params, history
@@ -607,7 +765,7 @@ class Geometric_Flow_ET_Trainer(BaseTrainer):
 
 
 def create_model_and_trainer(config: FullConfig, matrix_rank: int = None, 
-                           n_time_steps: int = 3, smoothness_weight: float = 1e-3):
+                           n_time_steps: int = 10, smoothness_weight: float = 1e-3):
     """Factory function to create Geometric Flow ET model and trainer."""
     return Geometric_Flow_ET_Trainer(
         config=config,

@@ -7,8 +7,8 @@ and use automatic differentiation to compute the mean and covariance of
 exponential family distributions.
 
 Usage:
-    python scripts/training/train_quadratic_resnet_logZ.py --config configs/gaussian_1d.yaml
-    python scripts/training/train_quadratic_resnet_logZ.py --config configs/multivariate_3d.yaml
+    python scripts/training/train_quadratic_resnet_logZ.py --config data/configs/gaussian_1d.yaml
+    python scripts/training/train_quadratic_resnet_logZ.py --config data/configs/multivariate_3d.yaml
 """
 
 import argparse
@@ -24,7 +24,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Import standardized plotting functions
 sys.path.append(str(Path(__file__).parent.parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 # Import dimension inference utility
 from src.utils.data_utils import infer_dimensions
@@ -81,7 +81,10 @@ class SimpleQuadraticResNetLogZ:
     
     
     def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-3):
-        """Train the model."""
+        """Train the model and measure training time."""
+        import time
+        start_time = time.time()
+        
         trainer = self.create_model_and_trainer()
         
         # Prepare training data
@@ -94,16 +97,43 @@ class SimpleQuadraticResNetLogZ:
         # Use the trainer's built-in training method
         best_params, training_history = trainer.train(
             train_data=train_data,
-            val_data=None
+            val_data=None,
+            epochs=epochs,
+            learning_rate=learning_rate
         )
         
-        return best_params, training_history['train_loss']
+        training_time = time.time() - start_time
+        return best_params, training_history['train_loss'], training_time
     
     def predict(self, trainer, params, eta_data):
         """Make predictions using the trained model."""
         predictions = trainer.predict(params, eta_data)
         return predictions['stats']  # Extract expected sufficient statistics from the prediction dictionary
 
+    def benchmark_inference(self, trainer, params, eta_data, num_runs=100):
+        """Benchmark inference time with multiple runs for accuracy."""
+        import time
+        # Warm-up run to ensure compilation is complete
+        _ = trainer.predict(params, eta_data[:1])
+        
+        # Measure inference time over multiple runs
+        times = []
+        for _ in range(num_runs):
+            start_time = time.time()
+            _ = trainer.predict(params, eta_data)
+            end_time = time.time()
+            times.append(end_time - start_time)
+        
+        avg_time = sum(times) / len(times)
+        per_sample_time = avg_time / len(eta_data)
+        samples_per_second = len(eta_data) / avg_time
+        
+        return {
+            'avg_inference_time': avg_time,
+            'inference_per_sample': per_sample_time,
+            'samples_per_second': samples_per_second
+        }
+    
     def evaluate(self, predictions, targets):
         """Evaluate predictions against targets."""
         mse = jnp.mean((predictions - targets) ** 2)
@@ -143,16 +173,19 @@ def main():
         print(f"\nTraining {name} with hidden sizes: {hidden_sizes}")
         
         # Infer dimensions from metadata or data
-        eta_dim = infer_dimensions(eta_data, metadata=data.get('metadata'))
+        eta_dim = infer_dimensions(eta_data, metadata=metadata)
         model = SimpleQuadraticResNetLogZ(hidden_sizes=hidden_sizes, eta_dim=eta_dim)
         
-        params, losses = model.train(eta_data, ground_truth, epochs=300)
+        # Train
+        params, losses, training_time = model.train(eta_data, ground_truth, epochs=300)
+        
+        # Evaluate
         trained_model = model.create_model_and_trainer()
         predictions = model.predict(trained_model, params, eta_data)
+        metrics = model.evaluate(predictions, ground_truth)
         
-        # Calculate metrics
-        mse = float(jnp.mean(jnp.square(predictions - ground_truth)))
-        mae = float(jnp.mean(jnp.abs(predictions - ground_truth)))
+        # Benchmark inference time
+        inference_stats = model.benchmark_inference(trained_model, params, eta_data, num_runs=50)
         
         # Create plots using standardized plotting function
         metrics = plot_training_results(
@@ -168,16 +201,20 @@ def main():
             show_plots=False
         )
         
-        results[name] = {
-            'mse': metrics['mse'], 
-            'mae': metrics['mae'], 
-            'r2': metrics['r2'],
-            'final_loss': metrics['final_loss'],
-            'hidden_sizes': hidden_sizes,
-            'losses': losses
-        }
+        results[name] = create_standardized_results(
+            model_name=name,
+            architecture_info={"hidden_sizes": hidden_sizes},
+            metrics=metrics,
+            losses=losses,
+            training_time=training_time,
+            inference_stats=inference_stats,
+            predictions=predictions,
+            ground_truth=ground_truth
+        )
         
-        print(f"  Final MSE: {mse:.6f}, MAE: {mae:.6f}")
+        print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
+        print(f"  Training time: {training_time:.2f}s")
+        print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
     
     # Summary
     print(f"\n{'='*60}")

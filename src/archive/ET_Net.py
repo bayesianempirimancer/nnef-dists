@@ -322,7 +322,7 @@ class ETTrainer(BaseTrainer):
         # L1 regularization on parameters (configurable, default off)
         if self.l1_reg_weight > 0.0:
             l1_reg = 0.0
-            for param in jax.tree_leaves(params):
+            for param in jax.tree.leaves(params):
                 l1_reg += jnp.sum(jnp.abs(param))
             total_loss += self.l1_reg_weight * l1_reg
         
@@ -336,7 +336,7 @@ class ETTrainer(BaseTrainer):
         )
         
         # Gradient clipping for stability
-        grads = jax.tree_map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
+        grads = jax.tree.map(lambda g: jnp.clip(g, -1.0, 1.0), grads)
         
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)

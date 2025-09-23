@@ -232,7 +232,12 @@ Model: {model_name}
     
     # Save plot if requested
     if save_plots:
-        model_dir = Path(output_dir) / model_name.lower().replace('_', '_')
+        # For ET models, save directly to output_dir without creating subdirectory
+        # For LogZ models, create subdirectory as before
+        if 'et' in model_name.lower():
+            model_dir = Path(output_dir)
+        else:
+            model_dir = Path(output_dir) / model_name.lower().replace('_', '_')
         model_dir.mkdir(parents=True, exist_ok=True)
         
         # Determine file name based on model type
@@ -259,8 +264,7 @@ Model: {model_name}
     }
 
 
-def plot_model_comparison(
-    results: Dict[str, Dict[str, Any]],
+def plot_model_comparison(results: Dict[str, Dict[str, Any]],
     output_dir: str = "artifacts",
     save_plots: bool = True,
     show_plots: bool = False
@@ -298,93 +302,225 @@ def plot_model_comparison(
     ax2 = plt.subplot(3, 3, 2)
     model_names = list(results.keys())
     mse_values = [results[name].get('mse', np.nan) for name in model_names]
-    bars = ax2.bar(range(len(model_names)), mse_values)
+    
+    # Handle inf/nan values for plotting
+    mse_values_plot = []
+    for mse in mse_values:
+        if np.isinf(mse) and mse > 0:
+            mse_values_plot.append(1e15)  # Large finite value for inf
+        elif np.isnan(mse):
+            mse_values_plot.append(1e10)  # Medium finite value for NaN
+        else:
+            mse_values_plot.append(mse)
+    
+    bars = ax2.bar(range(len(model_names)), mse_values_plot)
     ax2.set_xticks(range(len(model_names)))
     ax2.set_xticklabels(model_names, rotation=45, ha='right')
     ax2.set_ylabel('MSE')
     ax2.set_title('MSE Comparison', fontsize=14, fontweight='bold')
     ax2.grid(True, alpha=0.3)
+    ax2.set_yscale('log')
     
     # Color bars by performance (lower MSE is better)
-    valid_mse = [mse for mse in mse_values if not np.isnan(mse)]
+    valid_mse = [mse for mse in mse_values if not np.isnan(mse) and not np.isinf(mse)]
     if valid_mse:
         mse_range = max(valid_mse) - min(valid_mse)
         for i, (bar, mse) in enumerate(zip(bars, mse_values)):
-            if not np.isnan(mse) and mse_range > 0:
+            if not np.isnan(mse) and not np.isinf(mse) and mse_range > 0:
                 # Lower MSE gets better color (closer to 1 in viridis)
                 normalized_mse = 1 - (mse - min(valid_mse)) / mse_range
                 bar.set_color(plt.cm.viridis(normalized_mse))
-            elif not np.isnan(mse):
+            elif np.isinf(mse):
+                bar.set_color('red')  # Red for inf values
+            elif np.isnan(mse):
+                bar.set_color('orange')  # Orange for NaN values
+            else:
                 bar.set_color(plt.cm.viridis(0.5))
     
     # 3. MAE comparison (top right)
     ax3 = plt.subplot(3, 3, 3)
     mae_values = [results[name].get('mae', np.nan) for name in model_names]
-    bars = ax3.bar(range(len(model_names)), mae_values)
+    
+    # Handle inf/nan values for plotting
+    mae_values_plot = []
+    for mae in mae_values:
+        if np.isinf(mae) and mae > 0:
+            mae_values_plot.append(1e15)  # Large finite value for inf
+        elif np.isnan(mae):
+            mae_values_plot.append(1e10)  # Medium finite value for NaN
+        else:
+            mae_values_plot.append(mae)
+    
+    bars = ax3.bar(range(len(model_names)), mae_values_plot)
     ax3.set_xticks(range(len(model_names)))
     ax3.set_xticklabels(model_names, rotation=45, ha='right')
     ax3.set_ylabel('MAE')
     ax3.set_title('MAE Comparison', fontsize=14, fontweight='bold')
     ax3.grid(True, alpha=0.3)
+    ax3.set_yscale('log')
     
     # Color bars by performance (lower MAE is better)
-    valid_mae = [mae for mae in mae_values if not np.isnan(mae)]
+    valid_mae = [mae for mae in mae_values if not np.isnan(mae) and not np.isinf(mae)]
     if valid_mae:
         mae_range = max(valid_mae) - min(valid_mae)
         for i, (bar, mae) in enumerate(zip(bars, mae_values)):
-            if not np.isnan(mae) and mae_range > 0:
+            if not np.isnan(mae) and not np.isinf(mae) and mae_range > 0:
                 normalized_mae = 1 - (mae - min(valid_mae)) / mae_range
                 bar.set_color(plt.cm.viridis(normalized_mae))
-            elif not np.isnan(mae):
+            elif np.isinf(mae):
+                bar.set_color('red')  # Red for inf values
+            elif np.isnan(mae):
+                bar.set_color('orange')  # Orange for NaN values
+            else:
                 bar.set_color(plt.cm.viridis(0.5))
     
-    # 4. R² comparison (middle left)
+    # 4. Architecture Summary Table (middle left)
     ax4 = plt.subplot(3, 3, 4)
-    r2_values = [results[name].get('r2', np.nan) for name in model_names]
-    bars = ax4.bar(range(len(model_names)), r2_values)
-    ax4.set_xticks(range(len(model_names)))
-    ax4.set_xticklabels(model_names, rotation=45, ha='right')
-    ax4.set_ylabel('R²')
-    ax4.set_title('R² Comparison', fontsize=14, fontweight='bold')
-    ax4.grid(True, alpha=0.3)
+    ax4.axis('off')
     
-    # Color bars by performance (higher R² is better)
-    valid_r2 = [r2 for r2 in r2_values if not np.isnan(r2)]
-    if valid_r2:
-        r2_range = max(valid_r2) - min(valid_r2)
-        for i, (bar, r2) in enumerate(zip(bars, r2_values)):
-            if not np.isnan(r2) and r2_range > 0:
-                normalized_r2 = (r2 - min(valid_r2)) / r2_range
-                bar.set_color(plt.cm.viridis(normalized_r2))
-            elif not np.isnan(r2):
-                bar.set_color(plt.cm.viridis(0.5))
-    
-    # 5. Performance summary table (middle center)
-    ax5 = plt.subplot(3, 3, 5)
-    ax5.axis('off')
-    
-    # Create performance summary table
-    table_data = []
+    # Create architecture summary table
+    arch_table_data = []
     for name in model_names:
-        mse = results[name].get('mse', np.nan)
-        mae = results[name].get('mae', np.nan)
-        r2 = results[name].get('r2', np.nan)
-        table_data.append([
+        result = results[name]
+        
+        # Extract architecture information
+        base_hidden_sizes = result.get('base_hidden_sizes', result.get('hidden_sizes', []))
+        total_depth = result.get('total_depth', 'N/A')
+        param_count = result.get('parameter_count', 'N/A')
+        
+        # Format base network layers
+        if base_hidden_sizes and base_hidden_sizes != 'N/A':
+            if len(base_hidden_sizes) == 1:
+                base_arch = f"{len(base_hidden_sizes)}L×{base_hidden_sizes[0]}H"
+            else:
+                base_arch = f"{len(base_hidden_sizes)}L×{base_hidden_sizes[0]}H"
+        else:
+            base_arch = "N/A"
+        
+        # Format parameter count
+        if param_count != 'N/A' and isinstance(param_count, (int, float)):
+            param_str = f"{int(param_count):,}"
+        else:
+            param_str = "N/A"
+        
+        arch_table_data.append([
             name,
-            f"{mse:.4f}" if not np.isnan(mse) else "N/A",
-            f"{mae:.4f}" if not np.isnan(mae) else "N/A",
-            f"{r2:.4f}" if not np.isnan(r2) else "N/A"
+            base_arch,
+            str(total_depth) if total_depth != 'N/A' else 'N/A',
+            param_str
         ])
     
-    table = ax5.table(cellText=table_data,
-                     colLabels=['Model', 'MSE', 'MAE', 'R²'],
-                     cellLoc='center',
-                     loc='center',
-                     bbox=[0, 0, 1, 1])
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 2)
-    ax5.set_title('Performance Summary', fontsize=14, fontweight='bold', pad=20)
+    # Create table
+    arch_table = ax4.table(cellText=arch_table_data,
+                          colLabels=['Model', 'Base Network', 'Total Depth', 'Parameters'],
+                          cellLoc='center',
+                          loc='center',
+                          bbox=[0, 0, 1, 1])
+    arch_table.auto_set_font_size(False)
+    arch_table.set_fontsize(9)
+    arch_table.scale(1, 2.5)
+    
+    # Style the table
+    for i in range(len(arch_table_data) + 1):
+        for j in range(4):
+            cell = arch_table[(i, j)]
+            if i == 0:  # Header row
+                cell.set_facecolor('#4CAF50')
+                cell.set_text_props(weight='bold', color='white')
+            else:
+                cell.set_facecolor('#f0f0f0' if i % 2 == 0 else 'white')
+    
+    ax4.set_title('Architecture Summary', fontsize=14, fontweight='bold', pad=20)
+    
+    # 5. Residuals plot for best model (middle center)
+    ax5 = plt.subplot(3, 3, 5)
+    
+    # Find the best model based on MSE
+    best_model_name = None
+    best_mse = float('inf')
+    for name in model_names:
+        mse = results[name].get('mse', np.nan)
+        if not np.isnan(mse) and mse < best_mse:
+            best_mse = mse
+            best_model_name = name
+    
+    if best_model_name is not None:
+        best_result = results[best_model_name]
+        predictions = best_result.get('predictions', None)
+        ground_truth = best_result.get('ground_truth', None)
+        
+        if predictions is not None and ground_truth is not None:
+            # Convert to numpy arrays if they're JAX arrays or lists
+            if hasattr(predictions, 'numpy'):
+                predictions = predictions.numpy()
+            elif isinstance(predictions, list):
+                predictions = np.array(predictions)
+            
+            if hasattr(ground_truth, 'numpy'):
+                ground_truth = ground_truth.numpy()
+            elif isinstance(ground_truth, list):
+                ground_truth = np.array(ground_truth)
+            
+            # Calculate residuals
+            residuals = predictions - ground_truth
+            
+            # Get number of dimensions
+            n_dims = residuals.shape[1] if len(residuals.shape) > 1 else 1
+            
+            # Create subplots for each dimension
+            if n_dims == 1:
+                # Single dimension - simple scatter plot
+                ax5.scatter(ground_truth, residuals, alpha=0.6, s=20)
+                ax5.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+                ax5.set_xlabel('Ground Truth')
+                ax5.set_ylabel('Residuals')
+                ax5.set_title(f'Residuals - {best_model_name}\n(MSE: {best_mse:.2f})', fontsize=12, fontweight='bold')
+                ax5.grid(True, alpha=0.3)
+            else:
+                # Multiple dimensions - show all dimensions
+                if n_dims <= 5:
+                    # For 5 or fewer dimensions, show each with different colors
+                    colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+                    for i in range(n_dims):
+                        ax5.scatter(ground_truth[:, i], residuals[:, i], 
+                                  alpha=0.6, s=15, color=colors[i % len(colors)], 
+                                  label=f'Dim {i+1}')
+                    ax5.legend(fontsize=8)
+                else:
+                    # For many dimensions, show each dimension with a different color
+                    # Use a colormap to cycle through colors for all dimensions
+                    import matplotlib.cm as cm
+                    colors = cm.tab20(np.linspace(0, 1, n_dims))  # Use tab20 colormap for up to 20 colors
+                    
+                    for i in range(n_dims):
+                        ax5.scatter(ground_truth[:, i], residuals[:, i], 
+                                  alpha=0.6, s=15, color=colors[i], 
+                                  label=f'Dim {i+1}')
+                    
+                    # Only show legend for first few dimensions to avoid clutter
+                    if n_dims <= 10:
+                        ax5.legend(fontsize=6, ncol=2)
+                    else:
+                        # For many dimensions, show a colorbar instead of legend
+                        sm = plt.cm.ScalarMappable(cmap=cm.tab20, norm=plt.Normalize(vmin=0, vmax=n_dims-1))
+                        sm.set_array([])
+                        cbar = plt.colorbar(sm, ax=ax5, shrink=0.8)
+                        cbar.set_label('Dimension', fontsize=8)
+                        cbar.set_ticks(range(0, n_dims, max(1, n_dims//10)))  # Show ~10 tick marks
+                
+                ax5.axhline(y=0, color='black', linestyle='--', alpha=0.7)
+                ax5.set_xlabel('Ground Truth')
+                ax5.set_ylabel('Residuals')
+                ax5.set_title(f'Residuals - {best_model_name}\n(MSE: {best_mse:.2f})', fontsize=12, fontweight='bold')
+                ax5.grid(True, alpha=0.3)
+        else:
+            ax5.text(0.5, 0.5, 'No prediction data\navailable for residuals', 
+                    ha='center', va='center', transform=ax5.transAxes, fontsize=12)
+            ax5.set_title('Residuals Plot', fontsize=12, fontweight='bold')
+    else:
+        ax5.text(0.5, 0.5, 'No valid models\nfor residuals plot', 
+                ha='center', va='center', transform=ax5.transAxes, fontsize=12)
+        ax5.set_title('Residuals Plot', fontsize=12, fontweight='bold')
     
     # 6. High performing model predictions vs ground truth (middle right)
     ax6 = plt.subplot(3, 3, 6)
@@ -501,6 +637,7 @@ def plot_model_comparison(
     # Save plot if requested
     if save_plots:
         output_path = Path(output_dir) / "model_comparison.png"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"Model comparison saved to: {output_path}")
     

@@ -30,7 +30,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Import standardized plotting functions
 sys.path.append(str(Path(__file__).parent.parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 from src.config import FullConfig
 from src.models.convex_nn_logZ import (
@@ -52,7 +52,7 @@ def create_alternating_convex_config():
     config.training.learning_rate = 1e-3  # Standard learning rate
     config.training.num_epochs = 100  # More epochs for better convergence
     config.training.batch_size = 32  # Efficient batch size
-    config.training.patience = 25
+    config.training.patience = float('inf')
     config.training.weight_decay = 1e-6
     config.training.gradient_clip_norm = 1.0
     config.training.early_stopping = True
@@ -115,11 +115,11 @@ def main():
     data_file = args.data_file if args.data_file else "data/easy_3d_gaussian.pkl"
     eta, mu_T, metadata = load_standardized_ep_data(data_file)
     
-    # Use consistent eta, mu_T format (no reformatting needed)
+    # Use consistent eta, mu_T format for LogZTrainer
     data = {
         'train': {
             'eta': eta,
-            'mu_T': mu_T
+            'mu_T': mu_T  # LogZTrainer now expects 'mu_T' key consistently
         },
         'val': {
             'eta': eta[:10],  # Use first 10 samples as validation
@@ -178,15 +178,45 @@ def main():
         target_str = ", ".join([f"{x:6.3f}" for x in target])
         print(f"  Sample {i+1}: [{target_str}]")
     
+    # Get predictions for all data
+    predictions = trainer.compute_gradient(params, eta)
+    
+    # Benchmark inference time
+    def benchmark_inference(trainer, params, eta_data, num_runs=50):
+        """Benchmark inference time with multiple runs for accuracy."""
+        import time
+        # Warm-up run to ensure compilation is complete
+        _ = trainer.compute_gradient(params, eta_data[:1])
+        
+        # Measure inference time over multiple runs
+        times = []
+        for _ in range(num_runs):
+            start_time = time.time()
+            _ = trainer.compute_gradient(params, eta_data)
+            times.append(time.time() - start_time)
+        
+        # Return statistics
+        avg_time = sum(times) / len(times)
+        min_time = min(times)
+        max_time = max(times)
+        
+        return {
+            'avg_inference_time': avg_time,
+            'min_inference_time': min_time,
+            'max_inference_time': max_time,
+            'inference_per_sample': avg_time / len(eta_data),
+            'samples_per_second': len(eta_data) / avg_time
+        }
+    
+    inference_stats = benchmark_inference(trainer, params, eta, num_runs=50)
+    
     # Final performance summary
     print(f"\nFinal Performance Metrics:")
     print(f"=" * 40)
-    print(f"Mean MSE: {test_metrics['mean_mse']:.8f}")
-    print(f"Mean MAE: {test_metrics['mean_mae']:.8f}")
-    
-    if 'mean_runtime_ms' in test_metrics:
-        print(f"Runtime (JIT): {test_metrics['mean_runtime_ms']:.3f}ms per batch")
-        print(f"Per sample: {test_metrics.get('per_sample_runtime_ms', 0):.3f}ms")
+    print(f"MSE: {test_metrics['mse']:.8f}")
+    print(f"MAE: {test_metrics['mae']:.8f}")
+    print(f"Training time: {training_time:.2f}s")
+    print(f"Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
     
     # Training history summary
     if 'train_loss' in history and len(history['train_loss']) > 0:
@@ -210,15 +240,32 @@ def main():
     output_dir = Path("artifacts/logZ_models/convex_nn_logZ")
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create results dictionary for plotting
+    # Create plots using standardized plotting function
+    metrics = plot_training_results(
+        trainer=None,  # Not used for LogZ plotting
+        eta_data=eta,
+        ground_truth=mu_T,
+        predictions=predictions,
+        losses=history.get('train_loss', []),
+        config=config,
+        model_name="Convex_NN_LogZ",
+        output_dir=str(output_dir),
+        save_plots=True,
+        show_plots=False
+    )
+    
+    # Create results dictionary using standardized function
     results = {
-        "convex_nn_logZ": {
-            "train_loss": history.get('train_loss', []),
-            "val_loss": history.get('val_loss', []),
-            "test_metrics": test_metrics,
-            "model_name": "convex_nn_logZ",
-            "config": {"architecture": "convex_nn", "hidden_sizes": [64, 48, 32, 24, 16, 8]}
-        }
+        "Convex_NN_LogZ": create_standardized_results(
+            model_name="Convex_NN_LogZ",
+            architecture_info={"hidden_sizes": config.network.hidden_sizes},
+            metrics=test_metrics,
+            losses=history.get('train_loss', []),
+            training_time=training_time,
+            inference_stats=inference_stats,
+            predictions=predictions,
+            ground_truth=mu_T
+        )
     }
     
     # Create model comparison plots using standardized plotting function

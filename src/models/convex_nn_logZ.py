@@ -25,7 +25,8 @@ import flax.linen as nn
 from jax import random, grad, hessian, jacfwd
 from typing import Dict, Any, Tuple, Optional, Union, List
 
-from ..base_model import BaseNeuralNetwork, BaseTrainer
+from ..base_model import BaseNeuralNetwork
+from .logZ_Net import LogZTrainer
 from ..config import FullConfig, NetworkConfig
 
 
@@ -220,48 +221,58 @@ class Convex_LogZ_Network(BaseNeuralNetwork):
         """
         x = eta
         
-        # First layer with skip connection
-        z = nn.Dense(self.config.hidden_sizes[0], name='convex_hidden_0')(x)
-        z = nn.relu(z)  # Convex activation
+        # First layer - use ConvexLayer with no previous z (None)
+        z = ConvexLayer(
+            hidden_size=self.config.hidden_sizes[0],
+            activation=self.config.activation,
+            layer_type="type1",
+            name='convex_layer_0'
+        )(None, x, training=training)
         
-        # Convex layers with skip connections
+        # Subsequent convex layers with skip connections
         for i, hidden_size in enumerate(self.config.hidden_sizes[1:], 1):
-            # Convex layer with skip connection from input
-            z = ConvexLayer(hidden_size, name=f'convex_layer_{i}')(z, x, training)
+            # Alternate between Type 1 and Type 2 layers
+            layer_type = "type2" if i % 2 == 0 else "type1"
+            
+            z = ConvexLayer(
+                hidden_size=hidden_size,
+                activation=self.config.activation,
+                layer_type=layer_type,
+                name=f'convex_layer_{i}'
+            )(z, x, training=training)
         
         # Final projection to scalar log normalizer
-        z = nn.Dense(1, name='logZ_output')(z)
+        z = ConvexLayer(
+            hidden_size=1,
+            activation="linear",  # No activation for final layer
+            layer_type="type1",   # Non-negative weights to maintain convexity
+            name='convex_output_layer'
+        )(z, x, training=training)
+        
         return jnp.squeeze(z, axis=-1)
+    
+    def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
+                            predicted_logZ: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        """
+        Compute internal losses (e.g., smoothness penalties, regularization).
+        
+        Args:
+            params: Model parameters
+            eta: Natural parameters
+            predicted_logZ: Predicted log normalizer
+            training: Whether in training mode
+            
+        Returns:
+            Internal loss value
+        """
+        return 0.0
 
-class Convex_LogZ_Trainer(BaseTrainer):
+class Convex_LogZ_Trainer(LogZTrainer):
     """Trainer for Convex LogZ Network."""
     
     def __init__(self, config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
         model = Convex_LogZ_Network(config=config.network)
-        super().__init__(model, config)
-        self.hessian_method = hessian_method
-        self.adaptive_weights = adaptive_weights
-        
-        # Compile gradient and Hessian functions
-        self._compiled_gradient_fn = jax.jit(grad(self.model.apply, argnums=1))
-        if hessian_method == 'diagonal':
-            self._compiled_hessian_fn = jax.jit(jax.hessian(self.model.apply, argnums=1))
-        elif hessian_method == 'full':
-            self._compiled_hessian_fn = jax.jit(hessian(self.model.apply, argnums=1))
-        else:
-            raise ValueError(f"Unknown hessian_method: {hessian_method}")
-    
-    def predict_mean(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
-        """Predict mean statistics using gradients of log normalizer."""
-        return self._compiled_gradient_fn(params, eta)
-    
-    def predict_covariance(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
-        """Predict covariance using Hessian of log normalizer."""
-        if self.hessian_method == 'diagonal':
-            hess = self._compiled_hessian_fn(params, eta)
-            return jnp.diagonal(hess, axis1=-2, axis2=-1)
-        else:  # full
-            return self._compiled_hessian_fn(params, eta)
+        super().__init__(model, config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)
 
 
 def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):

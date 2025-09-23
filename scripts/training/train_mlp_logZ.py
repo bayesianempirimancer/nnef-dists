@@ -7,8 +7,8 @@ and use automatic differentiation to compute the mean and covariance of
 exponential family distributions.
 
 Usage:
-    python scripts/training/train_mlp_logZ.py --config configs/gaussian_1d.yaml
-    python scripts/training/train_mlp_logZ.py --config configs/multivariate_3d.yaml
+    python scripts/training/train_mlp_logZ.py --config data/configs/gaussian_1d.yaml
+    python scripts/training/train_mlp_logZ.py --config data/configs/multivariate_3d.yaml
 """
 
 import argparse
@@ -25,7 +25,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Import standardized plotting functions
 sys.path.append(str(Path(__file__).parent.parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 # Import dimension inference utility
 from src.utils.data_utils import infer_dimensions
@@ -177,7 +177,7 @@ def main():
         print(f"\nTraining {name} with hidden sizes: {hidden_sizes}")
         
         # Infer dimensions from metadata or data
-        eta_dim = infer_dimensions(eta_data, metadata=data.get('metadata'))
+        eta_dim = infer_dimensions(eta_data, metadata=metadata)
         model = SimpleMLPLogZ(hidden_sizes=hidden_sizes, eta_dim=eta_dim)
         
         trainer = model.create_model_and_trainer()
@@ -206,21 +206,16 @@ def main():
             show_plots=False
         )
         
-        results[name] = {
-            'hidden_sizes': hidden_sizes,
-            'mse': metrics['mse'], 
-            'mae': metrics['mae'], 
-            'losses': losses,
-            'training_time': training_time,
-            'avg_inference_time': inference_stats['avg_inference_time'],
-            'inference_per_sample': inference_stats['inference_per_sample'],
-            'samples_per_second': inference_stats['samples_per_second'],
-            'test_metrics': metrics,
-            'architecture': hidden_sizes,
-            'model_name': name,
-            'predictions': predictions,
-            'ground_truth': ground_truth
-        }
+        results[name] = create_standardized_results(
+            model_name=name,
+            architecture_info={"hidden_sizes": hidden_sizes},
+            metrics=metrics,
+            losses=losses,
+            training_time=training_time,
+            inference_stats=inference_stats,
+            predictions=predictions,
+            ground_truth=ground_truth
+        )
         
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")

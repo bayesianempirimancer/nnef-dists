@@ -389,7 +389,7 @@ def train_small_models():
         learning_rate=1e-3,
         num_epochs=20,  # Small number of epochs for quick testing
         batch_size=32,  # Small batch size
-        patience=10,
+        patience=float('inf'),
         weight_decay=1e-4,
         gradient_clip_norm=1.0,
         validation_freq=10

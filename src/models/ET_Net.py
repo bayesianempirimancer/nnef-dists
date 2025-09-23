@@ -21,6 +21,7 @@ from jax import random
 from typing import Dict, Any, Tuple, Optional
 import optax
 from tqdm import tqdm
+import time
 
 from ..base_model import BaseTrainer
 from ..config import FullConfig
@@ -76,7 +77,7 @@ class ETTrainer(BaseTrainer):
         # L1 regularization on parameters (configurable, default off)
         if self.l1_reg_weight > 0.0:
             l1_reg = 0.0
-            for param in jax.tree_leaves(params):
+            for param in jax.tree.leaves(params):
                 l1_reg += jnp.sum(jnp.abs(param))
             total_loss += self.l1_reg_weight * l1_reg
         
@@ -189,4 +190,30 @@ class ETTrainer(BaseTrainer):
             'mse': mse,
             'mae': mae,
             'component_errors': errors_by_component
+        }
+
+    def benchmark_inference(self, params: Dict, eta_data, num_runs=50):
+        """Benchmark inference time with multiple runs for accuracy."""
+        # Warm-up run to ensure compilation is complete
+        self.predict(params, eta_data[:1])
+        
+        num_runs = min(num_runs, eta_data.shape[0])
+        # Measure inference time over multiple runs
+        times = []
+        for _ in range(num_runs):
+            start_time = time.time()
+            _ = self.predict(params, eta_data)
+            times.append(time.time() - start_time)
+        
+        # Return statistics
+        avg_time = sum(times) / len(times)
+        min_time = min(times)
+        max_time = max(times)
+        
+        return {
+            'avg_inference_time': avg_time,
+            'min_inference_time': min_time,
+            'max_inference_time': max_time,
+            'inference_per_sample': avg_time / len(eta_data),
+            'samples_per_second': len(eta_data) / avg_time
         }

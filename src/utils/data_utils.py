@@ -274,6 +274,23 @@ def compute_ground_truth_3d_tril(eta: jnp.ndarray, ef: MultivariateNormal_tril) 
     
     return expected_stats
 
+def load_ef_data(data_file="data/easy_3d_gaussian.pkl"):
+    """Load and prepare exponential family training data with memory optimization."""
+    print(f"Loading test data from {data_file}...")
+    
+    with open(data_file, 'rb') as f:
+        data = pickle.load(f)
+    
+    train = data["train"]
+    val = data["val"]
+    test = data["test"]
+
+    if "cov_TT" in data["train"]: del data["train"]["cov_TT"]
+    if "cov_TT" in data["val"]: del data["val"]["cov_TT"]
+    if "cov_TT" in data["test"]: del data["test"]["cov_TT"]
+    import gc; gc.collect()
+    
+    return train, val, test, data.get('metadata', {})
 
 def load_standardized_ep_data(data_file="data/easy_3d_gaussian.pkl"):
     """Load and prepare standardized exponential family training data with memory optimization."""

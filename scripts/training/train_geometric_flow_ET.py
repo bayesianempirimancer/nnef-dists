@@ -1,303 +1,251 @@
-#!/usr/bin/env python3
+#!conda activate numpyro && python
 """
-Training script for Geometric Flow ET neural networks.
+Training script for Geometric Flow ET model.
 
-This script trains networks that learn flow dynamics to predict expected sufficient statistics
-E[T(X)] using the geometric flow approach:
-    du/dt = A@A^T@(η_target - η_init)
+This script trains, evaluates, and plots results for a Geometric Flow that take in a 
+target value for eta.  Finds a 'nearby' value of eta for which the statistic is known 
+analytically, and then evolves a dynamical system to determine the value of the sufficient
+statistic at the targeted value.  Thus the network has two bits.  One is a function that 
+takes in the target eta_1 and analytically computes eta_0 and mu_0 to get the 
+initial conditions for the dynamics.  The second is a neuralzed dynamical system that 
+evolves from time t=0 to t=1 evolves the initial condition mu_0 to mu_1.  
 
 Usage:
-    python scripts/training/train_geometric_flow_ET.py --config configs/multivariate_3d_large.yaml
-    python scripts/training/train_geometric_flow_ET.py --config configs/multivariate_3d_large.yaml --plot-only
+    python scripts/training/train_geometric_flow_ET.py
 """
 
-import argparse
 import sys
+import argparse
 from pathlib import Path
-import pickle
+import json
 import time
+import jax
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent.parent))
+# Add the project root to Python path for package imports
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Import standardized plotting functions
-sys.path.append(str(Path(__file__).parent.parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+# Import data and plotting functions
+from src.utils.data_utils import infer_dimensions, load_standardized_ep_data, load_ef_data
+from scripts.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
-from src.config import FullConfig
+# Import from training directory
+from scripts.training.training_template_ET import ET_Template
+from src.models.ET_Net import ETTrainer
+from src.models.geometric_flow_net import Geometric_Flow_ET_Network, Geometric_Flow_ET_Trainer
+from src.config import NetworkConfig, TrainingConfig, FullConfig, ModelSpecificConfig
 from src.ef import ef_factory
-from src.models.geometric_flow_net import create_model_and_trainer
 
-def create_simple_config(eta_dim):
-    """Create a simple configuration for geometric flow training."""
-    from src.config import NetworkConfig, TrainingConfig
+class Geometric_Flow_Net(ET_Template):
+    """Standard Geometric Flow ET using the new template."""
     
-    network_config = NetworkConfig(
-        hidden_sizes=[128, 64, 32],
-        use_layer_norm=True,
-        dropout_rate=0.0,
-        output_dim=eta_dim  # Use inferred dimension
-    )
+    def __init__(self, hidden_sizes=None, eta_dim=None, ef=None, matrix_rank=None, n_time_steps=10, smoothness_weight=1e-3):
+        super().__init__(hidden_sizes=hidden_sizes, eta_dim=eta_dim, model_type="geometric_flow")
+        self.matrix_rank = matrix_rank
+        self.n_time_steps = n_time_steps
+        self.smoothness_weight = smoothness_weight
+        self.ef = ef or ef_factory('multivariate_normal', x_shape=(3,))
     
-    training_config = TrainingConfig(
-        num_epochs=150,
-        learning_rate=1e-3,
-        batch_size=16
-    )
-    
-    return FullConfig(network=network_config, training=training_config)
+    def create_model_and_trainer(self, num_epochs=20):
+        """Get the model and training from the src/models/geometric_flow_net.py file."""
+        network_config = NetworkConfig(
+            hidden_sizes=self.hidden_sizes,
+            activation="swish",
+            use_layer_norm=False,
+            input_dim=self.eta_dim,
+            output_dim=self.eta_dim
+        )
+        training_config = TrainingConfig(num_epochs=num_epochs, learning_rate=1e-2)
+        
+        # Create model-specific config with geometric flow specific parameters
+        model_specific_config = ModelSpecificConfig(
+            matrix_rank=self.matrix_rank,
+            n_time_steps=self.n_time_steps,
+            smoothness_weight=self.smoothness_weight
+        )
+        
+        full_config = FullConfig(
+            network=network_config, 
+            training=training_config,
+            model_specific=model_specific_config
+        )
 
+        # Create the specialized geometric flow trainer
+        trainer = Geometric_Flow_ET_Trainer(
+            config=full_config,
+            matrix_rank=self.matrix_rank,
+            n_time_steps=self.n_time_steps,
+            smoothness_weight=self.smoothness_weight
+        )
+        
+        return trainer  # returns fully configured Geometric_Flow_ET_Trainer
 
-def train_geometric_flow_et(save_dir: str, plot_only: bool = False):
-    """Train geometric flow ET network on 3D Gaussian data."""
-    
-    # Create save directory
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Load data from standard data file
-    data_file = Path("data/easy_3d_gaussian.pkl")
-    if not data_file.exists():
-        print("Easy 3D Gaussian dataset not found. Please run:")
-        print("python scripts/generate_normal_data.py --difficulty Easy --dim 3")
-        return
+    def benchmark_inference(self, trainer, params, eta_data, num_runs=50):
+        """Benchmark inference time for geometric flow model."""
+        import time
         
-    print("Loading training data from standard data file...")
-    with open(data_file, 'rb') as f:
-        data = pickle.load(f)
-    
-    eta_train = data['train']['eta']
-    mu_train = data['train']['mu_T']
-    eta_val = data['val']['eta']
-    mu_val = data['val']['mu_T']
-    
-    # Infer dimensions from metadata or data
-    if 'metadata' in data and 'eta_dim' in data['metadata']:
-        eta_dim = data['metadata']['eta_dim']
-        print(f"Using eta_dim from metadata: {eta_dim}")
+        # Create a small batch for benchmarking
+        batch = trainer.create_flow_batch(eta_data[:1])
         
-        # Print additional metadata info if available
-        if 'ef_distribution_name' in data['metadata']:
-            print(f"Exponential family: {data['metadata']['ef_distribution_name']}")
-        if 'x_shape' in data['metadata']:
-            print(f"Data shape x: {data['metadata']['x_shape']}")
-        if 'x_dim' in data['metadata']:
-            print(f"Data dimension: {data['metadata']['x_dim']}")
-    else:
-        eta_dim = eta_train.shape[-1]
-        print(f"Inferred eta_dim from data shape: {eta_dim}")
-    
-    # Create configuration
-    config = create_simple_config(eta_dim)
-    print(f"Using simple configuration for geometric flow training")
-    
-    # Purge cov_TT to save memory
-    if "cov_TT" in data["train"]: del data["train"]["cov_TT"]
-    if "cov_TT" in data["val"]: del data["val"]["cov_TT"]
-    if "cov_TT" in data["test"]: del data["test"]["cov_TT"]
-    import gc; gc.collect()
-    print("✅ Purged cov_TT elements from memory for optimization")
-    
-    print(f"Training data: {eta_train.shape[0]} samples")
-    print(f"Validation data: {eta_val.shape[0]} samples")
-    print(f"η dimension: {eta_train.shape[1]}")
-    print(f"μ dimension: {mu_train.shape[1]}")
-    
-    # Create exponential family instance
-    ef = ef_factory("multivariate_normal", x_shape=(3,))
-    
-    # Create and configure trainer
-    trainer = create_model_and_trainer(
-        config=config,
-        matrix_rank=8,  # Reduced rank for efficiency
-        n_time_steps=3,  # Minimal due to smoothness
-        smoothness_weight=1e-3
-    )
-    
-    # Set exponential family for analytical point computation
-    trainer.set_exponential_family(ef)
-    
-    print(f"Geometric Flow ET Network Configuration:")
-    print(f"  Architecture: {getattr(trainer.config.network, 'architecture', 'mlp')}")
-    print(f"  Matrix rank: {trainer.matrix_rank}")
-    print(f"  Time steps: {trainer.n_time_steps}")
-    print(f"  Smoothness weight: {trainer.smoothness_weight}")
-    print(f"  Time embedding dim: {trainer.model.time_embed_dim}")
-    print(f"  Max frequency: {trainer.model.max_freq}")
-    
-    if plot_only:
-        # Load existing model and create plots
-        model_file = save_dir / "geometric_flow_et_params.pkl"
-        history_file = save_dir / "geometric_flow_et_history.pkl"
+        # Warm-up run to ensure compilation is complete
+        _ = trainer.model.apply(
+            params,
+            batch['eta_init'],
+            batch['eta_target'], 
+            batch['mu_init'],
+            training=False
+        )
         
-        if model_file.exists() and history_file.exists():
-            print("Loading existing model for plotting...")
-            with open(model_file, 'rb') as f:
-                params = pickle.load(f)
-            with open(history_file, 'rb') as f:
-                history = pickle.load(f)
-            
-            # Make predictions
-            predictions_dict = trainer.predict(params, eta_val)
-            predictions = predictions_dict['mu_predicted']
-            
-            # Store flow distances for plotting
-            trainer.last_flow_distances = predictions_dict['flow_distances']
-            
-            # Create plots using standardized plotting function
-            metrics = plot_training_results(
-                trainer=trainer,
-                eta_data=eta_val,
-                ground_truth=mu_val,
-                predictions=predictions,
-                losses=history.get('train_loss', []),
-                config=config,
-                model_name="geometric_flow_ET",
-                output_dir=str(save_dir),
-                save_plots=True,
-                show_plots=False
+        # Measure inference time over multiple runs
+        times = []
+        for _ in range(num_runs):
+            start_time = time.time()
+            _ = trainer.model.apply(
+                params,
+                batch['eta_init'],
+                batch['eta_target'],
+                batch['mu_init'], 
+                training=False
             )
-        else:
-            print("No existing model found. Run without --plot-only first.")
-        return
+            times.append(time.time() - start_time)
+        
+        # Return statistics
+        avg_time = sum(times) / len(times)
+        min_time = min(times)
+        max_time = max(times)
+        
+        return {
+            'avg_inference_time': avg_time,
+            'min_inference_time': min_time,
+            'max_inference_time': max_time,
+            'samples_per_second': 1.0 / avg_time if avg_time > 0 else 0.0,
+            'inference_per_sample': avg_time / len(eta_data)
+        }
+
+## Functions currently inherited from ET_Template class
+# train, predict, evaluate
+
+
+def main():
+    """Main training and evaluation pipeline."""
+    parser = argparse.ArgumentParser(description='Train Geometric Flow ET models')
+    parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--save_dir', type=str, default='artifacts/ET_models/geometric_flow_ET', help='Path to results dump directory')    
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--ef_type', type=str, default='multivariate_normal', help='Exponential family type (default: multivariate_normal)')
+    parser.add_argument('--x_shape', type=int, nargs='+', default=[3], help='Shape of x for exponential family (default: [3])')
     
-    # Training
-    print(f"\nStarting Geometric Flow ET training...")
+    args = parser.parse_args()
+
+    # Create exponential family from command line arguments
+    ef = ef_factory(args.ef_type, x_shape=tuple(args.x_shape))
+
+    # Load data using standardized template function
+    if args.data_file is None:
+        raise ValueError("data_file must be provided.")
+    train, val, test, metadata = load_ef_data(args.data_file)
+
+    # Create output directory
+    output_dir = Path(args.save_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    eta_dim = infer_dimensions(train["eta"], metadata=metadata)
+        
+    # Define architectures to test (focused comparison)
+    architectures = {
+        "Small": ([32, 32], None, 10, 1e-3),
+        "Medium": ([64, 64], None, 10, 1e-3),
+        "Deep": ([64, 64, 64], None, 10, 1e-3)
+    }
     
-    # Train using the model's specialized training method with progress tracking
-    print(f"Training Geometric Flow Network")
-    print(f"  Architecture: {getattr(trainer.config.network, 'architecture', 'mlp')}")
-    print(f"  Matrix rank: {trainer.matrix_rank}")
-    print(f"  Time steps: {trainer.n_time_steps}")
-    print(f"  Training samples: {eta_train.shape[0]}")
-    print(f"  η dimension: {eta_train.shape[1]}")
-    print(f"  μ dimension: estimated 12 for 3D Gaussian")
+    print("Training Standard Geometric Flow ET Model")
+    print("=" * 40)
     
-    start_time = time.time()
+    results = {}
     
-    print("🚂 Starting geometric flow training...")
-    params, history = trainer.train(
-        eta_targets_train=eta_train,
-        eta_targets_val=eta_val,
-        epochs=config.training.num_epochs,
-        learning_rate=config.training.learning_rate,
-        batch_size=config.training.batch_size
-    )
+    # Test the architecture
+    for arch_name, (hidden_sizes, matrix_rank, n_time_steps, smoothness_weight) in architectures.items():
+        print(f"\nTraining ET Geometric Flow {arch_name} with hidden sizes: {hidden_sizes}, matrix rank: {matrix_rank}, time steps: {n_time_steps}")
+        
+        # Infer dimensions from metadata
+        model = Geometric_Flow_Net(hidden_sizes=hidden_sizes, eta_dim=eta_dim, matrix_rank=matrix_rank, n_time_steps=n_time_steps, smoothness_weight=smoothness_weight)
+        trainer = model.create_model_and_trainer(num_epochs=args.epochs)
+        
+        # Set up exponential family for geometric flow trainer
+        trainer.set_exponential_family(ef)
+
+        # Train and measure training time
+        t = time.time()
+        params, losses = trainer.train(train['eta'], val['eta'], epochs=args.epochs)
+        training_time = time.time() - t
+
+        # Evaluate accuracy
+        predictions_dict = model.predict(trainer, params, test['eta'])
+        predictions = predictions_dict['mu_predicted']  # Extract the actual predictions
+        metrics = model.evaluate(predictions, test['mu_T'])
+        
+        # Benchmark inference time
+        inference_stats = model.benchmark_inference(trainer, params, val['eta'], num_runs=50)
+        
+        # Calculate parameter count and total depth
+        param_count = sum(p.size for p in jax.tree_util.tree_flatten(params)[0])
+        total_depth = len(hidden_sizes) + n_time_steps  # Base network + flow time steps
+        
+        results[f"{model.model_type}_ET_{arch_name}"] = create_standardized_results(
+            model_name=f"{model.model_type}_ET_{arch_name}",
+            architecture_info={
+                "hidden_sizes": hidden_sizes,
+                "matrix_rank": matrix_rank,
+                "n_time_steps": n_time_steps,
+                "smoothness_weight": smoothness_weight,
+                "total_depth": total_depth,
+                "parameter_count": param_count
+            },
+            metrics=metrics,
+            losses=losses['train_loss'],
+            training_time=training_time,
+            inference_stats=inference_stats,
+            predictions=predictions,
+            ground_truth=test['mu_T']
+        )
+                
+        print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
+        print(f"  Training time: {training_time:.2f}s")
+        print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
     
-    training_time = time.time() - start_time
-    print(f"\n✓ Geometric Flow Network training completed in {training_time:.1f}s")
+    # Print summary
+    print("\n" + "=" * 60)
+    print(f"ET {model.model_type.upper()} MODEL RESULTS")
+    print("=" * 60)
     
-    # Save model and history
-    model_file = save_dir / "geometric_flow_et_params.pkl"
-    history_file = save_dir / "geometric_flow_et_history.pkl"
+    for model_name, result in results.items():
+        print(f"{model_name:<20} : MSE={result['mse']:.6f}, MAE={result['mae']:.6f}, Architecture={result['hidden_sizes']}")
+        print(f"{'':<20}   Training: {result['training_time']:.2f}s, Inference: {result['samples_per_second']:.1f} samples/sec")
     
-    with open(model_file, 'wb') as f:
-        pickle.dump(params, f)
-    with open(history_file, 'wb') as f:
-        pickle.dump(history, f)
+    print(f"\n✅ Model training completed successfully!")
     
-    print(f"Model saved to: {model_file}")
-    print(f"History saved to: {history_file}")
-    
-    # Evaluation
-    print(f"\nEvaluating on validation set...")
-    results = trainer.evaluate(params, eta_val)
-    predictions_dict = trainer.predict(params, eta_val)
-    predictions = predictions_dict['mu_predicted']
-    
-    # Store flow distances for plotting
-    trainer.last_flow_distances = predictions_dict['flow_distances']
-    
-    print(f"Validation Results:")
-    print(f"  MSE: {results['mse']:.8f}")
-    print(f"  MAE: {results['mae']:.8f}")
-    print(f"  Mean flow distance: {results['mean_flow_distance']:.6f}")
-    
-    # Component analysis
-    print(f"  Component errors (linear terms):")
-    for i in range(min(3, len(results['component_errors']))):
-        print(f"    μ_{i+1}: {results['component_errors'][i]:.8f}")
-    
-    print(f"  Component errors (quadratic terms, first 3):")
-    for i in range(3, min(6, len(results['component_errors']))):
-        quad_i, quad_j = divmod(i-3, 3)
-        print(f"    μ_{i+1} (x_{quad_i}x_{quad_j}): {results['component_errors'][i]:.8f}")
-    
-    # Create plots using standardized plotting function
-    metrics = plot_training_results(
-        trainer=trainer,
-        eta_data=eta_val,
-        ground_truth=mu_val,
-        predictions=predictions,
-        losses=history.get('train_loss', []),
-        config=config,
-        model_name="geometric_flow_ET",
-        output_dir=str(save_dir),
+    # Create model comparison plots using standardized plotting function
+    plot_model_comparison(
+        results=results,
+        output_dir=str(output_dir),
         save_plots=True,
         show_plots=False
     )
     
-    # Save evaluation results
-    eval_file = save_dir / "geometric_flow_et_evaluation.pkl"
-    eval_results = {
-        'results': results,
-        'predictions': predictions,
-        'ground_truth': mu_val,
-        'eta_data': eta_val,
-        'training_time': training_time
-    }
+    # Save results
+    with open(output_dir / 'results.json', 'w') as f:
+        json.dump(results, f, indent=2)
     
-    with open(eval_file, 'wb') as f:
-        pickle.dump(eval_results, f)
+    # Save results summary using standardized function
+    save_results_summary(
+        results=results,
+        output_dir=str(output_dir)
+    )
     
-    print(f"Evaluation results saved to: {eval_file}")
-    
-    # Summary
-    print(f"\n" + "="*60)
-    print("GEOMETRIC FLOW ET NETWORK SUMMARY")
-    print("="*60)
-    print(f"✓ Training completed in {training_time:.1f}s")
-    print(f"✓ Final MSE: {results['mse']:.2e}")
-    print(f"✓ Final MAE: {results['mae']:.2e}")
-    print(f"✓ Mean flow distance: {results['mean_flow_distance']:.4f}")
-    print(f"✓ Used {trainer.n_time_steps} time steps with sinusoidal embeddings")
-    
-    if results['mse'] < 1e-4:
-        print("🎉 EXCELLENT: Geometric flow learning highly successful!")
-    elif results['mse'] < 1e-2:
-        print("✅ GOOD: Reasonable geometric flow performance")
-    else:
-        print("⚠️ NEEDS WORK: Consider tuning hyperparameters")
-    
-    return params, history, results
-
-
-def main():
-    """Main training function."""
-    parser = argparse.ArgumentParser(description='Train Geometric Flow ET Network')
-    parser.add_argument('--save-dir', default='artifacts/ET_models/geometric_flow_ET', 
-                       help='Directory to save results')
-    parser.add_argument('--plot-only', action='store_true', 
-                       help='Only generate plots from existing results')
-    
-    args = parser.parse_args()
-    
-    print("Geometric Flow ET Network Training")
-    print("="*45)
-    print(f"Save directory: {args.save_dir}")
-    print(f"Plot only: {args.plot_only}")
-    
-    try:
-        results = train_geometric_flow_et(args.save_dir, args.plot_only)
-        print(f"\n✓ Geometric Flow ET training completed successfully!")
-        return 0
-    except Exception as e:
-        print(f"\n✗ Training failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+    print(f"\n✅ Standard {model.model_type.upper()} ET training complete!")
+    print(f"📁 Results saved to {output_dir}")
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    main()

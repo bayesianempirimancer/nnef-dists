@@ -9,11 +9,9 @@ Usage:
     python scripts/training/train_template_logZ.py
 """
 
-import argparse
 import sys
+import argparse
 from pathlib import Path
-import numpy as np
-import jax
 import jax.numpy as jnp
 from jax import random
 # matplotlib import removed - now using standardized plotting

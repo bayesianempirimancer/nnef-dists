@@ -49,7 +49,7 @@ class TrainingConfig:
     # Training loop
     num_epochs: int = 100
     batch_size: int = 64
-    patience: int = 15
+    patience: int = float('inf')
     min_delta: float = 1e-6
     
     # Validation
@@ -79,6 +79,13 @@ class ModelSpecificConfig:
     # Quadratic ResNet
     use_quadratic_terms: bool = True
     quadratic_mixing: str = "adaptive"  # "fixed", "adaptive", "learned"
+    
+    # Geometric Flow models
+    matrix_rank: int = None  # Rank of matrix A in geometric flow (None = full rank)
+    n_time_steps: int = 10  # Number of time steps for flow integration
+    smoothness_weight: float = 1e-3  # Penalty for large du/dt
+    time_embed_dim: int = 16  # Dimension of time embedding
+    max_freq: float = 10.0  # Maximum frequency for time embedding
     
     # Transformer models
     num_heads: int = 8
@@ -153,7 +160,7 @@ def get_deep_narrow_config() -> FullConfig:
     config.training.learning_rate = 5e-4
     config.training.batch_size = 32
     config.training.num_epochs = 150
-    config.training.patience = 25
+    config.training.patience = float('inf')
     return config
 
 
@@ -164,7 +171,7 @@ def get_ultra_deep_config() -> FullConfig:
     config.training.learning_rate = 1e-4
     config.training.batch_size = 16
     config.training.num_epochs = 200
-    config.training.patience = 30
+    config.training.patience = float('inf')
     config.training.weight_decay = 1e-5
     config.training.gradient_clip_norm = 0.5
     return config
@@ -174,11 +181,14 @@ def get_glow_config() -> FullConfig:
     """Get configuration for GLOW-based models."""
     config = FullConfig()
     config.network.hidden_sizes = [64, 128, 128]  # Base network layers for display
-    config.model_specific.num_flow_layers = 50  # Increased from 30 to 50 layers
+    config.network.output_dim = None  # Auto-detect from data (should match eta_dim for ET models)
+    config.network.use_layer_norm = True  # Enable layer normalization for stability
+    config.model_specific.num_flow_layers = 20  # Reasonable number of flow layers for Glow
     config.model_specific.flow_hidden_size = 64
     config.training.learning_rate = 1e-3
     config.training.num_epochs = 100
     config.training.batch_size = 64
+    config.training.gradient_clip_norm = 1.0  # Add gradient clipping for stability
     return config
 
 

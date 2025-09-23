@@ -76,7 +76,7 @@ from models.log_normalizer import LogNormalizerTrainer
 from config import load_config
 
 # Load configuration
-config = load_config("configs/gaussian_1d.yaml")
+config = load_config("data/configs/gaussian_1d.yaml")
 
 # Create trainer
 trainer = LogNormalizerTrainer(config, hessian_method='diagonal')
@@ -108,13 +108,13 @@ params, history = trainer.train(train_data, val_data)
 
 ```bash
 # Train log normalizer model
-python scripts/training/train_log_normalizer.py --config configs/gaussian_1d.yaml
+python scripts/training/train_log_normalizer.py --config data/configs/gaussian_1d.yaml
 
 # Use stable implementation
-python scripts/training/train_log_normalizer.py --config configs/gaussian_1d.yaml --stable
+python scripts/training/train_log_normalizer.py --config data/configs/gaussian_1d.yaml --stable
 
 # Compare with baseline
-python scripts/training/train_log_normalizer.py --config configs/gaussian_1d.yaml --compare
+python scripts/training/train_log_normalizer.py --config data/configs/gaussian_1d.yaml --compare
 ```
 
 ## Numerical Considerations
@@ -174,10 +174,10 @@ To test the implementation:
 python scripts/test_log_normalizer.py
 
 # Train on 1D Gaussian
-python scripts/training/train_log_normalizer.py --config configs/gaussian_1d.yaml
+python scripts/training/train_log_normalizer.py --config data/configs/gaussian_1d.yaml
 
 # Train on 3D multivariate Gaussian
-python scripts/training/train_log_normalizer.py --config configs/multivariate_3d.yaml
+python scripts/training/train_log_normalizer.py --config data/configs/multivariate_3d.yaml
 ```
 
 ## Conclusion

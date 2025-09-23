@@ -10,7 +10,8 @@ import flax.linen as nn
 from jax import random, grad, hessian, jacfwd
 from typing import Dict, Any, Tuple, Optional, Union, List
 
-from ..base_model import BaseNeuralNetwork, BaseTrainer
+from ..base_model import BaseNeuralNetwork
+from .logZ_Net import LogZTrainer
 from ..config import FullConfig
 
 
@@ -50,6 +51,22 @@ class Quadratic_ResNet_LogZ_Network(BaseNeuralNetwork):
         x = nn.Dense(1, name='logZ_output')(x)
         return jnp.squeeze(x, axis=-1)
     
+    def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
+                            predicted_logZ: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        """
+        Compute internal losses (e.g., smoothness penalties, regularization).
+        
+        Args:
+            params: Model parameters
+            eta: Natural parameters
+            predicted_logZ: Predicted log normalizer
+            training: Whether in training mode
+            
+        Returns:
+            Internal loss value
+        """
+        return 0.0
+    
     def _quadratic_residual_block(self, x: jnp.ndarray, hidden_size: int, 
                                  block_idx: int, training: bool) -> jnp.ndarray:
         """Single quadratic residual block."""
@@ -78,35 +95,13 @@ class Quadratic_ResNet_LogZ_Network(BaseNeuralNetwork):
         return output
 
 
-class Quadratic_ResNet_LogZ_Trainer(BaseTrainer):
+class Quadratic_ResNet_LogZ_Trainer(LogZTrainer):
     """Trainer for Quadratic ResNet LogZ Network."""
     
     def __init__(self, config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
         model = Quadratic_ResNet_LogZ_Network(config=config.network)
-        super().__init__(model, config)
-        self.hessian_method = hessian_method
-        self.adaptive_weights = adaptive_weights
-        
-        # Compile gradient and Hessian functions
-        self._compiled_gradient_fn = jax.jit(grad(self.model.apply, argnums=1))
-        if hessian_method == 'diagonal':
-            self._compiled_hessian_fn = jax.jit(jax.hessian(self.model.apply, argnums=1))
-        elif hessian_method == 'full':
-            self._compiled_hessian_fn = jax.jit(hessian(self.model.apply, argnums=1))
-        else:
-            raise ValueError(f"Unknown hessian_method: {hessian_method}")
+        super().__init__(model, config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)
     
-    def predict_mean(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
-        """Predict mean statistics using gradients of log normalizer."""
-        return self._compiled_gradient_fn(params, eta)
-    
-    def predict_covariance(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
-        """Predict covariance using Hessian of log normalizer."""
-        if self.hessian_method == 'diagonal':
-            hess = self._compiled_hessian_fn(params, eta)
-            return jnp.diagonal(hess, axis1=-2, axis2=-1)
-        else:  # full
-            return self._compiled_hessian_fn(params, eta)
 
 
 def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):

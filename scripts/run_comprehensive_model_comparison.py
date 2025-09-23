@@ -129,7 +129,7 @@ def create_training_config():
         learning_rate=1e-3,
         num_epochs=200,
         batch_size=64,
-        patience=25,
+        patience=float('inf'),
         weight_decay=1e-4,
         gradient_clip_norm=1.0,
         save_best=True,

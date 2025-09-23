@@ -14,79 +14,42 @@ from pathlib import Path
 import time
 import json
 import jax.numpy as jnp
-from jax import random
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent.parent))
+# Add the project root to Python path for package imports
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Import standardized plotting functions
-sys.path.append(str(Path(__file__).parent.parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
-
-# Import dimension inference utility
-from src.utils.data_utils import infer_dimensions
-
-
+# Import data and plotting functions
+from src.utils.data_utils import infer_dimensions, load_standardized_ep_data
+from scripts.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 # Simple configuration class
-class SimpleConfig:
+class Network_Config:
     def __init__(self, hidden_sizes, activation="swish"):
         self.hidden_sizes = hidden_sizes
         self.activation = activation
         self.use_layer_norm = True
 
-class SimpleTemplateET:
+class ET_Template:
     """Template ET using official implementation."""
     
-    def __init__(self, hidden_sizes=[64, 64], eta_dim=None, model_type="mlp"):
-        self.hidden_sizes = hidden_sizes
+    def __init__(self, hidden_sizes=None, eta_dim=None, model_type = None):
+        if eta_dim is None:
+            raise ValueError("eta_dim must be provided. Call infer_dimensions() first.")
         self.eta_dim = eta_dim
+        self.hidden_sizes = hidden_sizes
         self.model_type = model_type
-        self.config = SimpleConfig(hidden_sizes=hidden_sizes, activation="swish")
     
-    def create_model_and_trainer(self):
-        """Create the model and trainer using the official implementation."""
-        # Dynamic import based on model type
-        if self.model_type == "mlp":
-            from src.models.mlp_ET import create_model_and_trainer
-        elif self.model_type == "glu":
-            from src.models.glu_ET import create_model_and_trainer
-        elif self.model_type == "quadratic_resnet":
-            from src.models.quadratic_resnet_ET import create_model_and_trainer
-        elif self.model_type == "invertible_nn":
-            from src.models.invertible_nn_ET import create_model_and_trainer
-        elif self.model_type == "noprop_ct":
-            from src.models.noprop_ct_ET import create_model_and_trainer
-        elif self.model_type == "glow":
-            from src.models.glow_net_ET import create_glow_et_model_and_trainer as create_model_and_trainer
-        elif self.model_type == "geometric_flow":
-            from src.models.geometric_flow_net import create_model_and_trainer
-        else:
-            available_models = ["mlp", "glu", "quadratic_resnet", "invertible_nn", "noprop_ct", "glow", "geometric_flow"]
-            raise ValueError(f"Unknown model: {self.model_type}. Available models: {available_models}")
-        # Create proper network config using inferred dimensions
-        from src.config import NetworkConfig, FullConfig, TrainingConfig
-        
+    def config_model_and_trainer(self, num_epochs):
+        raise NotImplementedError("config_model_and_trainer must be implemented in the subclass.")
+
+    def create_model_and_trainer(self, full_config, model_and_trainer):
         # Use inferred dimensions from data
         # For ET models, input and output dimensions should be the same
-        if self.eta_dim is None:
-            raise ValueError("eta_dim must be provided. Call infer_dimensions() first.")
-        
-        input_dim = self.eta_dim
-        output_dim = self.eta_dim  # Same as input for ET models
-        
-        network_config = NetworkConfig(
-            hidden_sizes=self.hidden_sizes,
-            activation="swish",
-            use_layer_norm=True,
-            input_dim=input_dim,
-            output_dim=output_dim
-        )
-        training_config = TrainingConfig(num_epochs=300, learning_rate=1e-2)
-        full_config = FullConfig(network=network_config, training=training_config)
-        return create_model_and_trainer(full_config)
+        return model_and_trainer(full_config)
     
-    def train(self, eta_data, ground_truth, epochs=300, learning_rate=1e-2):
+    def train(self, eta_data, mu_T_data, epochs=300, learning_rate=1e-2):
         """Train the model and measure training time."""
         trainer = self.create_model_and_trainer()
         
@@ -94,7 +57,7 @@ class SimpleTemplateET:
         # For ET models, ground_truth should be mu_T (same dimension as eta)
         train_data = {
             'eta': eta_data,
-            'mu_T': ground_truth
+            'mu_T': mu_T_data
         }
         
         # Measure training time
@@ -115,17 +78,26 @@ class SimpleTemplateET:
     def predict(self, trainer, params, eta_data):
         """Make predictions."""
         return trainer.predict(params, eta_data)
+
     
+    def evaluate(self, predictions, mu_T_data):
+        """Evaluate predictions."""
+        mse = jnp.mean((predictions - mu_T_data) ** 2)
+        mae = jnp.mean(jnp.abs(predictions - mu_T_data))
+        return {"mse": float(mse), "mae": float(mae)}
+
     def benchmark_inference(self, trainer, params, eta_data, num_runs=50):
-        """Benchmark inference time with multiple runs for accuracy."""
+        """Benchmark inference time using MLP-specific model.apply() method."""
+        import time
+        
         # Warm-up run to ensure compilation is complete
-        _ = trainer.predict(params, eta_data[:1])
+        _ = trainer.model.apply(params, eta_data[:1])
         
         # Measure inference time over multiple runs
         times = []
         for _ in range(num_runs):
             start_time = time.time()
-            _ = trainer.predict(params, eta_data)
+            _ = trainer.model.apply(params, eta_data)
             times.append(time.time() - start_time)
         
         # Return statistics
@@ -140,13 +112,6 @@ class SimpleTemplateET:
             'inference_per_sample': avg_time / len(eta_data),
             'samples_per_second': len(eta_data) / avg_time
         }
-    
-    def evaluate(self, predictions, ground_truth):
-        """Evaluate predictions."""
-        mse = jnp.mean((predictions - ground_truth) ** 2)
-        mae = jnp.mean(jnp.abs(predictions - ground_truth))
-        return {"mse": float(mse), "mae": float(mae)}
-
 
 def main():
     """Main training function."""

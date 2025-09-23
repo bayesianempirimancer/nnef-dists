@@ -363,7 +363,7 @@ def curriculum_geometric_loss_fn(model, params, eta_batch, y_batch, cov_batch,
 
 def train_with_geometric_loss(model, params, optimizer, opt_state, train_data, val_data,
                              num_epochs=100, batch_size=64, kl_weight=0.01, 
-                             patience=15, regularization=1e-6):
+                             patience=float('inf'), regularization=1e-6):
     """
     Train model with geometric loss function.
     
