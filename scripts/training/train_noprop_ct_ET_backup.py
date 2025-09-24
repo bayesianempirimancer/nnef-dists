@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!conda activate numpyro && python
 """
 Training script for NoProp-CT ET model.
 

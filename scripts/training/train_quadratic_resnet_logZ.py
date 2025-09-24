@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!conda activate numpyro && python
 """
 Training script for Quadratic ResNet log normalizer neural networks.
 
@@ -15,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 import numpy as np
+import pickle
 import jax.numpy as jnp
 from jax import random
 # matplotlib import removed - now using standardized plotting
@@ -75,7 +76,10 @@ class SimpleQuadraticResNetLogZ:
             input_dim=input_dim,
             output_dim=output_dim
         )
-        training_config = TrainingConfig(num_epochs=300, learning_rate=1e-3)
+        # Use optimal training configuration from template
+        from scripts.training.training_template_ET import ET_Template
+        template = ET_Template()
+        training_config = template.create_optimal_training_config(300)
         full_config = FullConfig(network=network_config, training=training_config)
         return create_model_and_trainer(full_config)
     
@@ -150,9 +154,15 @@ def main():
     
     parser = argparse.ArgumentParser(description='Train Quadratic ResNet LogZ models')
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--save_dir', type=str, default='artifacts/logZ_models/quadratic_resnet_logZ', help='Path to results dump directory')
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     
     args = parser.parse_args()
+    
+    # Create output directory
+    output_dir = Path(args.save_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     print("Training Quadratic ResNet LogZ Model")
     print("=" * 40)
@@ -196,7 +206,7 @@ def main():
             losses=losses,
             config=model.config,
             model_name=name,
-            output_dir="artifacts/logZ_models/quadratic_resnet_logZ",
+            output_dir=str(output_dir),
             save_plots=True,
             show_plots=False
         )
@@ -215,6 +225,12 @@ def main():
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")
         print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
+        # Save model artifacts by default
+        model_name = f"{model.model_type}_ET_{arch_name}"
+        saved_files = model.save_model_artifacts(trainer, params, model_name, args.save_dir)
+        
+        # Model artifacts are now saved by default via template method
     
     # Summary
     print(f"\n{'='*60}")
@@ -232,7 +248,7 @@ def main():
     # Create model comparison plots
     plot_model_comparison(
         results=results,
-        output_dir="artifacts/logZ_models/quadratic_resnet_logZ",
+        output_dir=str(output_dir),
         save_plots=True,
         show_plots=False
     )
@@ -240,7 +256,7 @@ def main():
     # Save results summary
     save_results_summary(
         results=results,
-        output_dir="artifacts/logZ_models/quadratic_resnet_logZ"
+        output_dir=str(output_dir)
     )
     
     print("\n✅ Quadratic ResNet LogZ training complete!")
@@ -251,7 +267,9 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Train Quadratic ResNet LogZ models')
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--save_dir', type=str, default='artifacts/logZ_models/quadratic_resnet_logZ', help='Path to results dump directory')
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     
     args = parser.parse_args()
     main()

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!conda activate numpyro && python
 """
 Comprehensive Model Comparison Script
 

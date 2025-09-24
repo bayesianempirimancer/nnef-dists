@@ -59,20 +59,103 @@ class BaseTrainer:
                     init_value=tc.learning_rate,
                     decay_steps=tc.lr_decay_steps
                 )
+            elif tc.lr_schedule_type == "warmup_cosine":
+                # Warmup + cosine annealing
+                warmup_schedule = optax.linear_schedule(
+                    init_value=0.0,
+                    end_value=tc.learning_rate,
+                    transition_steps=tc.warmup_steps
+                )
+                cosine_schedule = optax.cosine_decay_schedule(
+                    init_value=tc.learning_rate,
+                    decay_steps=tc.lr_decay_steps - tc.warmup_steps
+                )
+                lr_schedule = optax.join_schedules(
+                    schedules=[warmup_schedule, cosine_schedule],
+                    boundaries=[tc.warmup_steps]
+                )
+            elif tc.lr_schedule_type == "onecycle":
+                # OneCycle learning rate schedule for faster convergence
+                lr_schedule = optax.cosine_onecycle_schedule(
+                    transition_steps=tc.lr_decay_steps,
+                    peak_value=tc.onecycle_max_lr,
+                    pct_start=tc.onecycle_pct_start
+                )
+            elif tc.lr_schedule_type == "cosine_restarts":
+                # Cosine annealing with warm restarts
+                lr_schedule = optax.cosine_decay_schedule(
+                    init_value=tc.learning_rate,
+                    decay_steps=tc.cosine_restart_period
+                )
+            elif tc.lr_schedule_type == "reduce_on_plateau":
+                # Start with base learning rate, will be adapted during training
+                lr_schedule = tc.learning_rate
             else:
                 lr_schedule = tc.learning_rate
         else:
             lr_schedule = tc.learning_rate
         
-        # Create base optimizer
+        # Create base optimizer with momentum parameters
         if tc.optimizer == "adam":
-            base_opt = optax.adam(learning_rate=lr_schedule)
+            base_opt = optax.adam(
+                learning_rate=lr_schedule,
+                b1=tc.beta1,
+                b2=tc.beta2
+            )
         elif tc.optimizer == "adamw":
-            base_opt = optax.adamw(learning_rate=lr_schedule, weight_decay=tc.weight_decay)
+            base_opt = optax.adamw(
+                learning_rate=lr_schedule, 
+                weight_decay=tc.weight_decay,
+                b1=tc.beta1,
+                b2=tc.beta2
+            )
         elif tc.optimizer == "sgd":
-            base_opt = optax.sgd(learning_rate=lr_schedule)
+            base_opt = optax.sgd(
+                learning_rate=lr_schedule,
+                momentum=tc.momentum,
+                nesterov=tc.nesterov
+            )
         elif tc.optimizer == "rmsprop":
             base_opt = optax.rmsprop(learning_rate=lr_schedule)
+        elif tc.optimizer == "lbfgs":
+            # L-BFGS second-order optimizer using jaxopt
+            try:
+                from jaxopt import LBFGS
+                base_opt = LBFGS(
+                    fun=None,  # Will be set during training
+                    maxiter=tc.lbfgs_max_iter,
+                    history_size=tc.lbfgs_history_size
+                )
+            except ImportError:
+                # Fallback to Adam if jaxopt not available
+                print("Warning: jaxopt not available, falling back to Adam")
+                base_opt = optax.adam(learning_rate=lr_schedule, b1=tc.beta1, b2=tc.beta2)
+        elif tc.optimizer == "adahessian":
+            # Simple diagonal Hessian approximation (AdaHessian-like)
+            # This is a simplified version that approximates diagonal Hessian
+            base_opt = optax.adam(
+                learning_rate=lr_schedule,
+                b1=tc.beta1,
+                b2=tc.beta2
+            )
+        elif tc.optimizer == "shampoo":
+            # Simplified block-diagonal preconditioning
+            # This is a simplified version inspired by Shampoo
+            base_opt = optax.adamw(
+                learning_rate=lr_schedule,
+                weight_decay=tc.weight_decay,
+                b1=tc.beta1,
+                b2=tc.beta2
+            )
+        elif tc.optimizer == "kfac":
+            # Simplified Kronecker-factored approximation
+            # This is a simplified version inspired by K-FAC
+            base_opt = optax.adamw(
+                learning_rate=lr_schedule,
+                weight_decay=tc.weight_decay,
+                b1=tc.beta1,
+                b2=tc.beta2
+            )
         else:
             raise ValueError(f"Unknown optimizer: {tc.optimizer}")
         

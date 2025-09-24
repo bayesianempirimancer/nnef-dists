@@ -17,8 +17,44 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.ef import ef_factory
 
+def identify_extreme_points(eta: jnp.ndarray, mu_T: jnp.ndarray, num_extreme_per_dim: int = 2) -> jnp.ndarray:
+    """
+    Identify the most extreme points for each dimension of eta and mu_T.
+    
+    Args:
+        eta: Natural parameters array of shape (N, eta_dim)
+        mu_T: Expectation parameters array of shape (N, mu_T_dim)
+        num_extreme_per_dim: Number of extreme points to identify per dimension (default: 2 for min/max)
+        
+    Returns:
+        Boolean array of shape (N,) indicating which points are extreme
+    """
+    N, eta_dim = eta.shape
+    _, mu_T_dim = mu_T.shape
+    
+    # Track extreme points
+    extreme_mask = jnp.zeros(N, dtype=bool)
+    
+    # Find extreme points for eta dimensions
+    for i in range(eta_dim):
+        # Find indices of min and max values for this dimension
+        min_idx = jnp.argmin(eta[:, i])
+        max_idx = jnp.argmax(eta[:, i])
+        extreme_mask = extreme_mask.at[min_idx].set(True)
+        extreme_mask = extreme_mask.at[max_idx].set(True)
+    
+    # Find extreme points for mu_T dimensions
+    for i in range(mu_T_dim):
+        # Find indices of min and max values for this dimension
+        min_idx = jnp.argmin(mu_T[:, i])
+        max_idx = jnp.argmax(mu_T[:, i])
+        extreme_mask = extreme_mask.at[min_idx].set(True)
+        extreme_mask = extreme_mask.at[max_idx].set(True)
+    
+    return extreme_mask
+
 def generate_gaussian_data(dim: int = 3, n_train: int = 1000, n_val: int = 250, 
-                                         n_test: int = 250, seed: int = 42, difficulty = 'Easy', compute_cov_tt=False):
+                                         n_test: int = 250, seed: int = 42, difficulty = 'Easy', compute_cov_tt=False, ensure_extreme_in_train=True, tril_format=False):
     """
     Generate easy {dim}D Gaussian data using vectorized batch operations.
     
@@ -55,7 +91,7 @@ def generate_gaussian_data(dim: int = 3, n_train: int = 1000, n_val: int = 250,
         corr_range = (-0.1, 0.1)
         snr_min = 0.1
 
-    # Create exponential family
+    # Create exponential family (always use regular format for generation, convert to tril later if needed)
     ef = ef_factory("multivariate_normal", x_shape=(dim,))
     
     total_samples = n_train + n_val + n_test
@@ -95,15 +131,55 @@ def generate_gaussian_data(dim: int = 3, n_train: int = 1000, n_val: int = 250,
     
     print(f"  Generated {total_samples} samples successfully!")
     
-    # Split into train/val/test
-    eta_train = eta_all[:n_train]
-    mu_train = mu_all[:n_train]
-    
-    eta_val = eta_all[n_train:n_train+n_val]
-    mu_val = mu_all[n_train:n_train+n_val]
-    
-    eta_test = eta_all[n_train+n_val:]
-    mu_test = mu_all[n_train+n_val:]
+    if ensure_extreme_in_train:
+        # Identify extreme points
+        extreme_mask = identify_extreme_points(eta_all, mu_all)
+        extreme_indices = jnp.where(extreme_mask)[0]
+        non_extreme_indices = jnp.where(~extreme_mask)[0]
+        
+        print(f"  Identified {len(extreme_indices)} extreme points out of {total_samples} total points")
+        
+        # Shuffle non-extreme points
+        rng, subkey = random.split(rng)
+        shuffled_indices = random.permutation(subkey, non_extreme_indices)
+        
+        # Allocate points: extremes go to training, rest are split between train/val/test
+        num_extreme = len(extreme_indices)
+        remaining_train = n_train - num_extreme
+        remaining_val = n_val
+        remaining_test = n_test
+        
+        # Take extreme points for training
+        eta_train_extreme = eta_all[extreme_indices]
+        mu_train_extreme = mu_all[extreme_indices]
+        
+        # Take remaining points for training, validation, and test
+        eta_train_regular = eta_all[shuffled_indices[:remaining_train]]
+        mu_train_regular = mu_all[shuffled_indices[:remaining_train]]
+        
+        eta_val = eta_all[shuffled_indices[remaining_train:remaining_train + remaining_val]]
+        mu_val = mu_all[shuffled_indices[remaining_train:remaining_train + remaining_val]]
+        
+        eta_test = eta_all[shuffled_indices[remaining_train + remaining_val:remaining_train + remaining_val + remaining_test]]
+        mu_test = mu_all[shuffled_indices[remaining_train + remaining_val:remaining_train + remaining_val + remaining_test]]
+        
+        # Combine extreme and regular training data
+        eta_train = jnp.concatenate([eta_train_extreme, eta_train_regular], axis=0)
+        mu_train = jnp.concatenate([mu_train_extreme, mu_train_regular], axis=0)
+        
+        print(f"  Training set: {len(eta_train)} points ({num_extreme} extreme + {remaining_train} regular)")
+        print(f"  Validation set: {len(eta_val)} points")
+        print(f"  Test set: {len(eta_test)} points")
+    else:
+        # Original logic without extreme value preservation
+        eta_train = eta_all[:n_train]
+        mu_train = mu_all[:n_train]
+        
+        eta_val = eta_all[n_train:n_train+n_val]
+        mu_val = mu_all[n_train:n_train+n_val]
+        
+        eta_test = eta_all[n_train+n_val:]
+        mu_test = mu_all[n_train+n_val:]
     
     # Compute covariance matrices for LogZ training
     print("  Computing covariance matrices...")
@@ -132,7 +208,30 @@ def generate_gaussian_data(dim: int = 3, n_train: int = 1000, n_val: int = 250,
         cov_val = None
         cov_test = None
     
-    # Create data dictionary
+    if tril_format:
+        # Convert to tril format using the updated ef.py method
+        mvn_tril = ef_factory("multivariate_normal_tril", x_shape=(dim,))
+        
+        # Convert eta and mu arrays to tril format
+        eta_train = mvn_tril.standard_nat_to_LTnat(eta_train)
+        eta_val = mvn_tril.standard_nat_to_LTnat(eta_val)
+        eta_test = mvn_tril.standard_nat_to_LTnat(eta_test)
+        mu_train = mvn_tril.standard_nat_to_LTnat(mu_train)
+        mu_val = mvn_tril.standard_nat_to_LTnat(mu_val)
+        mu_test = mvn_tril.standard_nat_to_LTnat(mu_test)
+        
+        if compute_cov_tt:
+            # For tril format, we need to extract the tril indices from covariance matrices
+            indices = mvn_tril.tril_indices
+            # Reshape cov matrices to (batch, n*n) and extract tril indices
+            cov_train_flat = cov_train.reshape(cov_train.shape[0], -1)
+            cov_val_flat = cov_val.reshape(cov_val.shape[0], -1)
+            cov_test_flat = cov_test.reshape(cov_test.shape[0], -1)
+            
+            cov_train = cov_train_flat[:, indices]
+            cov_val = cov_val_flat[:, indices]
+            cov_test = cov_test_flat[:, indices]
+
     data = {
         'train': {'eta': eta_train, 'mu_T': mu_train, 'cov_TT': cov_train},
         'val': {'eta': eta_val, 'mu_T': mu_val, 'cov_TT': cov_val},
@@ -142,10 +241,10 @@ def generate_gaussian_data(dim: int = 3, n_train: int = 1000, n_val: int = 250,
             'n_val': n_val,
             'n_test': n_test,
             'seed': seed,
-            'eta_dim': eta_train.shape[1],
-            'mu_T_dim': mu_train.shape[1],
-            'exponential_family': f'multivariate_normal_{dim}d_{difficulty.lower()}',
-            'ef_distribution_name': 'multivariate_normal',  # Name for ef_factory
+            'eta_dim': eta_train.shape[1] if isinstance(eta_train, jnp.ndarray) else len(eta_train['x'][0]) + len(eta_train['xxT_tril'][0]),
+            'mu_T_dim': mu_train.shape[1] if isinstance(mu_train, jnp.ndarray) else len(mu_train['x'][0]) + len(mu_train['xxT_tril'][0]),
+            'exponential_family': f'multivariate_normal{"_tril" if tril_format else ""}_{dim}d_{difficulty.lower()}',
+            'ef_distribution_name': 'multivariate_normal_tril' if tril_format else 'multivariate_normal',  # Name for ef_factory
             'x_shape': [dim],  # Shape of the data samples x
             'x_dim': dim,  # Product of x_shape dimensions
             'difficulty': difficulty
@@ -257,13 +356,13 @@ def process_batch(mu1_batch, eta2_batch, ef):
     
     E_xx_batch = Sigma_batch + jnp.expand_dims(mu1_batch, -1) @ jnp.expand_dims(mu1_batch, -2)
         
-    # Flatten all samples
+    # Flatten all samples for regular format (tril conversion happens later)
     mu_dict = {'x': mu1_batch, 'xxT': 0.5*(E_xx_batch + jnp.transpose(E_xx_batch, (0, 2, 1)))}
     eta_dict = {'x': eta1_batch, 'xxT': 0.5*(eta2_batch + jnp.transpose(eta2_batch, (0, 2, 1)))}
         
     return ef.flatten_stats_or_eta(eta_dict), ef.flatten_stats_or_eta(mu_dict)
 
-def main(dim=3, difficulty='Easy', n_train=500, n_val=100, n_test=100, seed=42, compute_cov_tt=False):
+def main(dim=3, difficulty='Easy', n_train=500, n_val=100, n_test=100, seed=42, compute_cov_tt=False, ensure_extreme_in_train=True, tril_format=False):
     """Generate comparison data."""
     print("Generating Dataset for Model Comparison")
     print("="*55)
@@ -276,14 +375,17 @@ def main(dim=3, difficulty='Easy', n_train=500, n_val=100, n_test=100, seed=42, 
         n_test=n_test,
         seed=seed,
         difficulty=difficulty,
-        compute_cov_tt=compute_cov_tt
+        compute_cov_tt=compute_cov_tt,
+        ensure_extreme_in_train=ensure_extreme_in_train,
+        tril_format=tril_format
     )
     
     # Save to data directory
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
     
-    data_file = data_dir / f"{difficulty.lower()}_{dim}d_gaussian.pkl"
+    filename_suffix = "_tril" if tril_format else ""
+    data_file = data_dir / f"{difficulty.lower()}_{dim}d_gaussian{filename_suffix}.pkl"
     
     with open(data_file, 'wb') as f:
         pickle.dump(data, f)
@@ -301,20 +403,47 @@ def main(dim=3, difficulty='Easy', n_train=500, n_val=100, n_test=100, seed=42, 
     mu_train = data['train']['mu_T']
     
     print(f"\nData ranges:")
-    print(f"  η range: [{jnp.min(eta_train):.3f}, {jnp.max(eta_train):.3f}]")
-    print(f"  μ range: [{jnp.min(mu_train):.3f}, {jnp.max(mu_train):.3f}]")
-    print(f"  η std: {jnp.std(eta_train):.3f}")
-    print(f"  μ std: {jnp.std(mu_train):.3f}")
+    if isinstance(eta_train, dict):
+        # For tril format, concatenate x and xxT_tril for statistics
+        eta_flat = jnp.concatenate([eta_train['x'], eta_train['xxT_tril']], axis=1)
+        mu_flat = jnp.concatenate([mu_train['x'], mu_train['xxT_tril']], axis=1)
+        print(f"  η range: [{jnp.min(eta_flat):.3f}, {jnp.max(eta_flat):.3f}]")
+        print(f"  μ range: [{jnp.min(mu_flat):.3f}, {jnp.max(mu_flat):.3f}]")
+        print(f"  η std: {jnp.std(eta_flat):.3f}")
+        print(f"  μ std: {jnp.std(mu_flat):.3f}")
+    else:
+        print(f"  η range: [{jnp.min(eta_train):.3f}, {jnp.max(eta_train):.3f}]")
+        print(f"  μ range: [{jnp.min(mu_train):.3f}, {jnp.max(mu_train):.3f}]")
+        print(f"  η std: {jnp.std(eta_train):.3f}")
+        print(f"  μ std: {jnp.std(mu_train):.3f}")
     
     # Check condition numbers to show difficulty
     print(f"\nDifficulty indicators:")
-    sample_etas = eta_train[:10]
-    ef = ef_factory("multivariate_normal", x_shape=(dim,))
+    if isinstance(eta_train, dict):
+        sample_etas = {k: v[:10] for k, v in eta_train.items()}
+    else:
+        sample_etas = eta_train[:10]
+    
+    # Use the correct exponential family for condition number calculation
+    if tril_format:
+        ef_cond = ef_factory("multivariate_normal_tril", x_shape=(dim,))
+    else:
+        ef_cond = ef_factory("multivariate_normal", x_shape=(dim,))
     
     condition_numbers = []
     for i in range(10):
-        eta_dict = ef.unflatten_stats_or_eta(sample_etas[i])
-        eta2 = eta_dict['xxT']
+        if isinstance(eta_train, dict):
+            # For dictionary format, extract the i-th sample
+            eta_dict = {k: v[i] for k, v in sample_etas.items()}
+        else:
+            eta_dict = ef_cond.unflatten_stats_or_eta(sample_etas[i])
+        
+        if tril_format:
+            # For tril format, we need to reconstruct the full matrix
+            eta2_tril = eta_dict['xxT_tril']
+            eta2 = ef_cond.unflatten_LT(eta2_tril)
+        else:
+            eta2 = eta_dict['xxT']
         try:
             cond_num = jnp.linalg.cond(eta2)
             condition_numbers.append(float(cond_num))
@@ -345,5 +474,9 @@ if __name__ == "__main__":
                         help='Number of test samples (default: 100)')
     parser.add_argument('--compute_cov_tt', action='store_true', default=False,
                         help='Compute the TT covariance matrix (default: False)')
+    parser.add_argument('--ensure_extreme_in_train', action='store_true', default=True,
+                        help='Ensure extreme values are included in training set (default: True)')
+    parser.add_argument('--tril_format', action='store_true', default=False,
+                        help='Use triangular parameterization format (default: False)')
     args = parser.parse_args()
-    main(args.dim, args.difficulty, args.n_train, args.n_val, args.n_test, args.seed, args.compute_cov_tt)
+    main(args.dim, args.difficulty, args.n_train, args.n_val, args.n_test, args.seed, args.compute_cov_tt, args.ensure_extreme_in_train, args.tril_format)

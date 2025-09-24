@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!conda activate numpyro && python
 """
 Training script for Alternating Convex Neural Network-based log normalizer.
 
@@ -20,6 +20,7 @@ import argparse
 import sys
 from pathlib import Path
 import time
+import pickle
 import jax
 import jax.numpy as jnp
 from jax import random
@@ -102,9 +103,15 @@ def main():
     
     parser = argparse.ArgumentParser(description='Train Convex NN LogZ models')
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--save_dir', type=str, default='artifacts/logZ_models/convex_nn_logZ', help='Path to results dump directory')
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     
     args = parser.parse_args()
+    
+    # Create output directory
+    output_dir = Path(args.save_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     print("Training Alternating Convex Neural Network LogZ Model")
     print("=" * 65)
@@ -218,6 +225,13 @@ def main():
     print(f"Training time: {training_time:.2f}s")
     print(f"Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
     
+    # Save model parameters if requested
+    if args.save_params:
+        params_file = output_dir / "Convex_NN_LogZ_params.pkl"
+        with open(params_file, 'wb') as f:
+            pickle.dump(params, f)
+        print(f"Saved parameters to: {params_file}")
+    
     # Training history summary
     if 'train_loss' in history and len(history['train_loss']) > 0:
         final_train_loss = history['train_loss'][-1]
@@ -236,9 +250,6 @@ def main():
     print("- Stable gradient computation")
     print("- Positive semi-definite Hessian (valid covariance)")
     
-    # Create output directory
-    output_dir = Path("artifacts/logZ_models/convex_nn_logZ")
-    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Create plots using standardized plotting function
     metrics = plot_training_results(
@@ -293,7 +304,9 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Train Convex NN LogZ models')
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--save_dir', type=str, default='artifacts/logZ_models/convex_nn_logZ', help='Path to results dump directory')
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     
     args = parser.parse_args()
     main()

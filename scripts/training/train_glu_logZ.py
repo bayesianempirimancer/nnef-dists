@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!conda activate numpyro && python
 """
 Training script for GLU-based log normalizer neural networks.
 
@@ -15,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 import numpy as np
+import pickle
 import jax.numpy as jnp
 from jax import random
 # matplotlib import removed - now using standardized plotting
@@ -155,9 +156,15 @@ def main():
     
     parser = argparse.ArgumentParser(description='Train GLU LogZ models')
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--save_dir', type=str, default='artifacts/logZ_models/glu_logZ', help='Path to results dump directory')
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     
     args = parser.parse_args()
+    
+    # Create output directory
+    output_dir = Path(args.save_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     print("Training GLU LogZ Model")
     print("=" * 40)
@@ -202,7 +209,7 @@ def main():
             losses=losses,
             config=model.config,
             model_name=name,
-            output_dir="artifacts/logZ_models/glu_logZ",
+            output_dir=str(output_dir),
             save_plots=True,
             show_plots=False
         )
@@ -221,6 +228,13 @@ def main():
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")
         print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
+        # Save model parameters if requested
+        if args.save_params:
+            params_file = output_dir / f"{name}_params.pkl"
+            with open(params_file, 'wb') as f:
+                pickle.dump(params, f)
+            print(f"  Saved parameters to: {params_file}")
     
     # Summary
     print(f"\n{'='*60}")
@@ -238,7 +252,7 @@ def main():
     # Create model comparison plots
     plot_model_comparison(
         results=results,
-        output_dir="artifacts/logZ_models/glu_logZ",
+        output_dir=str(output_dir),
         save_plots=True,
         show_plots=False
     )
@@ -246,7 +260,7 @@ def main():
     # Save results summary
     save_results_summary(
         results=results,
-        output_dir="artifacts/logZ_models/glu_logZ"
+        output_dir=str(output_dir)
     )
     
     print("\n✅ GLU LogZ training complete!")
@@ -257,7 +271,9 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Train GLU LogZ models')
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
+    parser.add_argument('--save_dir', type=str, default='artifacts/logZ_models/glu_logZ', help='Path to results dump directory')
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     
     args = parser.parse_args()
     main()

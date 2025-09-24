@@ -26,6 +26,9 @@ class ExponentialFamily:
         """Return mapping from stat name -> shape (no batch dims)."""
         raise NotImplementedError
 
+    def _compute_stats(self, x: Array) -> Dict[str, Array]:
+        raise NotImplementedError
+
     @property
     def stat_names(self) -> List[str]:
         return list(self.stat_specs.keys())
@@ -68,9 +71,6 @@ class ExponentialFamily:
             return self.flatten_stats_or_eta(expected_stats)
         else:
             return expected_stats        
-
-    def _compute_stats(self, x: Array) -> Dict[str, Array]:
-        raise NotImplementedError
 
     def flatten_stats_or_eta(self, stats: Dict[str, Array]) -> Array:
         pieces = []
@@ -157,6 +157,12 @@ def ef_factory(name: str, **kwargs) -> ExponentialFamily:
         if isinstance(x_shape, list):
             x_shape = tuple(x_shape)
         return MultivariateNormal_tril(x_shape=x_shape)
+    elif n in {"laplace_product", "product_laplace"}:
+        x_shape = kwargs.get("x_shape", (1,))  # default 1D
+        # Convert list to tuple if needed
+        if isinstance(x_shape, list):
+            x_shape = tuple(x_shape)
+        return LaplaceProduct(x_shape=x_shape)
     raise ValueError(f"Unknown EF name: {name}")
 
 @dataclass(frozen=True)
@@ -276,15 +282,85 @@ class MultivariateNormal_tril(MultivariateNormal):
         xxT = x[...,None] * x[...,None,:]
         return {"x": x, "xxT_tril": self.flatten_LT(xxT)}
 
-    def LTnat_to_standard_nat(self, eta: Dict[str, Array]) -> Dict[str, Array]:
-        eta = self.unflatten_stats_or_eta(eta)
-        xxT = self.unflatten_LT(eta["xxT_tril"])
-        xxT = xxT + xxT.T - jnp.diag(jnp.diag(xxT))
-        return {"x": eta["x"], "xxT": xxT}
+    def LTnat_to_standard_nat(self, eta: Union[Dict[str, Array], Array]) -> Union[Dict[str, Array], Array]:
+        """
+        Convert lower triangular natural parameters to standard format.
+        
+        Args:
+            eta: Either a dictionary with 'x' and 'xxT_tril' keys, or a flattened array
+            
+        Returns:
+            Either a dictionary with 'x' and 'xxT' keys, or a flattened array
+        """
+        if isinstance(eta, dict):
+            # Dictionary input - return dictionary output
+            eta_unflattened = self.unflatten_stats_or_eta(eta)
+            xxT = self.unflatten_LT(eta_unflattened["xxT_tril"])
+            xxT = xxT + xxT.T - xxT*jnp.eye(xxT.shape[-1])
+            return {"x": eta_unflattened["x"], "xxT": xxT}
+        else:
+            # Array input - unflatten using tril format, then convert to standard
+            eta_dict = self.unflatten_stats_or_eta(eta)
+            # Convert to standard format
+            eta_standard_dict = self.LTnat_to_standard_nat(eta_dict)
+            # Flatten back to array
+            from src.ef import MultivariateNormal
+            mvn_std = MultivariateNormal(x_shape=self.x_shape)
+            return mvn_std.flatten_stats_or_eta(eta_standard_dict)
 
-    def standard_nat_to_LTnat(self, eta: Dict[str, Array]) -> Dict[str, Array]:
-        xxT = 2*eta["xxT"] - jnp.diag(jnp.diag(2*eta["xxT"]))
-        xxT = xxT*self.tril_mask
-        return {"x": eta["x"], "xxT_tril": self.flatten_LT(eta["xxT"])}
+    def standard_nat_to_LTnat(self, eta: Union[Dict[str, Array], Array]) -> Union[Dict[str, Array], Array]:
+        """
+        Convert standard natural parameters to lower triangular format.
+        
+        Args:
+            eta: Either a dictionary with 'x' and 'xxT' keys, or a flattened array
+            
+        Returns:
+            Either a dictionary with 'x' and 'xxT_tril' keys, or a flattened array
+        """
+        if isinstance(eta, dict):
+            # Dictionary input - return dictionary output
+            eta_unflattened = MultivariateNormal(x_shape=self.x_shape).unflatten_stats_or_eta(eta)
+            # Use jax.vmap to apply diag operation to each matrix in the batch
+            def extract_diag_matrix(matrix):
+                return jnp.diag(jnp.diag(matrix))
+            
+            xxT = 2*eta_unflattened["xxT"] - jax.vmap(extract_diag_matrix)(2*eta_unflattened["xxT"])
+            xxT = xxT*self.tril_mask
+            return {"x": eta_unflattened["x"], "xxT_tril": self.flatten_LT(eta_unflattened["xxT"])}
+        else:
+            # Array input - unflatten using standard format, then convert to tril
+            eta_dict = MultivariateNormal(x_shape=self.x_shape).unflatten_stats_or_eta(eta)
+            # Convert to tril format
+            eta_tril_dict = self.standard_nat_to_LTnat(eta_dict)
+            # Flatten back to array
+            return self.flatten_stats_or_eta(eta_tril_dict)
 
-    
+    def find_nearest_analytical_point(self, eta_target: Union[Array, Dict[str, Array]]) -> Tuple[Dict[str, Array], Dict[str, Array]]:
+        """
+        Find the nearest analytical reference point (η₀, μ₀) for flow-based computation.
+        
+        For multivariate Gaussian, we use the same mean but diagonal covariance matrix.
+        This gives us a point where μ₀ can be computed analytically while being close to the target.
+        """
+        eta_standard = self.LTnat_to_standard_nat(eta_target)
+        tempdist = MultivariateNormal(x_shape=self.x_shape)
+        eta_nearest_dict, mu_nearest_dict = tempdist.find_nearest_analytical_point(eta_standard)
+        eta_nearest = self.standard_nat_to_LTnat(eta_nearest_dict)
+        mu_target = self.standard_nat_to_LTnat(mu_nearest_dict)
+
+        return eta_nearest, mu_target
+
+@dataclass(frozen=True)
+class LaplaceProduct(ExponentialFamily):
+    """ 
+    Laplace product in natural parameterization with T(x) = -abs(x+1)-abs(x-1) where x is a vector.
+    """
+    x_shape: Tuple[int,]
+
+    @cached_property
+    def stat_specs(self) -> Dict[str, Tuple[int, ...]]:
+        return {"xm1": (self.x_shape[-1],), "xp1": (self.x_shape[-1],)}
+
+    def _compute_stats(self, x: Array) -> Dict[str, Array]:
+        return {"xm1": -jnp.abs(x-1), "xp1": -jnp.abs(x+1)}

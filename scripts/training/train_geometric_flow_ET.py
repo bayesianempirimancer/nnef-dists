@@ -19,6 +19,7 @@ import argparse
 from pathlib import Path
 import json
 import time
+import pickle
 import jax
 
 # Add the project root to Python path for package imports
@@ -56,7 +57,8 @@ class Geometric_Flow_Net(ET_Template):
             input_dim=self.eta_dim,
             output_dim=self.eta_dim
         )
-        training_config = TrainingConfig(num_epochs=num_epochs, learning_rate=1e-2)
+        # Use optimal training configuration from template
+        training_config = self.create_optimal_training_config(num_epochs)
         
         # Create model-specific config with geometric flow specific parameters
         model_specific_config = ModelSpecificConfig(
@@ -85,29 +87,14 @@ class Geometric_Flow_Net(ET_Template):
         """Benchmark inference time for geometric flow model."""
         import time
         
-        # Create a small batch for benchmarking
-        batch = trainer.create_flow_batch(eta_data[:1])
-        
         # Warm-up run to ensure compilation is complete
-        _ = trainer.model.apply(
-            params,
-            batch['eta_init'],
-            batch['eta_target'], 
-            batch['mu_init'],
-            training=False
-        )
+        _ = self.predict(trainer, params, eta_data[:1])
         
         # Measure inference time over multiple runs
         times = []
         for _ in range(num_runs):
             start_time = time.time()
-            _ = trainer.model.apply(
-                params,
-                batch['eta_init'],
-                batch['eta_target'],
-                batch['mu_init'], 
-                training=False
-            )
+            _ = self.predict(trainer, params, eta_data)
             times.append(time.time() - start_time)
         
         # Return statistics
@@ -119,12 +106,17 @@ class Geometric_Flow_Net(ET_Template):
             'avg_inference_time': avg_time,
             'min_inference_time': min_time,
             'max_inference_time': max_time,
-            'samples_per_second': 1.0 / avg_time if avg_time > 0 else 0.0,
+            'samples_per_second': len(eta_data) / avg_time,
             'inference_per_sample': avg_time / len(eta_data)
         }
 
+    def predict(self, trainer, params, eta_data):
+        """Make predictions using geometric flow trainer's predict method."""
+        predictions_dict = trainer.predict(params, eta_data)
+        return predictions_dict['mu_predicted']  # Extract the actual predictions
+
 ## Functions currently inherited from ET_Template class
-# train, predict, evaluate
+# train, evaluate
 
 
 def main():
@@ -133,6 +125,7 @@ def main():
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
     parser.add_argument('--save_dir', type=str, default='artifacts/ET_models/geometric_flow_ET', help='Path to results dump directory')    
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     parser.add_argument('--ef_type', type=str, default='multivariate_normal', help='Exponential family type (default: multivariate_normal)')
     parser.add_argument('--x_shape', type=int, nargs='+', default=[3], help='Shape of x for exponential family (default: [3])')
     
@@ -152,11 +145,14 @@ def main():
 
     eta_dim = infer_dimensions(train["eta"], metadata=metadata)
         
-    # Define architectures to test (focused comparison)
+    # Define architectures to test (all variants for comprehensive comparison)
     architectures = {
-        "SmallDeep1": ([32, 32, 32], None, 10, 1e-3),
-        "SmallDeep2": ([48, 48, 48], None, 10, 1e-3),
-        "SmallDeep3": ([64, 64, 64], None, 10, 1e-3)
+        "Small": [32, 32, 32],
+        "Medium": [64, 64],
+        "Large": [128, 128],
+        "Deep": [64, 64, 64],
+        "Wide": [128, 64, 128],
+        "Max": [128, 128, 128]
     }
     
     print("Training Standard Geometric Flow ET Model")
@@ -164,12 +160,18 @@ def main():
     
     results = {}
     
-    # Test the architecture
-    for arch_name, (hidden_sizes, matrix_rank, n_time_steps, smoothness_weight) in architectures.items():
-        print(f"\nTraining ET Geometric Flow {arch_name} with hidden sizes: {hidden_sizes}, matrix rank: {matrix_rank}, time steps: {n_time_steps}")
+    # Test the architectures
+    for arch_name, hidden_sizes in architectures.items():
+        print(f"\nTraining Geometric Flow ET {arch_name} with hidden sizes: {hidden_sizes}")
         
-        # Infer dimensions from metadata
-        model = Geometric_Flow_Net(hidden_sizes=hidden_sizes, eta_dim=eta_dim, matrix_rank=matrix_rank, n_time_steps=n_time_steps, smoothness_weight=smoothness_weight)
+        # Create model with geometric flow specific configuration
+        model = Geometric_Flow_Net(
+            hidden_sizes=hidden_sizes, 
+            eta_dim=eta_dim, 
+            matrix_rank=None,  # Use default rank
+            n_time_steps=10,   # Use default time steps
+            smoothness_weight=1e-3  # Use default smoothness weight
+        )
         trainer = model.create_model_and_trainer(num_epochs=args.epochs)
         
         # Set up exponential family for geometric flow trainer
@@ -180,9 +182,8 @@ def main():
         params, losses = trainer.train(train['eta'], val['eta'], epochs=args.epochs)
         training_time = time.time() - t
 
-        # Evaluate accuracy
-        predictions_dict = model.predict(trainer, params, test['eta'])
-        predictions = predictions_dict['mu_predicted']  # Extract the actual predictions
+        # Evaluate using inherited methods
+        predictions = model.predict(trainer, params, test['eta'])
         metrics = model.evaluate(predictions, test['mu_T'])
         
         # Benchmark inference time
@@ -190,15 +191,12 @@ def main():
         
         # Calculate parameter count and total depth
         param_count = sum(p.size for p in jax.tree_util.tree_flatten(params)[0])
-        total_depth = len(hidden_sizes) + n_time_steps  # Base network + flow time steps
+        total_depth = len(hidden_sizes)
         
         results[f"{model.model_type}_ET_{arch_name}"] = create_standardized_results(
             model_name=f"{model.model_type}_ET_{arch_name}",
             architecture_info={
                 "hidden_sizes": hidden_sizes,
-                "matrix_rank": matrix_rank,
-                "n_time_steps": n_time_steps,
-                "smoothness_weight": smoothness_weight,
                 "total_depth": total_depth,
                 "parameter_count": param_count
             },
@@ -213,6 +211,12 @@ def main():
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")
         print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
+        # Save model artifacts by default
+        model_name = f"{model.model_type}_ET_{arch_name}"
+        saved_files = model.save_model_artifacts(trainer, params, model_name, args.save_dir)
+        
+        # Model artifacts are now saved by default via template method
     
     # Print summary
     print("\n" + "=" * 60)
@@ -220,10 +224,12 @@ def main():
     print("=" * 60)
     
     for model_name, result in results.items():
-        print(f"{model_name:<20} : MSE={result['mse']:.6f}, MAE={result['mae']:.6f}, Architecture={result['hidden_sizes']}")
-        print(f"{'':<20}   Training: {result['training_time']:.2f}s, Inference: {result['samples_per_second']:.1f} samples/sec")
+        print(f"{model_name:<30} : MSE={result['mse']:.6f}, MAE={result['mae']:.6f}, Architecture={result['hidden_sizes']}")
+        print(f"{'':<30}   Training: {result['training_time']:.2f}s, Inference: {result['samples_per_second']:.1f} samples/sec")
     
-    print(f"\n✅ Model training completed successfully!")
+    # Find best model
+    best_model = min(results.keys(), key=lambda k: results[k]['mse'])
+    print(f"\n🏆 Best Model: {best_model} with MSE={results[best_model]['mse']:.6f}")
     
     # Create model comparison plots using standardized plotting function
     plot_model_comparison(
@@ -243,8 +249,12 @@ def main():
         output_dir=str(output_dir)
     )
     
-    print(f"\n✅ Standard {model.model_type.upper()} ET training complete!")
+    print(f"\n✅ {model.model_type.upper()} ET training complete!")
     print(f"📁 Results saved to {output_dir}")
+    print("\nKey differences from standard backpropagation:")
+    print("- Geometric flow dynamics with PSD constraints")
+    print("- Flow from known initial conditions to target statistics")
+    print("- Neural ODE-based evolution of sufficient statistics")
 
 
 if __name__ == "__main__":

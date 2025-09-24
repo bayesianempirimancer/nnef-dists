@@ -41,12 +41,12 @@ class NoProp_Geometric_Flow_Block(nn.Module):
     hidden_sizes: List[int]
     output_dim: int
     matrix_rank: int = None  # Rank of matrix A (if None, use output_dim)
-    noise_schedule: str = "noprop_ct"  # "noprop_ct" or "flow_matching"
+    noise_schedule: str = "flow_matching"  # "noprop_ct" or "flow_matching"
     use_feature_engineering: bool = True
     activation: str = "swish"
     use_weak_layer_norm: bool = False
-    use_resnet: bool = True
-    resnet_skip_every: int = 2
+    use_resnet: bool = False
+    resnet_skip_every: int = 1
     
     def _weak_layer_norm(self, x: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
         """Weak layer normalization: x/norm(x) * log(1 + norm(x))"""
@@ -194,7 +194,7 @@ class NoProp_Geometric_Flow_ET_Network(nn.Module):
     n_time_steps: int = 10
     smoothness_weight: float = 1e-3
     time_embed_dim: int = None
-    noise_schedule: str = "noprop_ct"
+    noise_schedule: str = "flow_matching"
     flow_matching_sigma: float = 0.1
     
     def setup(self):
@@ -211,8 +211,8 @@ class NoProp_Geometric_Flow_ET_Network(nn.Module):
             use_feature_engineering=True,
             activation="swish",
             use_weak_layer_norm=False,
-            use_resnet=True,
-            resnet_skip_every=2
+            use_resnet=False,
+            resnet_skip_every=1
         )
     
     def _time_embedding(self, t: float, dim: int) -> jnp.ndarray:
@@ -320,7 +320,7 @@ class NoProp_Geometric_Flow_ET_Trainer:
     - Smoothness penalties for stable dynamics
     """
     
-    def __init__(self, config: FullConfig, loss_type: str = "geometric_flow"):
+    def __init__(self, config: FullConfig, loss_type: str = "flow_matching"):
         self.config = config
         self.loss_type = loss_type
         
@@ -393,7 +393,13 @@ class NoProp_Geometric_Flow_ET_Trainer:
                                 method="predict_matrix_A")
         
         if loss_strategy == "geometric_flow":
-            # Geometric flow loss: encourage du/dt to point toward target
+            # Geometric flow loss: learn flow from known mu_init to target_mu_T
+            # The flow should integrate from mu_init to target_mu_T over time t ∈ [0,1]
+            # At time t, the expected position is: mu_t = mu_init + t * (target_mu_T - mu_init)
+            expected_mu_t = mu_init + t * (target_mu_T - mu_init)
+            
+            # The du/dt should point toward the target from current position
+            # Current position at time t (approximated by mu_init for simplicity in loss)
             target_direction = target_mu_T - mu_init
             direction_loss = jnp.mean((du_dt - target_direction) ** 2)
             
@@ -404,12 +410,15 @@ class NoProp_Geometric_Flow_ET_Trainer:
             
         elif loss_strategy == "simple_target":
             # Simple target loss: direct MSE to final target
-            mse_loss = jnp.mean((du_dt - (target_mu_T - mu_init)) ** 2)
+            # Learn to predict the total change needed: target_mu_T - mu_init
+            total_change = target_mu_T - mu_init
+            mse_loss = jnp.mean((du_dt - total_change) ** 2)
             reg_loss = 1e-4 * jnp.mean(du_dt ** 2)
             return mse_loss + reg_loss
             
         elif loss_strategy == "flow_matching":
             # Flow matching loss for geometric flow
+            # Learn the flow from mu_init to target_mu_T
             target_flow = target_mu_T - mu_init
             flow_loss = jnp.mean((du_dt - target_flow) ** 2)
             reg_loss = 1e-4 * jnp.mean(du_dt ** 2)
@@ -491,7 +500,7 @@ class NoProp_Geometric_Flow_ET_Trainer:
     
     def train(self, train_data: Dict[str, jnp.ndarray], 
               val_data: Optional[Dict[str, jnp.ndarray]] = None,
-              epochs: int = 300, loss_strategy: str = "geometric_flow",
+              epochs: int = 300, loss_strategy: str = None,
               input_output_penalty_weight: float = 0.0) -> Tuple[Dict, Dict]:
         """
         Full training loop for geometric flow using NoProp continuous-time protocol.
@@ -506,6 +515,10 @@ class NoProp_Geometric_Flow_ET_Trainer:
         Returns:
             Best parameters and training history
         """
+        # Use trainer's loss_type if no loss_strategy is provided
+        if loss_strategy is None:
+            loss_strategy = self.loss_type
+            
         # Initialize the network
         sample_eta_init = train_data['eta_init'][:1]
         sample_eta_target = train_data['eta_target'][:1]
@@ -579,6 +592,6 @@ class NoProp_Geometric_Flow_ET_Trainer:
         return self.model.apply(self.mlp_params, eta_init, eta_target, mu_init, method="predict")
 
 
-def create_model_and_trainer(config: FullConfig, loss_type: str = "geometric_flow") -> NoProp_Geometric_Flow_ET_Trainer:
+def create_model_and_trainer(config: FullConfig, loss_type: str = "flow_matching") -> NoProp_Geometric_Flow_ET_Trainer:
     """Factory function to create NoProp Geometric Flow ET model and trainer."""
     return NoProp_Geometric_Flow_ET_Trainer(config, loss_type)

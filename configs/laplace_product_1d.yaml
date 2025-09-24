@@ -1,0 +1,21 @@
+# Configuration for generating LaplaceProduct 1D dataset
+ef:
+  name: "laplace_product"
+  x_shape: [1]
+
+grid:
+  num_train_points: 800
+  num_val_points: 200
+  eta_ranges:
+    - [0.2, 4.0]  # eta_xm1 range
+    - [0.2, 4.0]  # eta_xp1 range
+
+sampling:
+  num_samples: 1000
+  num_warmup: 500
+  step_size: 0.1
+  num_integration_steps: 10
+  initial_position: [0.0]
+
+optim:
+  seed: 42

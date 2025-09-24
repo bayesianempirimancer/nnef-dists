@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!conda activate numpyro && python
 """
 Training script template for ET (Expected Statistics) neural networks.
 
@@ -23,6 +23,7 @@ if str(project_root) not in sys.path:
 # Import data and plotting functions
 from src.utils.data_utils import infer_dimensions, load_standardized_ep_data
 from scripts.plotting.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
+from src.config import TrainingConfig
 
 # Simple configuration class
 class Network_Config:
@@ -40,6 +41,37 @@ class ET_Template:
         self.eta_dim = eta_dim
         self.hidden_sizes = hidden_sizes
         self.model_type = model_type
+    
+    def create_optimal_training_config(self, num_epochs=300):
+        """Create optimal training configuration based on performance testing."""
+        return TrainingConfig(
+            num_epochs=num_epochs, 
+            learning_rate=5e-4,  # Optimized learning rate for AdamW
+            optimizer="adamw",   # AdamW - comparing against RMSprop performance
+            weight_decay=1e-4,   # L2 regularization for AdamW
+            gradient_clip_norm=0.5,  # Gradient clipping for stability
+            
+            # Optimized momentum parameters (from testing)
+            beta1=0.9,      # First moment decay (standard, optimal)
+            beta2=0.999,    # Second moment decay (standard, optimal)
+            momentum=0.9,   # SGD momentum (if using SGD)
+            nesterov=False, # Nesterov acceleration (disabled for AdamW)
+            
+            # Advanced learning rate scheduling - OneCycle for faster convergence
+            use_lr_schedule=True,
+            lr_schedule_type="onecycle",  # OneCycle for faster convergence
+            lr_decay_steps=num_epochs,  # Decay over full training
+            warmup_steps=max(10, num_epochs // 20) if num_epochs > 20 else 0,  # 5% warmup, but only if enough epochs
+            
+            # OneCycle parameters for faster convergence
+            onecycle_max_lr=1e-2,  # Higher max LR for faster initial learning
+            onecycle_pct_start=0.3,  # 30% of training for warmup
+            
+            # Training optimization
+            batch_size=128,  # Larger batch size for better gradient estimates
+            patience=50,     # Early stopping patience
+            early_stopping=True
+        )
     
     def config_model_and_trainer(self, num_epochs):
         raise NotImplementedError("config_model_and_trainer must be implemented in the subclass.")
@@ -74,6 +106,43 @@ class ET_Template:
         training_time = time.time() - start_time
         
         return best_params, training_history['train_loss'], training_time
+    
+    def save_model_artifacts(self, trainer, params, model_name, output_dir):
+        """Save model parameters, optimizer state, and training configuration."""
+        import pickle
+        from pathlib import Path
+        
+        # Ensure output directory exists
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get optimizer state
+        optimizer = trainer.create_optimizer()
+        opt_state = optimizer.init(params)
+        
+        # Save model parameters
+        params_file = output_dir / f"{model_name}_params.pkl"
+        with open(params_file, 'wb') as f:
+            pickle.dump(params, f)
+        print(f"  Saved model parameters to: {params_file}")
+        
+        # Save optimizer state
+        opt_state_file = output_dir / f"{model_name}_opt_state.pkl"
+        with open(opt_state_file, 'wb') as f:
+            pickle.dump(opt_state, f)
+        print(f"  Saved optimizer state to: {opt_state_file}")
+        
+        # Save training configuration
+        config_file = output_dir / f"{model_name}_config.pkl"
+        with open(config_file, 'wb') as f:
+            pickle.dump(trainer.config, f)
+        print(f"  Saved training config to: {config_file}")
+        
+        return {
+            'params_file': str(params_file),
+            'opt_state_file': str(opt_state_file),
+            'config_file': str(config_file)
+        }
     
     def predict(self, trainer, params, eta_data):
         """Make predictions."""
@@ -151,6 +220,11 @@ def main():
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")
         print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
+        # Save model artifacts by default
+        model_name = f"{model.model_type}_ET_{name}"
+        output_dir = "artifacts/ET_models/template_ET"
+        saved_files = model.save_model_artifacts(trainer, params, model_name, output_dir)
         
         # Create plots using standardized plotting function
         metrics_for_plotting = plot_training_results(

@@ -14,6 +14,7 @@ import argparse
 from pathlib import Path
 import json
 import time
+import pickle
 import jax
 
 # Add the project root to Python path for package imports
@@ -46,7 +47,9 @@ class Standard_Quadratic_ResNet_Net(ET_Template):
             input_dim=self.eta_dim,
             output_dim=self.eta_dim
         )
-        training_config = TrainingConfig(num_epochs=num_epochs, learning_rate=1e-2)
+        
+        # Use optimal training configuration from template
+        training_config = self.create_optimal_training_config(num_epochs)
         full_config = FullConfig(network=network_config, training=training_config)
 
         return ETTrainer(Quadratic_ResNet_ET_Network(config=network_config),full_config)  # returns fully configured Quadratic_ResNet_ET_Trainer
@@ -60,6 +63,7 @@ def main():
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
     parser.add_argument('--save_dir', type=str, default='artifacts/ET_models/quadratic_resnet_ET', help='Path to results dump directory')    
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', default=True, help='Save model parameters as pickle files')
     
     args = parser.parse_args()
 
@@ -75,14 +79,11 @@ def main():
 #    eta_data, ground_truth, metadata = load_standardized_ep_data(args.data_file)
     eta_dim = infer_dimensions(train["eta"], metadata=metadata)
         
-    # Define architectures to test (all variants for comprehensive comparison)
+    # Define architectures to test (width comparison - 6 layers)
+    # Testing optimal width: 64 vs 128 hidden units with 6 layers
     architectures = {
-        "Small": [32, 32],
-        "Medium": [64, 64],
-        "Large": [128, 128],
-        "Deep": [64, 64, 64],
-        "Wide": [128, 64, 128],
-        "Max": [128, 128, 128]
+        "Width64": [64, 64, 64, 64, 64, 64],   # depth=6, width=64
+        "Width128": [128, 128, 128, 128, 128, 128]  # depth=6, width=128
     }
     
     print("Training Standard Quadratic ResNet ET Model")
@@ -102,6 +103,10 @@ def main():
         t=time.time()
         params, losses = trainer.train(train, val, epochs=args.epochs)
         training_time = time.time() - t
+        
+        # Get optimizer state for saving
+        optimizer = trainer.create_optimizer()
+        opt_state = optimizer.init(params)
 
         # Evaluate accuracy
         predictions = model.predict(trainer, params, test['eta'])
@@ -133,6 +138,28 @@ def main():
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")
         print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
+        # Save model parameters and optimizer state if requested
+        if args.save_params:
+            model_name = f"{model.model_type}_ET_{arch_name}"
+            
+            # Save model parameters
+            params_file = output_dir / f"{model_name}_params.pkl"
+            with open(params_file, 'wb') as f:
+                pickle.dump(params, f)
+            print(f"  Saved model parameters to: {params_file}")
+            
+            # Save optimizer state
+            opt_state_file = output_dir / f"{model_name}_opt_state.pkl"
+            with open(opt_state_file, 'wb') as f:
+                pickle.dump(opt_state, f)
+            print(f"  Saved optimizer state to: {opt_state_file}")
+            
+            # Save training configuration
+            config_file = output_dir / f"{model_name}_config.pkl"
+            with open(config_file, 'wb') as f:
+                pickle.dump(trainer.config, f)
+            print(f"  Saved training config to: {config_file}")
     
     # Print summary
     print("\n" + "=" * 60)

@@ -14,6 +14,7 @@ import argparse
 from pathlib import Path
 import json
 import time
+import pickle
 import jax
 
 # Add the project root to Python path for package imports
@@ -46,7 +47,7 @@ class Standard_GLU_Net(ET_Template):
             input_dim=self.eta_dim,
             output_dim=self.eta_dim
         )
-        training_config = TrainingConfig(num_epochs=num_epochs, learning_rate=1e-2)
+        training_config = self.create_optimal_training_config(num_epochs)
         full_config = FullConfig(network=network_config, training=training_config)
 
         return ETTrainer(GLU_ET_Network(config=network_config),full_config)  # returns fully configured GLU_ET_Trainer
@@ -61,6 +62,7 @@ def main():
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
     parser.add_argument('--save_dir', type=str, default='artifacts/ET_models/glu_ET', help='Path to results dump directory')    
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     
     args = parser.parse_args()
 
@@ -134,6 +136,12 @@ def main():
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")
         print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
+        # Save model artifacts by default
+        model_name = f"{model.model_type}_ET_{arch_name}"
+        saved_files = model.save_model_artifacts(trainer, params, model_name, args.save_dir)
+        
+        # Model artifacts are now saved by default via template method
     
     # Print summary
     print("\n" + "=" * 60)

@@ -36,7 +36,7 @@ class NetworkConfig:
     max_noise: float = 1.0
     time_embed_dim: int = 16
     use_resnet: bool = False  # Whether to use ResNet-style connections
-    resnet_skip_every: int = 2  # Skip connection every N layers
+    resnet_skip_every: int = 1  # Skip connection every N layers
     
     # Geometric Flow specific parameters
     matrix_rank: Optional[int] = None  # Rank of matrix A (if None, use output_dim)
@@ -49,15 +49,56 @@ class TrainingConfig:
     """Configuration for training parameters."""
     # Optimization
     learning_rate: float = 1e-3
-    optimizer: str = "adam"  # "adam", "adamw", "sgd", "rmsprop"
+    optimizer: str = "rmsprop"  # "adam", "adamw", "sgd", "rmsprop", "lbfgs", "adahessian", "shampoo", "kfac"
     weight_decay: float = 0.0
     gradient_clip_norm: float = 1.0
     
+    # Momentum parameters
+    beta1: float = 0.9  # First moment decay for Adam/AdamW
+    beta2: float = 0.999  # Second moment decay for Adam/AdamW
+    momentum: float = 0.9  # Momentum for SGD
+    nesterov: bool = False  # Nesterov acceleration for SGD
+    
     # Schedule
     use_lr_schedule: bool = True
-    lr_schedule_type: str = "exponential"  # "exponential", "cosine", "polynomial"
+    lr_schedule_type: str = "exponential"  # "exponential", "cosine", "polynomial", "warmup_cosine", "onecycle", "cosine_restarts", "reduce_on_plateau"
     lr_decay_rate: float = 0.95
     lr_decay_steps: int = 1000
+    warmup_steps: int = 100  # Steps for learning rate warmup
+    
+    # Adaptive learning rate parameters
+    use_adaptive_lr: bool = True  # Enable adaptive learning rate
+    adaptive_lr_factor: float = 0.5  # Factor to reduce LR by
+    adaptive_lr_patience: int = 20  # Epochs to wait before reducing LR
+    adaptive_lr_min: float = 1e-6  # Minimum learning rate
+    
+    # OneCycle parameters
+    onecycle_max_lr: float = 1e-2  # Maximum LR for OneCycle
+    onecycle_pct_start: float = 0.3  # Percentage of cycle for warmup
+    
+    # Cosine restarts parameters
+    cosine_restart_period: int = 100  # Period for cosine restarts
+    cosine_restart_t_mult: float = 2.0  # Multiplier for restart period
+    
+    # Second-order optimizer parameters
+    # L-BFGS parameters
+    lbfgs_history_size: int = 20  # Number of history vectors for L-BFGS
+    lbfgs_max_iter: int = 20  # Maximum iterations per L-BFGS step
+    
+    # AdaHessian parameters
+    adahessian_hessian_power: float = 1.0  # Power for Hessian diagonal approximation
+    adahessian_update_freq: int = 1  # Frequency of Hessian updates
+    
+    # Shampoo parameters
+    shampoo_block_size: int = 1024  # Block size for Shampoo
+    shampoo_momentum: float = 0.9  # Momentum for Shampoo
+    shampoo_weight_decay: float = 0.0  # Weight decay for Shampoo
+    
+    # K-FAC parameters
+    kfac_inverse_freq: int = 100  # Frequency of inverse computation
+    kfac_factor_freq: int = 10  # Frequency of factor updates
+    kfac_momentum: float = 0.9  # Momentum for K-FAC
+    kfac_damping: float = 1e-3  # Damping parameter
     
     # Training loop
     num_epochs: int = 100

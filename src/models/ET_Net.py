@@ -98,7 +98,7 @@ class ETTrainer(BaseTrainer):
     
     def train(self, train_data: Dict[str, jnp.ndarray], 
               val_data: Optional[Dict[str, jnp.ndarray]] = None,
-              epochs: int = 300, learning_rate: float = 1e-3) -> Tuple[Dict, Dict]:
+              epochs: int = 300, learning_rate: float = None) -> Tuple[Dict, Dict]:
         """
         Train the ET network.
         
@@ -106,13 +106,24 @@ class ETTrainer(BaseTrainer):
             train_data: Training data with 'eta' and 'mu_T' keys
             val_data: Validation data (optional)
             epochs: Number of training epochs
-            learning_rate: Learning rate for optimizer
+            learning_rate: Learning rate for optimizer (if None, uses config)
             
         Returns:
             Tuple of (best_params, training_history)
         """
-        # Initialize optimizer
-        optimizer = optax.adam(learning_rate)
+        # Use advanced optimizer from BaseTrainer if available, otherwise fallback
+        if hasattr(self, 'config') and self.config is not None:
+            # Update epochs in config if different
+            if epochs != self.config.training.num_epochs:
+                self.config.training.num_epochs = epochs
+            # Override learning rate if provided
+            if learning_rate is not None:
+                self.config.training.learning_rate = learning_rate
+            optimizer = self.create_optimizer()
+        else:
+            # Fallback to simple optimizer
+            lr = learning_rate if learning_rate is not None else 1e-3
+            optimizer = optax.adam(lr)
         
         # Initialize parameters
         self.rng, init_rng = random.split(self.rng)
@@ -192,28 +203,39 @@ class ETTrainer(BaseTrainer):
             'component_errors': errors_by_component
         }
 
-    def benchmark_inference(self, params: Dict, eta_data, num_runs=50):
-        """Benchmark inference time with multiple runs for accuracy."""
+    def benchmark_inference(self, params: Dict, eta_data, num_runs=10, batch_size=1000):
+        """Benchmark inference time using larger batches for better accuracy."""
         # Warm-up run to ensure compilation is complete
         self.predict(params, eta_data[:1])
         
-        num_runs = min(num_runs, eta_data.shape[0])
-        # Measure inference time over multiple runs
+        # Use a reasonable batch size for timing (not too large to avoid memory issues)
+        batch_size = min(batch_size, len(eta_data))
+        batch_data = eta_data[:batch_size]
+        
+        # Measure inference time over multiple runs on the batch
         times = []
         for _ in range(num_runs):
-            start_time = time.time()
-            _ = self.predict(params, eta_data)
-            times.append(time.time() - start_time)
+            start_time = time.perf_counter()
+            _ = self.predict(params, batch_data)
+            elapsed = time.perf_counter() - start_time
+            # Ensure we never have negative times (safeguard against clock issues)
+            times.append(max(0.0, elapsed))
         
         # Return statistics
         avg_time = sum(times) / len(times)
         min_time = min(times)
         max_time = max(times)
         
+        # Calculate per-sample timing by normalizing by batch size
+        per_sample_time = avg_time / batch_size
+        samples_per_second = batch_size / avg_time
+        
         return {
-            'avg_inference_time': avg_time,
-            'min_inference_time': min_time,
-            'max_inference_time': max_time,
-            'inference_per_sample': avg_time / len(eta_data),
-            'samples_per_second': len(eta_data) / avg_time
+            'avg_inference_time': per_sample_time,
+            'min_inference_time': min_time / batch_size,
+            'max_inference_time': max_time / batch_size,
+            'inference_per_sample': per_sample_time,
+            'samples_per_second': samples_per_second,
+            'batch_size_used': batch_size,
+            'total_batch_time': avg_time
         }

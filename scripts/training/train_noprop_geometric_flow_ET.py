@@ -18,6 +18,7 @@ import argparse
 from pathlib import Path
 import json
 import time
+import pickle
 import jax
 import jax.numpy as jnp
 
@@ -41,7 +42,7 @@ class NoProp_Geometric_Flow_Net(ET_Template):
     """NoProp Geometric Flow ET using the ET template and geometric flow dynamics."""
     
     def __init__(self, hidden_sizes=None, eta_dim=None, num_time_steps=10, 
-                 noise_schedule="noprop_ct", matrix_rank=None, smoothness_weight=1e-3, loss_type="geometric_flow"):
+                 noise_schedule="flow_matching", matrix_rank=None, smoothness_weight=1e-3, loss_type="flow_matching"):
         super().__init__(hidden_sizes=hidden_sizes, eta_dim=eta_dim, model_type="noprop_geometric_flow")
         self.num_time_steps = num_time_steps
         self.noise_schedule = noise_schedule
@@ -74,7 +75,8 @@ class NoProp_Geometric_Flow_Net(ET_Template):
             flow_matching_sigma=0.1
         )
         
-        training_config = TrainingConfig(num_epochs=num_epochs, learning_rate=1e-3)
+        # Use optimal training configuration from template
+        training_config = self.create_optimal_training_config(num_epochs)
         full_config = FullConfig(network=network_config, training=training_config)
         return create_model_and_trainer(full_config, self.loss_type)
     
@@ -85,7 +87,7 @@ class NoProp_Geometric_Flow_Net(ET_Template):
         eta_init = eta_data
         eta_target = eta_data
         
-        # Use zeros as initial mu (will be learned by the flow)
+        # Use the known initial condition (zeros representing analytical point)
         mu_init = jnp.zeros_like(eta_data)
         
         # Update trainer's mlp_params with the passed params
@@ -130,12 +132,13 @@ def main():
     parser.add_argument('--data_file', type=str, help='Path to data file (default: data/easy_3d_gaussian.pkl)')
     parser.add_argument('--save_dir', type=str, default='artifacts/ET_models/noprop_geometric_flow_ET', help='Path to results dump directory')    
     parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--save_params', action='store_true', help='Save model parameters as pickle files')
     parser.add_argument('--time_steps', type=int, default=10, help='Number of time steps for inference')
     parser.add_argument('--matrix_rank', type=int, default=None, help='Rank of matrix A (default: output_dim)')
     parser.add_argument('--smoothness_weight', type=float, default=1e-3, help='Weight for smoothness penalty')
-    parser.add_argument('--noise_schedule', type=str, default='noprop_ct', choices=['noprop_ct', 'flow_matching'], 
+    parser.add_argument('--noise_schedule', type=str, default='flow_matching', choices=['noprop_ct', 'flow_matching'], 
                        help='Noise schedule: noprop_ct (defaults to geometric_flow loss) or flow_matching (defaults to flow_matching loss)')
-    parser.add_argument('--variant', type=str, default='ct', choices=['ct', 'fm'], 
+    parser.add_argument('--variant', type=str, default='fm', choices=['ct', 'fm'], 
                        help='NoProp variant: ct (continuous time) or fm (flow matching) - convenience flag')
     parser.add_argument('--loss_type', type=str, default='auto', choices=['auto', 'geometric_flow', 'simple_target', 'flow_matching'], 
                        help='Loss type: auto (based on noise schedule), geometric_flow, simple_target, or flow_matching')
@@ -209,19 +212,20 @@ def main():
         
         # Prepare training data for geometric flow
         # We need eta_init, eta_target, mu_init, mu_T
-        # For now, use the same eta for both init and target
+        # For geometric flow, we learn the flow from mu_init (known initial condition) to mu_T (target)
+        # Use zeros as the known initial condition (representing the analytical point)
         train_geometric_flow = {
             'eta_init': train['eta'],
             'eta_target': train['eta'],  # Same as init for now
-            'mu_init': train['mu_T'],  # Use target as initial guess
-            'mu_T': train['mu_T']
+            'mu_init': jnp.zeros_like(train['mu_T']),  # Known initial condition (analytical point)
+            'mu_T': train['mu_T']  # Target to reach
         }
         
         val_geometric_flow = {
             'eta_init': val['eta'],
             'eta_target': val['eta'],
-            'mu_init': val['mu_T'],  # Use target as initial guess
-            'mu_T': val['mu_T']
+            'mu_init': jnp.zeros_like(val['mu_T']),  # Known initial condition (analytical point)
+            'mu_T': val['mu_T']  # Target to reach
         }
         
         # Train using inherited method from ET_Template
@@ -263,6 +267,12 @@ def main():
         print(f"  Final MSE: {metrics['mse']:.6f}, MAE: {metrics['mae']:.6f}")
         print(f"  Training time: {training_time:.2f}s")
         print(f"  Avg inference time: {inference_stats['avg_inference_time']:.4f}s ({inference_stats['samples_per_second']:.1f} samples/sec)")
+        
+        # Save model artifacts by default
+        model_name = f"{model.model_type}_ET_{arch_name}"
+        saved_files = model.save_model_artifacts(trainer, params, model_name, args.save_dir)
+        
+        # Model artifacts are now saved by default via template method
     
     # Print summary
     print("\n" + "=" * 60)
@@ -301,8 +311,8 @@ def main():
     print("- Each layer trained independently")
     print("- No gradient flow between layers")
     print("- Geometric flow dynamics with PSD constraints")
-    print("- Continuous-time training protocols")
-    print("- ResNet skip connections for improved gradient flow")
+    print("- Flow matching training protocols (default)")
+    print("- Standard feedforward architecture")
 
 
 if __name__ == "__main__":
