@@ -41,8 +41,8 @@ def compute_eta_features(eta: jnp.ndarray,
                         include_cross_terms: bool = True,
                         include_inverse: bool = False,
                         include_normalized: bool = True,
+                        include_doubly_normalized: bool = True,
                         include_norm_features: bool = True,
-                        include_logarithmic: bool = False,
                         include_absolute: bool = False,
                         max_polynomial_degree: int = 3,
                         numerical_stability: bool = True,
@@ -53,7 +53,7 @@ def compute_eta_features(eta: jnp.ndarray,
     New approach focuses on normalized eta features:
     - All polynomial, cross-product, and inverse features are computed on eta/||eta||
     - Includes norm(eta) and 1/norm(eta) as separate features
-    - Default method includes: eta, eta/||eta||, cross-products of normalized eta
+    - Default method includes: eta, eta/||eta||, eta/||eta||^2, cross-products of normalized eta
     
     Args:
         eta: Natural parameters [batch_size, eta_dim]
@@ -62,8 +62,8 @@ def compute_eta_features(eta: jnp.ndarray,
         include_cross_terms: Include cross-product terms of normalized eta
         include_inverse: Include inverse features of normalized eta
         include_normalized: Include normalized features (eta/||eta||)
-        include_norm_features: Include norm(eta) and 1/norm(eta) features
-        include_logarithmic: Include log features
+        include_doubly_normalized: Include doubly normalized features (eta/||eta||^2)
+        include_norm_features: Include norm(eta), 1/norm(eta), and log features
         include_absolute: Include absolute value features
         max_polynomial_degree: Maximum degree for polynomial features
         numerical_stability: Apply numerical stability measures
@@ -75,13 +75,13 @@ def compute_eta_features(eta: jnp.ndarray,
     
     # Select predefined method settings
     if method == 'default':
-        # Default: eta, eta/||eta||, ||eta||,cross-products of normalized eta
+        # Default: eta, eta/||eta||, eta/||eta||^2, cross-products of normalized eta
         include_polynomial = False
         include_cross_terms = False
         include_inverse = False
         include_normalized = True
-        include_norm_features = False
-        include_logarithmic = True
+        include_doubly_normalized = True
+        include_norm_features = True
         include_absolute = False
         
     elif method == 'polynomial':
@@ -89,6 +89,7 @@ def compute_eta_features(eta: jnp.ndarray,
         include_cross_terms = False
         include_inverse = False
         include_normalized = True
+        include_doubly_normalized = True
         include_norm_features = False
         include_logarithmic = True
         include_absolute = False
@@ -98,8 +99,8 @@ def compute_eta_features(eta: jnp.ndarray,
         include_cross_terms = True
         include_inverse = True
         include_normalized = True
+        include_doubly_normalized = True
         include_norm_features = True
-        include_logarithmic = True
         include_absolute = False
         
     elif method == 'minimal':
@@ -107,8 +108,19 @@ def compute_eta_features(eta: jnp.ndarray,
         include_cross_terms = False
         include_inverse = False
         include_normalized = True
+        include_doubly_normalized = True
         include_norm_features = False
         include_logarithmic = True
+        include_absolute = False
+        max_polynomial_degree = 2
+
+    elif method == 'noprop':
+        include_polynomial = False
+        include_cross_terms = False
+        include_inverse = False
+        include_normalized = True
+        include_doubly_normalized = True
+        include_norm_features = True
         include_absolute = False
         max_polynomial_degree = 2
         
@@ -118,6 +130,7 @@ def compute_eta_features(eta: jnp.ndarray,
         include_cross_terms = False  # Cross-products of eta can be convex
         include_inverse = False     # 1/x is not convex
         include_normalized = False  # eta/||eta|| is not convex
+        include_doubly_normalized = False  # eta/||eta||^2 is not convex
         include_norm_features = True  # ||eta|| is convex, but 1/||eta|| and log(1+||eta||) are not
         include_logarithmic = False # log functions are typically concave
         include_absolute = True     # |eta| is convex
@@ -143,30 +156,23 @@ def compute_eta_features(eta: jnp.ndarray,
     if include_normalized:
         features.append(eta_normalized)
     
-    # 2. Norm features: ||eta||, 1/||eta||, and log(1+||eta||)
+    # 1.1. Doubly normalized eta features (eta/||eta||^2)
+    if include_doubly_normalized:
+        eta_doubly_normalized = eta / (eta_norm_safe ** 2)
+        features.append(eta_doubly_normalized)
+
+    # 2. Norm features: ||eta||, 1/||eta||, 1/||eta||^2, and log(1+||eta||)
     if include_norm_features:
-        features.append(eta_norm)  # norm(eta) - CONVEX
-        
-        # Only include non-convex norm features if not using convex_only method
-        if method != 'convex_only':
-            # 1/norm(eta) with numerical stability - NOT CONVEX
-            if numerical_stability:
-                norm_inv = jnp.clip(1.0 / eta_norm_safe, 1e-6, 1e6)
-            else:
-                norm_inv = 1.0 / eta_norm_safe
-            features.append(norm_inv)
-            
-            # log(1 + norm(eta)) - CONCAVE (not convex)
-            log_one_plus_norm = jnp.log(1.0 + eta_norm)
-            features.append(log_one_plus_norm)
+        features.append(eta_norm)  # norm(eta) - CONVEX     
+        features.append(1/eta_norm) # 1/norm(eta) - CONVEX because eta is never 0 vector
+        features.append(1/(eta_norm** 2)) # 1/norm(eta)^2 - CONVEX because eta is never 0 vector
+        features.append(-jnp.log(1.0+eta_norm)) # -log(1+norm(eta)) - CONVEX with the minus sign
     
     # 3. Cross-product terms
     if include_cross_terms:
-        eta_dim = eta.shape[-1]
-        if eta_dim > 1:
-            # For convex_only, use original eta (convex). Otherwise use normalized eta.
-            eta_for_cross = eta if method == 'convex_only' else eta_normalized
-            
+        if method != 'convex_only':
+            eta_for_cross = eta_normalized
+            eta_dim = eta_for_cross.shape[-1]            
             for i in range(eta_dim):
                 for j in range(i + 1, eta_dim):
                     cross_term = eta_for_cross[..., i:i+1] * eta_for_cross[..., j:j+1]
@@ -185,8 +191,8 @@ def compute_eta_features(eta: jnp.ndarray,
             poly_features = eta_for_poly ** degree
             features.append(poly_features)
     
-    # 5. Inverse features of NORMALIZED eta (1/normalized_eta)
-    if include_inverse:
+    # 5. Inverse features of NORMALIZED eta (1/normalized_eta) - NOT CONVEX
+    if include_inverse and method != 'convex_only':
         if numerical_stability:
             # Avoid division by very small numbers
             eta_norm_safe_inv = jnp.where(jnp.abs(eta_normalized) < 1e-8, 
@@ -196,17 +202,8 @@ def compute_eta_features(eta: jnp.ndarray,
             eta_norm_inv = 1.0 / eta_normalized
         features.append(eta_norm_inv)
     
-    # 6. Logarithmic features
-    if include_logarithmic:
-        # Log of norm
-        log_norm = jnp.log(eta_norm_safe)
-        features.append(log_norm)
-        
-        # Log of absolute values of normalized eta
-        eta_norm_abs = jnp.abs(eta_normalized)
-        eta_norm_abs_safe = jnp.maximum(eta_norm_abs, 1e-8)
-        log_abs_eta_norm = jnp.log(eta_norm_abs_safe)
-        features.append(log_abs_eta_norm)
+    # 6. Logarithmic features (now integrated into norm features)
+    # These are handled in the norm features section above
     
     # 7. Absolute value features
     if include_absolute:
@@ -236,8 +233,8 @@ def get_feature_dimension(eta_dim: int,
                          include_cross_terms: bool = True,
                          include_inverse: bool = False,
                          include_normalized: bool = True,
+                         include_doubly_normalized: bool = True,
                          include_norm_features: bool = True,
-                         include_logarithmic: bool = False,
                          include_absolute: bool = False,
                          max_polynomial_degree: int = 2) -> int:
     """
@@ -257,11 +254,12 @@ def get_feature_dimension(eta_dim: int,
     # Apply method presets
     if method == 'default':
         include_polynomial = False
-        include_cross_terms = True
+        include_cross_terms = False
         include_inverse = False
         include_normalized = True
-        include_norm_features = True
-        include_logarithmic = False
+        include_doubly_normalized = True
+        include_norm_features = False
+        include_logarithmic = True
         include_absolute = False
         
     elif method == 'polynomial':
@@ -292,11 +290,23 @@ def get_feature_dimension(eta_dim: int,
         include_absolute = False
         max_polynomial_degree = 2
         
+    elif method == 'noprop':
+        include_polynomial = False
+        include_cross_terms = False
+        include_inverse = False
+        include_normalized = True
+        include_doubly_normalized = True
+        include_norm_features = True  # For log(1+norm^2)
+        include_logarithmic = True
+        include_absolute = False
+        max_polynomial_degree = 2
+        
     elif method == 'convex_only':
         include_polynomial = True
-        include_cross_terms = True
+        include_cross_terms = False
         include_inverse = False
         include_normalized = False
+        include_doubly_normalized = False
         include_norm_features = True
         include_logarithmic = False
         include_absolute = True
@@ -311,12 +321,13 @@ def get_feature_dimension(eta_dim: int,
     if include_normalized:
         feature_count += eta_dim
     
-    # Norm features: ||eta||, 1/||eta||, log(1+||eta||)
+    # Doubly normalized eta features (eta/||eta||^2)
+    if include_doubly_normalized:
+        feature_count += eta_dim
+    
+    # Norm features: ||eta||, 1/||eta||, 1/||eta||^2, -log(1+||eta||) - ALL CONVEX
     if include_norm_features:
-        if method == 'convex_only':
-            feature_count += 1  # Only norm (convex)
-        else:
-            feature_count += 3  # norm, inverse norm, log(1+norm)
+        feature_count += 4  # norm, inverse norm, inverse norm squared, -log(1+norm)
     
     # Cross-product terms of normalized eta
     if include_cross_terms and eta_dim > 1:
@@ -331,14 +342,12 @@ def get_feature_dimension(eta_dim: int,
         else:
             feature_count += eta_dim * (max_polynomial_degree - 1)  # degrees 2 through max_degree
     
-    # Inverse features of normalized eta
+    # Inverse features of normalized eta - NOT CONVEX
     if include_inverse:
         feature_count += eta_dim
     
-    # Logarithmic features
-    if include_logarithmic:
-        feature_count += 1        # log(||eta||)
-        feature_count += eta_dim  # log(|normalized_eta|)
+    # Logarithmic features (now integrated into norm features)
+    # These are handled in the norm features section above
     
     # Absolute value features of normalized eta
     if include_absolute:
@@ -353,6 +362,7 @@ def get_feature_names(eta_dim: int,
                      include_cross_terms: bool = True,
                      include_inverse: bool = False,
                      include_normalized: bool = True,
+                     include_doubly_normalized: bool = True,
                      include_norm_features: bool = True,
                      include_logarithmic: bool = False,
                      include_absolute: bool = False,
@@ -369,20 +379,22 @@ def get_feature_names(eta_dim: int,
     # Apply method presets (same logic as above)
     if method == 'default':
         include_polynomial = False
-        include_cross_terms = True
+        include_cross_terms = False
         include_inverse = False
         include_normalized = True
-        include_norm_features = True
-        include_logarithmic = False
+        include_doubly_normalized = True
+        include_norm_features = False
+        include_logarithmic = True
         include_absolute = False
         
     elif method == 'polynomial':
         include_polynomial = True
-        include_cross_terms = True
+        include_cross_terms = False
         include_inverse = False
         include_normalized = True
-        include_norm_features = True
-        include_logarithmic = False
+        include_doubly_normalized = True
+        include_norm_features = False
+        include_logarithmic = True
         include_absolute = False
         
     elif method == 'advanced':
@@ -390,25 +402,38 @@ def get_feature_names(eta_dim: int,
         include_cross_terms = True
         include_inverse = True
         include_normalized = True
+        include_doubly_normalized = True
         include_norm_features = True
-        include_logarithmic = True
-        include_absolute = True
+        include_absolute = False
         
     elif method == 'minimal':
-        include_polynomial = True
+        include_polynomial = False
         include_cross_terms = False
         include_inverse = False
         include_normalized = True
-        include_norm_features = True
-        include_logarithmic = False
+        include_doubly_normalized = True
+        include_norm_features = False
+        include_logarithmic = True
+        include_absolute = False
+        max_polynomial_degree = 2
+        
+    elif method == 'noprop':
+        include_polynomial = False
+        include_cross_terms = False
+        include_inverse = False
+        include_normalized = True
+        include_doubly_normalized = True
+        include_norm_features = True  # For log(1+norm^2)
+        include_logarithmic = True
         include_absolute = False
         max_polynomial_degree = 2
         
     elif method == 'convex_only':
         include_polynomial = True
-        include_cross_terms = True
+        include_cross_terms = False
         include_inverse = False
         include_normalized = False
+        include_doubly_normalized = False
         include_norm_features = True
         include_logarithmic = False
         include_absolute = True
@@ -425,12 +450,17 @@ def get_feature_names(eta_dim: int,
         for i in range(eta_dim):
             names.append(f'eta_{i}/||eta||')
     
-    # Norm features
+    # Doubly normalized eta features (eta/||eta||^2)
+    if include_doubly_normalized:
+        for i in range(eta_dim):
+            names.append(f'eta_{i}/||eta||^2')
+    
+    # Norm features: ||eta||, 1/||eta||, 1/||eta||^2, -log(1+||eta||) - ALL CONVEX
     if include_norm_features:
         names.append('||eta||')
-        if method != 'convex_only':  # Only include non-convex features for non-convex methods
-            names.append('1/||eta||')
-            names.append('log(1+||eta||)')
+        names.append('1/||eta||')
+        names.append('1/||eta||^2')
+        names.append('-log(1+||eta||)')
     
     # Cross-product terms
     if include_cross_terms and eta_dim > 1:
@@ -453,16 +483,13 @@ def get_feature_names(eta_dim: int,
                 else:
                     names.append(f'(eta_{i}/||eta||)^{degree}')
     
-    # Inverse features of normalized eta
+    # Inverse features of normalized eta - NOT CONVEX
     if include_inverse:
         for i in range(eta_dim):
             names.append(f'1/(eta_{i}/||eta||)')
     
-    # Logarithmic features
-    if include_logarithmic:
-        names.append('log(||eta||)')
-        for i in range(eta_dim):
-            names.append(f'log(|eta_{i}/||eta|||)')
+    # Logarithmic features (now integrated into norm features)
+    # These are handled in the norm features section above
     
     # Absolute value features
     if include_absolute:

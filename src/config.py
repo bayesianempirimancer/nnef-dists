@@ -29,6 +29,19 @@ class NetworkConfig:
     residual_connections: bool = False
     skip_connections: bool = False
     weight_init: str = "xavier"  # "xavier", "he", "normal"
+    
+    # NoProp-CT specific parameters
+    num_time_steps: int = 10
+    noise_schedule: str = "linear"  # "linear", "cosine"
+    max_noise: float = 1.0
+    time_embed_dim: int = 16
+    use_resnet: bool = False  # Whether to use ResNet-style connections
+    resnet_skip_every: int = 2  # Skip connection every N layers
+    
+    # Geometric Flow specific parameters
+    matrix_rank: Optional[int] = None  # Rank of matrix A (if None, use output_dim)
+    smoothness_weight: float = 1e-3  # Weight for smoothness penalty
+    flow_matching_sigma: float = 0.1  # Sigma for flow matching noise
 
 
 @dataclass 

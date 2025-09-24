@@ -16,8 +16,8 @@ import jax.numpy as jnp
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent))
+# Add project root to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
 from src.ef import MultivariateNormal_tril
 
 def get_tril_projection_matrix(n: int):

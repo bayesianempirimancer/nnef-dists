@@ -47,6 +47,29 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
     time_embed_dim: int = None  # Will be set to match eta/mu dimensions
     max_freq: float = 10.0  # Maximum frequency for time embedding
     
+    def _weak_layer_norm(self, x: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
+        """
+        Weak layer normalization: x/norm(x) * log(1 + norm(x))
+        
+        This normalizes the input but preserves magnitude information,
+        making it less aggressive than standard layer normalization.
+        
+        Args:
+            x: Input tensor [batch_size, features]
+            eps: Small constant for numerical stability
+            
+        Returns:
+            Weakly normalized tensor
+        """
+        # Compute L2 norm along the last dimension
+        norm = jnp.linalg.norm(x, axis=-1, keepdims=True)
+        
+        # Normalize and scale by log(1 + norm)
+        normalized = x / (norm + eps)
+        scaled = normalized * jnp.log(1 + norm)
+        
+        return scaled
+    
     def _time_embedding(self, t: float, target_dim: int) -> jnp.ndarray:
         """
         Create Fourier time embedding with dimensions matching eta/mu.
@@ -221,7 +244,7 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
                         bias_init=nn.initializers.zeros)(x)
             x = nn.swish(x)
             if getattr(self.config, 'use_layer_norm', True):
-                x = nn.LayerNorm(name=f'mlp_layer_norm_{i}')(x)
+                x = self._weak_layer_norm(x)
         return x
     
     def _glu_forward(self, net_input: jnp.ndarray, training: bool = True) -> jnp.ndarray:
@@ -231,7 +254,7 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
         x = nn.Dense(self.config.hidden_sizes[0], name='glu_input_proj',
                     kernel_init=nn.initializers.lecun_normal(),
                     bias_init=nn.initializers.zeros)(x)
-        x = nn.swish(x)
+        x = jnp.tanh(x)
         
         # GLU blocks with residual connections
         for i, hidden_size in enumerate(self.config.hidden_sizes):
@@ -255,7 +278,7 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
             x = residual + glu_out
             x = nn.swish(x)
             if getattr(self.config, 'use_layer_norm', True):
-                x = nn.LayerNorm(name=f'glu_layer_norm_{i}')(x)
+                x = self._weak_layer_norm(x)
         
         return x
     
@@ -283,7 +306,7 @@ class Geometric_Flow_ET_Network(BaseNeuralNetwork):
             x = residual + linear_out + quadratic_out
             x = nn.swish(x)
             if getattr(self.config, 'use_layer_norm', True):
-                x = nn.LayerNorm(name=f'quad_layer_norm_{i}')(x)
+                x = self._weak_layer_norm(x)
         
         return x
     

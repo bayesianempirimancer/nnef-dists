@@ -28,7 +28,7 @@ if str(project_root) not in sys.path:
 
 # Import data and plotting functions
 from src.utils.data_utils import infer_dimensions, load_standardized_ep_data, load_ef_data
-from scripts.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
+from scripts.plotting.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 # Import from training directory
 from scripts.training.training_template_ET import ET_Template
@@ -154,9 +154,9 @@ def main():
         
     # Define architectures to test (focused comparison)
     architectures = {
-        "Small": ([32, 32], None, 10, 1e-3),
-        "Medium": ([64, 64], None, 10, 1e-3),
-        "Deep": ([64, 64, 64], None, 10, 1e-3)
+        "SmallDeep1": ([32, 32, 32], None, 10, 1e-3),
+        "SmallDeep2": ([48, 48, 48], None, 10, 1e-3),
+        "SmallDeep3": ([64, 64, 64], None, 10, 1e-3)
     }
     
     print("Training Standard Geometric Flow ET Model")

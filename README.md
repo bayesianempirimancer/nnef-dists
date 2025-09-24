@@ -109,10 +109,10 @@ Artifacts (learned parameters, training history, and plots) will be saved under 
   - `training/`: Individual training scripts for all 11 model architectures
   - `test_all_training_scripts.py`: Quick validation with small architectures
   - `run_comprehensive_model_comparison.py`: Full-scale comparison of all models
-  - `create_comparison_analysis.py`: Analysis and visualization of results
-  - `generate_normal_data.py`: Data generation utilities
+  - `scripts/plotting/create_comparison_analysis.py`: Analysis and visualization of results
+  - `src/utils/generate_normal_data.py`: Data generation utilities
   - `list_available_models.py`: Model listing and configuration overview
-  - `plot_training_results.py`: Standardized plotting functions
+  - `scripts/plotting/plot_training_results.py`: Standardized plotting functions
   - `debug/`: Outdated and experimental scripts
 - `data/configs/`: Configuration files
   - `gaussian_1d_large.yaml`: Large-scale 1D Gaussian configuration

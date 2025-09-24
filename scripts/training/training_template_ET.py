@@ -22,7 +22,7 @@ if str(project_root) not in sys.path:
 
 # Import data and plotting functions
 from src.utils.data_utils import infer_dimensions, load_standardized_ep_data
-from scripts.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
+from scripts.plotting.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 # Simple configuration class
 class Network_Config:

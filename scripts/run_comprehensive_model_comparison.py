@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import standardized plotting functions
 sys.path.append(str(Path(__file__).parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+from scripts.plotting.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
 
 from src.config import FullConfig, NetworkConfig, TrainingConfig
 

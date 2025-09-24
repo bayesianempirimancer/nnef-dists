@@ -23,7 +23,7 @@ if str(project_root) not in sys.path:
 
 # Import data and plotting functions
 from src.utils.data_utils import infer_dimensions, load_standardized_ep_data, load_ef_data
-from scripts.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
+from scripts.plotting.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 # Import from training directory
 from scripts.training.training_template_ET import ET_Template

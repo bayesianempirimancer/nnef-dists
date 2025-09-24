@@ -83,8 +83,15 @@ def plot_training_results(
     
     # 1. Learning curves
     ax1 = plt.subplot(2, 4, 1)
-    plt.plot(losses, 'b-', linewidth=2)
-    plt.title('Training Loss', fontsize=14, fontweight='bold')
+    # Start from epoch 5 for better tail visualization
+    if len(losses) > 5:
+        losses_to_plot = losses[4:]  # Start from index 4 (epoch 5)
+        epochs = range(5, len(losses) + 1)  # Adjust x-axis to show correct epoch numbers
+    else:
+        losses_to_plot = losses
+        epochs = range(1, len(losses) + 1)
+    plt.plot(epochs, losses_to_plot, 'b-', linewidth=2)
+    plt.title('Training Loss (from epoch 5)', fontsize=14, fontweight='bold')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.grid(True, alpha=0.3)
@@ -290,10 +297,18 @@ def plot_model_comparison(results: Dict[str, Dict[str, Any]],
     ax1 = plt.subplot(3, 3, 1)
     for model_name, result in results.items():
         if 'losses' in result and result['losses']:
-            ax1.plot(result['losses'], label=model_name, alpha=0.7, linewidth=2)
+            losses = result['losses']
+            # Start from epoch 5 for better tail visualization
+            if len(losses) > 5:
+                losses_to_plot = losses[4:]  # Start from index 4 (epoch 5)
+                epochs = range(5, len(losses) + 1)  # Adjust x-axis to show correct epoch numbers
+            else:
+                losses_to_plot = losses
+                epochs = range(1, len(losses) + 1)
+            ax1.plot(epochs, losses_to_plot, label=model_name, alpha=0.7, linewidth=2)
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
-    ax1.set_title('Training Curves Comparison', fontsize=14, fontweight='bold')
+    ax1.set_title('Training Curves Comparison (from epoch 5)', fontsize=14, fontweight='bold')
     ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     ax1.set_yscale('log')
     ax1.grid(True, alpha=0.3)

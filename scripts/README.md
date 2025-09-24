@@ -8,11 +8,11 @@ This directory contains organized scripts for training and experimenting with ne
 scripts/
 ├── training/           # Individual model training scripts (11 models)
 ├── debug/             # Outdated and experimental scripts
-├── plot_training_results.py  # Standardized plotting functions
+├── plotting/
+│   ├── plot_training_results.py     # Standardized plotting functions
+│   └── create_comparison_analysis.py # Analysis and visualization
 ├── test_all_training_scripts.py     # Quick validation with small architectures
 ├── run_comprehensive_model_comparison.py  # Full-scale model comparison
-├── create_comparison_analysis.py    # Analysis and visualization
-├── generate_normal_data.py          # Data generation utilities
 ├── list_available_models.py         # Model listing and overview
 └── README.md         # This file
 ```
@@ -87,7 +87,7 @@ Tests all 11 models with small architectures for quick validation:
 python scripts/test_all_training_scripts.py
 
 # Analyze test results
-python scripts/create_comparison_analysis.py --mode test
+python scripts/plotting/create_comparison_analysis.py --mode test
 ```
 
 **Features:**
@@ -116,19 +116,19 @@ python scripts/run_comprehensive_model_comparison.py --data data/easy_3d_gaussia
 - **Timing tracking**: Training time and inference time per sample
 - **Results in**: `artifacts/ET_models/` and `artifacts/logZ_models/`
 
-## Analysis and Visualization (`create_comparison_analysis.py`)
+## Analysis and Visualization (`plotting/create_comparison_analysis.py`)
 
 Creates comprehensive analysis plots and tables:
 
 ```bash
 # Analyze comprehensive results
-python scripts/create_comparison_analysis.py --mode full
+python scripts/plotting/create_comparison_analysis.py --mode full
 
 # Analyze test results
-python scripts/create_comparison_analysis.py --mode test
+python scripts/plotting/create_comparison_analysis.py --mode test
 
 # Custom output directory
-python scripts/create_comparison_analysis.py --mode full --output artifacts/my_analysis
+python scripts/plotting/create_comparison_analysis.py --mode full --output artifacts/my_analysis
 ```
 
 **Features:**
@@ -138,13 +138,13 @@ python scripts/create_comparison_analysis.py --mode full --output artifacts/my_a
 - **Model ranking**: Sorted by MSE with timing information
 - **Results in**: `artifacts/comprehensive_comparison/` (or custom directory)
 
-## Data Generation (`generate_normal_data.py`)
+## Data Generation (`src/utils/generate_normal_data.py`)
 
 Utilities for generating training datasets:
 
 ```bash
 # Generate challenging datasets
-python scripts/generate_normal_data.py
+python src/utils/generate_normal_data.py
 ```
 
 ## Model Listing (`list_available_models.py`)
@@ -194,7 +194,7 @@ All scripts use the standardized configuration system from `src/config.py`:
 python scripts/test_all_training_scripts.py
 
 # Analyze test results
-python scripts/create_comparison_analysis.py --mode test
+python scripts/plotting/create_comparison_analysis.py --mode test
 ```
 
 ### 2. Full Research Pipeline
@@ -203,7 +203,7 @@ python scripts/create_comparison_analysis.py --mode test
 python scripts/run_comprehensive_model_comparison.py --data data/easy_3d_gaussian.pkl --ef gaussian_3d
 
 # Analyze comprehensive results
-python scripts/create_comparison_analysis.py --mode full
+python scripts/plotting/create_comparison_analysis.py --mode full
 ```
 
 ### 3. Individual Model Development

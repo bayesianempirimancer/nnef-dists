@@ -672,7 +672,7 @@ def main():
     if success_count >= 8:  # Most models should succeed
         print(f"\n🎉 Small architecture training completed successfully!")
         print(f"📊 {success_count} models trained and ready for analysis")
-        print(f"💡 Run analysis: python scripts/create_comparison_analysis.py")
+        print(f"💡 Run analysis: python scripts/plotting/create_comparison_analysis.py")
         print(f"🚀 For full comparison: python scripts/run_comprehensive_model_comparison.py --data data/easy_3d_gaussian.pkl --ef gaussian_3d")
     else:
         print(f"\n⚠️  Only {success_count} models succeeded - some may need fixes")

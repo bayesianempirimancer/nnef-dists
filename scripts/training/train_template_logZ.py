@@ -21,7 +21,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Import standardized plotting functions
 sys.path.append(str(Path(__file__).parent.parent))
-from plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
+from scripts.plotting.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary, create_standardized_results
 
 # Import dimension inference utility
 from src.utils.data_utils import infer_dimensions
