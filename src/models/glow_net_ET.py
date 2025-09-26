@@ -12,6 +12,7 @@ from typing import Dict, Any, Tuple, Optional, Union, List
 from ..base_model import BaseNeuralNetwork
 from .ET_Net import ETTrainer
 from ..config import FullConfig
+from .layers.affine import AffineCouplingLayer
 
 
 class Glow_ET_Network(BaseNeuralNetwork):
@@ -39,10 +40,20 @@ class Glow_ET_Network(BaseNeuralNetwork):
         """
         x = eta
         
-        # Use proper Glow architecture with affine coupling layers
+        # Use proper Glow architecture with standardized affine coupling layers
         # Apply multiple flow layers for better expressiveness
         for i in range(num_flow_layers):
-            x = self._affine_coupling_layer(x, flow_hidden_size, i, training)
+            affine_layer = AffineCouplingLayer(
+                features=flow_hidden_size,
+                use_residual=True,
+                residual_weight=0.2,  # Conservative residual connection
+                log_scale_clamp=(-2.0, 2.0),  # Conservative clipping
+                translation_clamp=(-1.0, 1.0),  # Conservative clipping
+                activation="tanh",  # Bounded activation
+                seed=i,  # Use layer index as seed for reproducible permutations
+                name=f'affine_coupling_{i}'
+            )
+            x = affine_layer(x, layer_idx=i, training=training)
         
         # Final output layer - sufficient statistics
         x = nn.Dense(self.config.output_dim, name='et_output')(x)
@@ -64,57 +75,7 @@ class Glow_ET_Network(BaseNeuralNetwork):
         """
         return 0.0
     
-    def _affine_coupling_layer(self, x: jnp.ndarray, hidden_size: int, 
-                              layer_idx: int, training: bool) -> jnp.ndarray:
-        """Affine coupling layer for flow-based architecture with numerical stability."""
-        input_dim = x.shape[-1]
-        
-        # Use different random splits for each layer to improve expressiveness
-        # Create a frozen random permutation for this layer
-        rng = jax.random.PRNGKey(layer_idx)  # Use layer_idx as seed for reproducibility
-        perm = jax.random.permutation(rng, input_dim)
-        
-        # Apply permutation
-        x_permuted = x[..., perm]
-        
-        # Split the permuted input
-        split_idx = input_dim // 2
-        x1, x2 = x_permuted[..., :split_idx], x_permuted[..., split_idx:]
-        
-        # Neural network for scaling and translation with conservative initialization
-        # Use smaller initial weights to prevent explosion
-        net_out = nn.Dense(hidden_size, name=f'flow_net_{layer_idx}', 
-                          kernel_init=nn.initializers.normal(0.01))(x1)
-        net_out = nn.tanh(net_out)  # Use tanh instead of swish for bounded output
-        net_out = nn.Dense(x2.shape[-1] * 2, name=f'flow_params_{layer_idx}',
-                          kernel_init=nn.initializers.normal(0.01))(net_out)
-        
-        # Split into scale and translation
-        params_dim = net_out.shape[-1]
-        params_split_idx = params_dim // 2
-        log_scale, translation = net_out[..., :params_split_idx], net_out[..., params_split_idx:]
-        
-        # Apply transformation with very conservative numerical stability
-        # Use very tight clipping to prevent any overflow
-        log_scale_clamped = jnp.clip(log_scale, -2.0, 2.0)  # Very conservative clipping
-        scale = jnp.exp(log_scale_clamped)
-        
-        # Also clip the translation to prevent large shifts
-        translation_clamped = jnp.clip(translation, -1.0, 1.0)
-        
-        x2_transformed = x2 * scale + translation_clamped
-        
-        # Add residual connection for stability (mix original and transformed)
-        x2_final = 0.8 * x2_transformed + 0.2 * x2
-        
-        # Concatenate back in permuted space
-        x_permuted_out = jnp.concatenate([x1, x2_final], axis=-1)
-        
-        # Apply inverse permutation to get back to original order
-        inv_perm = jnp.argsort(perm)
-        output = x_permuted_out[..., inv_perm]
-        
-        return output
+# Note: _affine_coupling_layer is now replaced by AffineCouplingLayer from layers.affine
 
 
 class Glow_ET_Trainer(ETTrainer):

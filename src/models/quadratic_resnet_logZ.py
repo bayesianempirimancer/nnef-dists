@@ -13,6 +13,7 @@ from typing import Dict, Any, Tuple, Optional, Union, List
 from ..base_model import BaseNeuralNetwork
 from .logZ_Net import LogZTrainer
 from ..config import FullConfig
+from .layers.quadratic import QuadraticResidualBlock
 
 
 class Quadratic_ResNet_LogZ_Network(BaseNeuralNetwork):
@@ -43,9 +44,15 @@ class Quadratic_ResNet_LogZ_Network(BaseNeuralNetwork):
         else:
             x = nn.Dense(64, name='quad_input_proj')(x)
         
-        # Quadratic residual blocks
+        # Quadratic residual blocks using standardized components
         for i, hidden_size in enumerate(self.config.hidden_sizes):
-            x = self._quadratic_residual_block(x, hidden_size, i, training)
+            quadratic_block = QuadraticResidualBlock(
+                features=hidden_size,
+                activation=nn.swish,
+                use_layer_norm=getattr(self.config, 'use_layer_norm', True),
+                name=f'quadratic_block_{i}'
+            )
+            x = quadratic_block(x, training=training)
         
         # Final projection to scalar log normalizer
         x = nn.Dense(1, name='logZ_output')(x)
@@ -67,32 +74,7 @@ class Quadratic_ResNet_LogZ_Network(BaseNeuralNetwork):
         """
         return 0.0
     
-    def _quadratic_residual_block(self, x: jnp.ndarray, hidden_size: int, 
-                                 block_idx: int, training: bool) -> jnp.ndarray:
-        """Single quadratic residual block."""
-        # Store input for residual connection
-        residual = x
-        if residual.shape[-1] != hidden_size:
-            residual = nn.Dense(hidden_size, name=f'quad_residual_proj_{block_idx}')(residual)
-        
-        # Linear transformation
-        linear_out = nn.Dense(hidden_size, name=f'quad_linear_{block_idx}')(x)
-        linear_out = nn.swish(linear_out)
-        
-        # Quadratic transformation with smaller initialization
-        quadratic_out = nn.Dense(hidden_size, 
-                                kernel_init=nn.initializers.normal(stddev=0.01),
-                                name=f'quad_quadratic_{block_idx}')(x)
-        quadratic_out = nn.swish(quadratic_out)
-        
-        # Combine: y = residual + Ax + (Bx)x (updated formula)
-        output = residual + linear_out - residual * quadratic_out
-        
-        # Layer normalization
-        if getattr(self.config, 'use_layer_norm', True):
-            output = nn.LayerNorm(name=f'quad_layer_norm_{block_idx}')(output)
-        
-        return output
+# Note: _quadratic_residual_block is now replaced by QuadraticResidualBlock from layers.quadratic
 
 
 class Quadratic_ResNet_LogZ_Trainer(LogZTrainer):
