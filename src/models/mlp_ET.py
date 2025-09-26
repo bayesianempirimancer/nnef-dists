@@ -12,6 +12,8 @@ from typing import Dict, Any, Tuple, Optional, Union, List
 from ..base_model import BaseNeuralNetwork
 from .ET_Net import ETTrainer
 from ..config import FullConfig
+from .layers.mlp import MLPBlock
+from .layers.resnet_wrapper import ResNetWrapper
 
 
 class MLP_ET_Network(BaseNeuralNetwork):
@@ -36,16 +38,28 @@ class MLP_ET_Network(BaseNeuralNetwork):
         """
         x = eta
         
-        # MLP layers
+        # MLP layers with residual connections using standardized components
         for i, hidden_size in enumerate(self.config.hidden_sizes):
-            x = nn.Dense(hidden_size, name=f'mlp_hidden_{i}')(x)
-            x = nn.swish(x)
-            if getattr(self.config, 'use_layer_norm', True):
-                x = nn.LayerNorm(name=f'mlp_layer_norm_{i}')(x)
+            # Create MLP block
+            mlp_block = MLPBlock(
+                features=hidden_size,
+                use_bias=True,
+                activation=nn.swish,
+                use_layer_norm=getattr(self.config, 'use_layer_norm', True),
+                dropout_rate=getattr(self.config, 'dropout_rate', 0.0),
+                name=f'mlp_block_{i}'
+            )
             
-            dropout_rate = getattr(self.config, 'dropout_rate', 0.0)
-            if dropout_rate > 0:
-                x = nn.Dropout(rate=dropout_rate, deterministic=not training)(x)
+            # Wrap with ResNet for residual connections
+            mlp_resnet = ResNetWrapper(
+                base_module=mlp_block,
+                num_blocks=1,
+                use_projection=True,
+                activation=None,  # Activation is handled by MLPBlock
+                name=f'mlp_resnet_{i}'
+            )
+            
+            x = mlp_resnet(x, training=training)
         
         # Final output layer - sufficient statistics
         x = nn.Dense(self.config.output_dim, name='et_output')(x)

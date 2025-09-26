@@ -508,3 +508,104 @@ class PostNorm(nn.Module):
         
         # Apply normalization
         return self.norm_layer(x_out)
+
+
+class WeakLayerNorm(nn.Module):
+    """
+    Weak layer normalization: x/norm(x) * log(1 + norm(x))
+    
+    This normalizes the input but preserves magnitude information,
+    making it less aggressive than standard layer normalization.
+    
+    Unlike standard layer normalization, this preserves the magnitude
+    of the input while still providing some normalization benefits.
+    """
+    
+    eps: float = 1e-8
+    
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        """
+        Apply weak layer normalization.
+        
+        Args:
+            x: Input tensor [batch_size, features]
+            
+        Returns:
+            Weakly normalized tensor [batch_size, features]
+        """
+        # Compute L2 norm along the last dimension
+        norm = jnp.linalg.norm(x, axis=-1, keepdims=True)
+        
+        # Normalize and scale by log(1 + norm)
+        normalized = x / (norm + self.eps)
+        scaled = normalized * jnp.log(1.0 + norm)
+        
+        return scaled
+
+
+# Convenience functions for creating normalization layers
+def create_weak_layer_norm(eps: float = 1e-8) -> WeakLayerNorm:
+    """Create a weak layer normalization layer."""
+    return WeakLayerNorm(eps=eps)
+
+
+def weak_layer_norm(x: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
+    """
+    Apply weak layer normalization directly without class instantiation.
+    
+    Args:
+        x: Input tensor [batch_size, features]
+        eps: Small constant for numerical stability
+        
+    Returns:
+        Weakly normalized tensor [batch_size, features]
+    """
+    # Compute L2 norm along the last dimension
+    norm = jnp.linalg.norm(x, axis=-1, keepdims=True)
+    
+    # Normalize and scale by log(1 + norm)
+    normalized = x / (norm + eps)
+    scaled = normalized * jnp.log(1.0 + norm)
+    
+    return scaled
+
+
+# Example usage and testing
+if __name__ == "__main__":
+    import jax
+    
+    print("Testing WeakLayerNorm:")
+    
+    # Test parameters
+    batch_size = 4
+    features = 8
+    
+    # Create test input
+    key = jax.random.PRNGKey(42)
+    x = jax.random.normal(key, (batch_size, features))
+    
+    print(f"Input shape: {x.shape}")
+    print(f"Input norm: {jnp.linalg.norm(x, axis=-1)}")
+    
+    # Test WeakLayerNorm class
+    weak_norm = WeakLayerNorm(eps=1e-8)
+    params = weak_norm.init(key, x)
+    output = weak_norm.apply(params, x)
+    
+    print(f"WeakLayerNorm output shape: {output.shape}")
+    print(f"WeakLayerNorm output norm: {jnp.linalg.norm(output, axis=-1)}")
+    
+    # Test direct function
+    output_direct = weak_layer_norm(x, eps=1e-8)
+    print(f"Direct function output shape: {output_direct.shape}")
+    print(f"Direct function output norm: {jnp.linalg.norm(output_direct, axis=-1)}")
+    
+    # Compare with standard layer norm
+    standard_norm = nn.LayerNorm()
+    params_std = standard_norm.init(key, x)
+    output_std = standard_norm.apply(params_std, x)
+    
+    print(f"Standard LayerNorm output norm: {jnp.linalg.norm(output_std, axis=-1)}")
+    
+    print("\n✅ WeakLayerNorm tests passed!")

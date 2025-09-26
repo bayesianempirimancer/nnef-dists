@@ -13,6 +13,8 @@ from typing import Dict, Any, Tuple, Optional, Union, List
 from ..base_model import BaseNeuralNetwork
 from .logZ_Net import LogZTrainer
 from ..config import FullConfig
+from .layers.mlp import MLPBlock
+from .layers.resnet_wrapper import ResNetWrapper
 
 
 class MLP_LogZ_Network(BaseNeuralNetwork):
@@ -37,20 +39,32 @@ class MLP_LogZ_Network(BaseNeuralNetwork):
         """
         x = eta
         
-        # MLP layers
+        # MLP layers with residual connections using standardized components
         for i, hidden_size in enumerate(self.config.hidden_sizes):
-            x = nn.Dense(hidden_size, name=f'mlp_hidden_{i}')(x)
-            x = nn.swish(x)
-            if getattr(self.config, 'use_layer_norm', True):
-                x = nn.LayerNorm(name=f'mlp_layer_norm_{i}')(x)
+            # Create MLP block
+            mlp_block = MLPBlock(
+                features=hidden_size,
+                use_bias=True,
+                activation=nn.swish,
+                use_layer_norm=getattr(self.config, 'use_layer_norm', True),
+                dropout_rate=getattr(self.config, 'dropout_rate', 0.0),
+                name=f'mlp_block_{i}'
+            )
             
-            dropout_rate = getattr(self.config, 'dropout_rate', 0.0)
-            if dropout_rate > 0:
-                x = nn.Dropout(rate=dropout_rate, deterministic=not training)(x)
+            # Wrap with ResNet for residual connections
+            mlp_resnet = ResNetWrapper(
+                base_module=mlp_block,
+                num_blocks=1,
+                use_projection=True,
+                activation=None,  # Activation is handled by MLPBlock
+                name=f'mlp_resnet_{i}'
+            )
+            
+            x = mlp_resnet(x, training=training)
         
         # Final projection to scalar log normalizer
         x = nn.Dense(1, name='logZ_output')(x)
-        return jnp.squeeze(x, axis=-1)
+        return x  # Return (batch_size, 1) shape for gradient/hessian computation
     
     def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
                             predicted_logZ: jnp.ndarray, training: bool = True) -> jnp.ndarray:

@@ -69,8 +69,9 @@ class GradientHessianUtils:
             """Compute gradient for a single eta value."""
             def log_normalizer(eta: jnp.ndarray) -> jnp.ndarray:
                 output = self.model_apply_fn(params, eta, training=False)
-                # Ensure scalar output for gradient computation
-                return jnp.sum(output) if output.ndim > 0 else output
+                # Assert that model returns expected shape (1,) for single eta vector in LogZ models
+                assert output.shape == (1,), f"LogZ model must return shape (1,) for single eta vector, got {output.shape}. Use nn.Dense(1) and return output directly (don't squeeze)."
+                return jnp.squeeze(output, axis=-1)  # Extract scalar from (1,) shape
             return jax.grad(log_normalizer)(eta_single)
         
         def batch_gradient_fn(eta_batch: jnp.ndarray) -> jnp.ndarray:
@@ -101,8 +102,9 @@ class GradientHessianUtils:
                 """Compute diagonal Hessian for a single eta value."""
                 def log_normalizer(eta: jnp.ndarray) -> jnp.ndarray:
                     output = self.model_apply_fn(params, eta, training=False)
-                    # Ensure scalar output for gradient computation
-                    return jnp.sum(output) if output.ndim > 0 else output
+                    # Assert that model returns expected shape (1,) for single eta vector in LogZ models
+                    assert output.shape == (1,), f"LogZ model must return shape (1,) for single eta vector, got {output.shape}. Use nn.Dense(1) and return output directly (don't squeeze)."
+                    return jnp.squeeze(output, axis=-1)  # Extract scalar from (1,) shape
                 
                 grad_fn = jax.grad(log_normalizer)
                 return jnp.diag(jax.jacfwd(grad_fn)(eta_single))
@@ -125,8 +127,9 @@ class GradientHessianUtils:
                 """Compute full Hessian for a single eta value."""
                 def log_normalizer(eta: jnp.ndarray) -> jnp.ndarray:
                     output = self.model_apply_fn(params, eta, training=False)
-                    # Ensure scalar output for gradient computation
-                    return jnp.sum(output) if output.ndim > 0 else output
+                    # Assert that model returns expected shape (1,) for single eta vector in LogZ models
+                    assert output.shape == (1,), f"LogZ model must return shape (1,) for single eta vector, got {output.shape}. Use nn.Dense(1) and return output directly (don't squeeze)."
+                    return jnp.squeeze(output, axis=-1)  # Extract scalar from (1,) shape
                 return jax.hessian(log_normalizer)(eta_single)
             
             def batch_hessian_full_fn(eta_batch: jnp.ndarray) -> jnp.ndarray:
@@ -259,9 +262,20 @@ class LogNormalizerDerivatives:
             eta: Natural parameters [batch_size, eta_dim]
             
         Returns:
-            Predicted covariances [batch_size, eta_dim] (diagonal) or [batch_size, eta_dim, eta_dim] (full)
+            Predicted covariances with shape:
+            - Diagonal method: [batch_size, eta_dim] - diagonal elements only
+            - Full method: [batch_size, eta_dim, eta_dim] - full covariance matrix
+            
+        Note:
+            The diagonal method returns only the diagonal elements of the Hessian matrix,
+            which represent the variance of each eta dimension independently.
+            The full method returns the complete Hessian matrix for full covariance information.
         """
         return self.utils.compute_hessian(params, eta)
+    
+    def get_hessian_method(self) -> str:
+        """Get the current Hessian computation method."""
+        return self.utils.hessian_method
     
     def predict_mean_and_covariance(self, 
                                   params: Union[Dict, FrozenDict], 

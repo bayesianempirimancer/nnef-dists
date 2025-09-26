@@ -13,6 +13,8 @@ from typing import Dict, Any, Tuple, Optional, Union, List
 from ..base_model import BaseNeuralNetwork
 from .logZ_Net import LogZTrainer
 from ..config import FullConfig
+from .layers.glu import GLUBlock
+from .layers.resnet_wrapper import ResNetWrapper
 
 
 class GLU_LogZ_Network(BaseNeuralNetwork):
@@ -41,32 +43,33 @@ class GLU_LogZ_Network(BaseNeuralNetwork):
         x = nn.Dense(self.config.hidden_sizes[0], name='glu_input_proj')(x)
         x = nn.swish(x)
         
-        # GLU blocks
+        # GLU blocks with residual connections using standardized components
         for i, hidden_size in enumerate(self.config.hidden_sizes):
-            residual = x
-            if residual.shape[-1] != hidden_size:
-                residual = nn.Dense(hidden_size, name=f'glu_residual_proj_{i}')(residual)
+            # Create GLU block
+            glu_block = GLUBlock(
+                features=hidden_size,
+                use_bias=True,
+                use_layer_norm=getattr(self.config, 'use_layer_norm', True),
+                dropout_rate=getattr(self.config, 'dropout_rate', 0.0),
+                gate_activation=nn.sigmoid,
+                activation=nn.swish,
+                name=f'glu_block_{i}'
+            )
             
-            # GLU layer
-            linear1 = nn.Dense(hidden_size, name=f'glu_linear1_{i}')(x)
-            linear2 = nn.Dense(hidden_size, name=f'glu_linear2_{i}')(x)
-            gate = nn.sigmoid(linear1)
-            glu_out = gate * linear2
+            # Wrap with ResNet for residual connections
+            glu_resnet = ResNetWrapper(
+                base_module=glu_block,
+                num_blocks=1,
+                use_projection=True,
+                activation=None,  # Activation is handled by GLUBlock
+                name=f'glu_resnet_{i}'
+            )
             
-            # Residual connection
-            x = residual + glu_out
-            
-            # Layer normalization
-            if getattr(self.config, 'use_layer_norm', True):
-                x = nn.LayerNorm(name=f'glu_layer_norm_{i}')(x)
-            
-            dropout_rate = getattr(self.config, 'dropout_rate', 0.0)
-            if dropout_rate > 0:
-                x = nn.Dropout(rate=dropout_rate, deterministic=not training)(x)
+            x = glu_resnet(x, training=training)
         
         # Final projection to scalar log normalizer
         x = nn.Dense(1, name='logZ_output')(x)
-        return jnp.squeeze(x, axis=-1)
+        return x  # Return (batch_size, 1) shape for gradient/hessian computation
     
     def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
                             predicted_logZ: jnp.ndarray, training: bool = True) -> jnp.ndarray:

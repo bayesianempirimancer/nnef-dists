@@ -123,7 +123,7 @@ class Convex_LogZ_Network(BaseNeuralNetwork):
                 name='convex_output_layer'
             )(None, eta, training=training)
         
-        return jnp.squeeze(output, axis=-1)
+        return output  # Return (batch_size, 1) shape for gradient/hessian computation
     
     def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
                             predicted_logZ: jnp.ndarray, training: bool = True) -> jnp.ndarray:

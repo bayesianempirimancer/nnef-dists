@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 from ..base_model import BaseTrainer
 from ..config import FullConfig
-from .layers.gradient_hessian_utils import LogNormalizerDerivatives
+from .utils.gradient_hessian_utils import LogNormalizerDerivatives
 
 
 class LogZTrainer(BaseTrainer):
@@ -217,7 +217,21 @@ class LogZTrainer(BaseTrainer):
         return best_params, training_history
     
     def predict(self, params: Dict, eta: jnp.ndarray, compute_covariance: bool = False) -> Dict[str, jnp.ndarray]:
-        """Make predictions using the trained model."""
+        """
+        Make predictions using the trained model.
+        
+        Args:
+            params: Model parameters
+            eta: Natural parameters [batch_size, eta_dim]
+            compute_covariance: Whether to compute covariance predictions
+            
+        Returns:
+            Dictionary containing:
+            - 'stats': Predicted means [batch_size, eta_dim]
+            - 'covariance': Predicted covariances with shape:
+              * Diagonal method: [batch_size, eta_dim] (diagonal elements only)
+              * Full method: [batch_size, eta_dim, eta_dim] (full covariance matrix)
+        """
         predicted_mean = self.compute_gradient(params, eta)
         
         result = {'stats': predicted_mean}
@@ -246,7 +260,25 @@ class LogZTrainer(BaseTrainer):
         
         # Compute covariance metrics if available
         if compute_cov and 'covariance' in predictions:
-            cov_mse = float(jnp.mean((predictions['covariance'] - test_data['cov']) ** 2))
+            predicted_cov = predictions['covariance']
+            test_cov = test_data['cov']
+            
+            # Handle different Hessian methods
+            hessian_method = self.derivatives.get_hessian_method()
+            
+            if hessian_method == 'diagonal':
+                # Diagonal Hessian returns shape (batch_size, eta_dim)
+                # Test data covariance should also be diagonal for comparison
+                if test_cov.ndim == 3:  # Full covariance matrix (batch_size, eta_dim, eta_dim)
+                    # Extract diagonal elements for comparison
+                    test_cov_diag = jnp.diagonal(test_cov, axis1=-2, axis2=-1)
+                    cov_mse = float(jnp.mean((predicted_cov - test_cov_diag) ** 2))
+                else:  # Already diagonal
+                    cov_mse = float(jnp.mean((predicted_cov - test_cov) ** 2))
+            else:  # Full Hessian method
+                # Full Hessian returns shape (batch_size, eta_dim, eta_dim)
+                cov_mse = float(jnp.mean((predicted_cov - test_cov) ** 2))
+            
             result['cov_mse'] = cov_mse
         
         return result

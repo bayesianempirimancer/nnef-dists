@@ -56,7 +56,7 @@ class Quadratic_ResNet_LogZ_Network(BaseNeuralNetwork):
         
         # Final projection to scalar log normalizer
         x = nn.Dense(1, name='logZ_output')(x)
-        return jnp.squeeze(x, axis=-1)
+        return x  # Return (batch_size, 1) shape for gradient/hessian computation
     
     def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
                             predicted_logZ: jnp.ndarray, training: bool = True) -> jnp.ndarray:
