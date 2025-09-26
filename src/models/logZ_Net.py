@@ -15,13 +15,14 @@ Note: Architecture-specific LogZ networks are now in individual model files:
 
 import jax
 import jax.numpy as jnp
-from jax import random, grad, hessian, jacfwd
+from jax import random
 from typing import Dict, Any, Tuple, Optional
 import optax
 from tqdm import tqdm
 
 from ..base_model import BaseTrainer
 from ..config import FullConfig
+from .layers.gradient_hessian_utils import LogNormalizerDerivatives
 
 
 class LogZTrainer(BaseTrainer):
@@ -58,70 +59,23 @@ class LogZTrainer(BaseTrainer):
         
         # Determine if we need Hessian computation based on loss type
         self.needs_hessian = loss_type in ["mse_mean_and_cov", "mse_mean_and_diag_cov", "KLqp", "KLqp_diag", "KLpq", "KLpq_diag"]
-        self.hessian_method = "diagonal" if loss_type in ["mse_mean_and_diag_cov", "KLqp_diag", "KLpq_diag"] else "full"
+        self.hessian_method = "diagonal" if loss_type in ["mse_mean_and_diag_cov", "KLqp_diag", "KLpq_diag"] else hessian_method
         
-        # Precompiled functions for efficiency (will be set after model initialization)
-        self._compiled_gradient_fn = None
-        self._compiled_hessian_fn = None
-        self._last_params_hash = None
+        # Initialize gradient/hessian utilities
+        self.derivatives = LogNormalizerDerivatives(
+            model_apply_fn=model.apply,
+            hessian_method=self.hessian_method,
+            compile_functions=True
+        )
     
-    def _compile_functions(self, params: Dict):
-        """Precompile gradient and Hessian functions for efficiency."""
-        # Create functions that are bound to the specific params
-        def batch_gradient_fn(eta_batch):
-            def single_log_normalizer(eta_single):
-                return self.model.apply(params, eta_single, training=False)
-            grad_fn = jax.grad(single_log_normalizer)
-            return jax.vmap(grad_fn)(eta_batch)
-        
-        self._compiled_gradient_fn = jax.jit(batch_gradient_fn)
-        
-        # Precompile Hessian function based on method
-        if self.hessian_method == 'diagonal':
-            def batch_hessian_diag_fn(eta_batch):
-                def single_log_normalizer(eta_single):
-                    return self.model.apply(params, eta_single, training=False)
-                def diagonal_hessian_fn(eta_single):
-                    grad_fn = jax.grad(single_log_normalizer)
-                    return jnp.diag(jax.jacfwd(grad_fn)(eta_single))
-                return jax.vmap(diagonal_hessian_fn)(eta_batch)
-            self._compiled_hessian_fn = jax.jit(batch_hessian_diag_fn)
-        else:
-            def batch_hessian_full_fn(eta_batch):
-                def single_log_normalizer(eta_single):
-                    return self.model.apply(params, eta_single, training=False)
-                return jax.vmap(jax.hessian(single_log_normalizer))(eta_batch)
-            self._compiled_hessian_fn = jax.jit(batch_hessian_full_fn)
     
     def compute_gradient(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
         """Compute gradient of log normalizer (expectation of sufficient statistics)."""
-        # Compute gradients directly without compilation for now
-        def single_log_normalizer(eta_single):
-            # Ensure eta_single has batch dimension for the model
-            eta_batch = jnp.expand_dims(eta_single, axis=0)
-            result = self.model.apply(params, eta_batch, training=False)
-            return jnp.squeeze(result)  # Remove batch dimension
-        
-        # Compute gradient w.r.t. all components (expectation of sufficient statistics)
-        grad_fn = jax.grad(single_log_normalizer, argnums=0)
-        return jax.vmap(grad_fn)(eta)
+        return self.derivatives.predict_mean(params, eta)
     
     def compute_hessian(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
         """Compute Hessian of log normalizer (covariance of sufficient statistics)."""
-        # Compute Hessian directly without compilation for now
-        def single_log_normalizer(eta_single):
-            # Ensure eta_single has batch dimension for the model
-            eta_batch = jnp.expand_dims(eta_single, axis=0)
-            result = self.model.apply(params, eta_batch, training=False)
-            return jnp.squeeze(result)  # Remove batch dimension
-        
-        if self.hessian_method == 'diagonal':
-            def diagonal_hessian_fn(eta_single):
-                grad_fn = jax.grad(single_log_normalizer)
-                return jnp.diag(jax.jacfwd(grad_fn)(eta_single))
-            return jax.vmap(diagonal_hessian_fn)(eta)
-        else:
-            return jax.vmap(jax.hessian(single_log_normalizer))(eta)
+        return self.derivatives.predict_covariance(params, eta)
     
     def loss_fn(self, params: Dict, eta: jnp.ndarray, 
                 target_mu_T: jnp.ndarray, target_cov_TT: Optional[jnp.ndarray] = None) -> jnp.ndarray:

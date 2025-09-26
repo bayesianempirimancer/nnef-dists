@@ -88,12 +88,12 @@ class GLU_LogZ_Network(BaseNeuralNetwork):
 class GLU_LogZ_Trainer(LogZTrainer):
     """Trainer for GLU LogZ Network."""
     
-    def __init__(self, config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
+    def __init__(self, config: FullConfig, hessian_method='full', adaptive_weights=True):
         model = GLU_LogZ_Network(config=config.network)
         super().__init__(model, config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)
     
 
 
-def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
+def create_model_and_trainer(config: FullConfig, hessian_method='full', adaptive_weights=True):
     """Factory function to create GLU LogZ model and trainer."""
     return GLU_LogZ_Trainer(config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)

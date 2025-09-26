@@ -270,11 +270,11 @@ class Convex_LogZ_Network(BaseNeuralNetwork):
 class Convex_LogZ_Trainer(LogZTrainer):
     """Trainer for Convex LogZ Network."""
     
-    def __init__(self, config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
+    def __init__(self, config: FullConfig, hessian_method='full', adaptive_weights=True):
         model = Convex_LogZ_Network(config=config.network)
         super().__init__(model, config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)
 
 
-def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
+def create_model_and_trainer(config: FullConfig, hessian_method='full', adaptive_weights=True):
     """Factory function to create Convex LogZ model and trainer."""
     return Convex_LogZ_Trainer(config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)

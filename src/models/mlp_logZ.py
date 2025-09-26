@@ -7,7 +7,7 @@ This module provides a standalone MLP-based LogZ model for learning log normaliz
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from jax import random, grad, hessian, jacfwd
+from jax import random
 from typing import Dict, Any, Tuple, Optional, Union, List
 
 from ..base_model import BaseNeuralNetwork
@@ -72,34 +72,11 @@ class MLP_LogZ_Network(BaseNeuralNetwork):
 class MLP_LogZ_Trainer(LogZTrainer):
     """Trainer for MLP LogZ Network."""
     
-    def __init__(self, config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
+    def __init__(self, config: FullConfig, hessian_method='full', adaptive_weights=True):
         model = MLP_LogZ_Network(config=config.network)
-        super().__init__(model, config)
-        self.hessian_method = hessian_method
-        self.adaptive_weights = adaptive_weights
-        
-        # Compile gradient and Hessian functions
-        self._compiled_gradient_fn = jax.jit(grad(self.model.apply, argnums=1))
-        if hessian_method == 'diagonal':
-            self._compiled_hessian_fn = jax.jit(jax.hessian(self.model.apply, argnums=1))
-        elif hessian_method == 'full':
-            self._compiled_hessian_fn = jax.jit(hessian(self.model.apply, argnums=1))
-        else:
-            raise ValueError(f"Unknown hessian_method: {hessian_method}")
-    
-    def predict_mean(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
-        """Predict mean statistics using gradients of log normalizer."""
-        return self._compiled_gradient_fn(params, eta)
-    
-    def predict_covariance(self, params: Dict, eta: jnp.ndarray) -> jnp.ndarray:
-        """Predict covariance using Hessian of log normalizer."""
-        if self.hessian_method == 'diagonal':
-            hess = self._compiled_hessian_fn(params, eta)
-            return jnp.diagonal(hess, axis1=-2, axis2=-1)
-        else:  # full
-            return self._compiled_hessian_fn(params, eta)
+        super().__init__(model, config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)
 
 
-def create_model_and_trainer(config: FullConfig, hessian_method='diagonal', adaptive_weights=True):
+def create_model_and_trainer(config: FullConfig, hessian_method='full', adaptive_weights=True):
     """Factory function to create MLP LogZ model and trainer."""
     return MLP_LogZ_Trainer(config, hessian_method=hessian_method, adaptive_weights=adaptive_weights)
