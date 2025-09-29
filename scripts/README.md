@@ -1,236 +1,311 @@
 # Scripts Directory
 
-This directory contains organized scripts for training and experimenting with neural networks for natural parameter to statistics mapping.
+This directory contains a clean, organized system for training and analyzing neural networks for exponential family distributions. The system uses proper Python package structure with clean imports and model-agnostic functionality.
 
 ## Directory Structure
 
 ```
 scripts/
-├── training/           # Individual model training scripts (11 models)
-├── debug/             # Outdated and experimental scripts
-├── plotting/
-│   ├── plot_training_results.py     # Standardized plotting functions
-│   └── create_comparison_analysis.py # Analysis and visualization
-├── test_all_training_scripts.py     # Quick validation with small architectures
-├── run_comprehensive_model_comparison.py  # Full-scale model comparison
-├── list_available_models.py         # Model listing and overview
-└── README.md         # This file
+├── __init__.py                    # Package initialization
+├── load_model_and_data.py        # Model-agnostic loader (works with all model types)
+├── train_mlp_et_simple.py        # MLP ET training script
+├── train_mlp_et_laplace.py       # Alternative MLP training script
+├── train_mlp_et_equal_sizes.py   # MLP training with equal dataset sizes
+├── plotting/                     # Clean plotting system
+│   ├── __init__.py
+│   └── plot_learning_errors.py   # 4-panel learning error analysis
+├── archive/                      # Archived scripts
+├── debug/                        # Debug utilities
+└── README.md                     # This file
 ```
 
-## Model Training Scripts (`scripts/training/`)
+## Key Features
 
-Each model has its own training script with standardized configuration:
+- **✅ Model-Agnostic**: Works with all 6 supported model types
+- **✅ Clean Imports**: No `sys.path` manipulation, uses proper Python package structure
+- **✅ Automatic Data Inference**: Plotting system automatically finds data files from training results
+- **✅ Integrated Workflow**: Training automatically creates analysis plots
+- **✅ Production Ready**: Professional package structure with proper imports
 
-### Traditional ET Approaches
-- `train_mlp_ET.py` - Standard Multi-Layer Perceptron ET networks
-- `train_glu_ET.py` - Gated Linear Unit ET networks  
-- `train_quadratic_resnet_ET.py` - Quadratic ResNet ET networks
-- `train_invertible_nn_ET.py` - Invertible neural networks
-- `train_noprop_ct_ET.py` - NoProp-CT continuous-time models
+## Supported Model Types
 
-### Novel Flow-Based Approaches
-- `train_geometric_flow_ET.py` - **NEW** Geometric Flow ET networks with continuous dynamics
-- `train_glow_ET.py` - Glow networks using normalizing flows with affine coupling
+The system works with all model types in the nnef-dists codebase:
 
-### Log Normalizer Approaches
-- `train_mlp_logZ.py` - MLP LogZ networks (gradient-based)
-- `train_glu_logZ.py` - GLU LogZ networks
-- `train_quadratic_resnet_logZ.py` - Quadratic ResNet LogZ networks
-- `train_convex_nn_logZ.py` - Convex neural networks
+- `geometric_flow` - Geometric Flow ET networks
+- `noprop_geometric_flow` - NoProp Geometric Flow ET networks  
+- `mlp_et` - Multi-Layer Perceptron ET networks
+- `glow_et` - Glow ET networks
+- `glu_et` - Gated Linear Unit ET networks
+- `quadratic_et` - Quadratic ET networks
 
-### Training Templates
-- `ET_training_template.py` - Template for creating new ET training scripts
-- `logZ_training_template.py` - Template for creating new LogZ training scripts
+## Usage
 
-### Usage
+### Prerequisites
 
-Each script can be run independently:
+Set the `PYTHONPATH` environment variable to the project root:
 
 ```bash
-# Traditional ET Networks
-python scripts/training/train_mlp_ET.py
-python scripts/training/train_glu_ET.py
-python scripts/training/train_quadratic_resnet_ET.py
-
-# LogZ Networks  
-python scripts/training/train_mlp_logZ.py
-python scripts/training/train_glu_logZ.py
-
-# Geometric Flow Networks (Novel)
-python scripts/training/train_geometric_flow_ET.py
-
-# Flow-based approaches
-python scripts/training/train_glow_ET.py
-python scripts/training/train_invertible_nn_ET.py
-
-# Specialized Networks
-python scripts/training/train_noprop_ct_ET.py
-python scripts/training/train_convex_nn_logZ.py
+export PYTHONPATH=/path/to/nnef-dists:$PYTHONPATH
 ```
 
-### Standardized Features
+### 1. Training Models
 
-All training scripts now include:
-- **Standardized data loading** from `data/easy_3d_gaussian.pkl`
-- **Memory optimization** with automatic `cov_tt` purging
-- **Standardized plotting** using `scripts/plot_training_results.py`
-- **Consistent output directories** in `artifacts/ET_models/` or `artifacts/logZ_models/`
-- **MSE loss with L1 regularization** (no covariance-based losses)
-- **Model definitions** imported from `src/models/` directory
-
-## Quick Testing (`test_all_training_scripts.py`)
-
-Tests all 11 models with small architectures for quick validation:
+Train an MLP ET model:
 
 ```bash
-# Test all models with small networks (20 epochs, ~1K parameters)
-python scripts/test_all_training_scripts.py
+# Basic training
+PYTHONPATH=/path/to/nnef-dists python -m scripts.train_mlp_et_simple \
+  --data data/training_data.pkl \
+  --epochs 50 \
+  --model-name my_model
 
-# Analyze test results
-python scripts/plotting/create_comparison_analysis.py --mode test
+# With custom learning rate
+PYTHONPATH=/path/to/nnef-dists python -m scripts.train_mlp_et_simple \
+  --data data/training_data.pkl \
+  --epochs 100 \
+  --learning-rate 0.001 \
+  --model-name my_model_lr001
+```
+
+**Training automatically:**
+- Creates model artifacts in `artifacts/[model_name]/`
+- Saves training results, config, and model parameters
+- Generates 4-panel learning error analysis plot
+- Records data file path for automatic inference
+
+### 2. Loading Models and Data
+
+Load any trained model using the model-agnostic loader:
+
+```bash
+# Load model and results only
+PYTHONPATH=/path/to/nnef-dists python -m scripts.load_model_and_data \
+  --model-dir artifacts/my_model
+
+# Load with specific data file
+PYTHONPATH=/path/to/nnef-dists python -m scripts.load_model_and_data \
+  --model-dir artifacts/my_model \
+  --data data/training_data.pkl
 ```
 
 **Features:**
-- **Small architectures**: 2 layers × 32 units (~1K parameters each)
-- **Quick training**: 20 epochs with small dataset (200 train, 50 val/test)
-- **Compatible output**: Creates files compatible with analysis script
-- **Results in**: `artifacts/tests/` directory
+- Automatically infers data file from training results (when available)
+- Works with any model type
+- Makes predictions on test data
+- Shows model information and training metrics
 
-## Comprehensive Comparison (`run_comprehensive_model_comparison.py`)
+### 3. Creating Analysis Plots
 
-Full-scale comparison of all 11 models with standardized architectures:
-
-```bash
-# Train all models with comparable architectures
-python scripts/run_comprehensive_model_comparison.py --data data/easy_3d_gaussian.pkl --ef gaussian_3d
-
-# Force retrain (skip completed models)
-python scripts/run_comprehensive_model_comparison.py --data data/easy_3d_gaussian.pkl --ef gaussian_3d --force-retrain
-```
-
-**Features:**
-- **Standardized architectures**: 12 layers × 128 units (Glow: 24 layers)
-- **Comparable parameter counts**: ~50K-200K parameters per model
-- **200 epochs**: Full training with early stopping
-- **Skip logic**: Automatically skips already completed models
-- **Timing tracking**: Training time and inference time per sample
-- **Results in**: `artifacts/ET_models/` and `artifacts/logZ_models/`
-
-## Analysis and Visualization (`plotting/create_comparison_analysis.py`)
-
-Creates comprehensive analysis plots and tables:
+Generate 4-panel learning error analysis plots:
 
 ```bash
-# Analyze comprehensive results
-python scripts/plotting/create_comparison_analysis.py --mode full
+# Auto-infer data file from results
+PYTHONPATH=/path/to/nnef-dists python -m scripts.plotters.plot_learning_errors \
+  --model-dir artifacts/my_model
 
-# Analyze test results
-python scripts/plotting/create_comparison_analysis.py --mode test
+# Specify data file explicitly
+PYTHONPATH=/path/to/nnef-dists python -m scripts.plotters.plot_learning_errors \
+  --model-dir artifacts/my_model \
+  --data data/training_data.pkl
 
-# Custom output directory
-python scripts/plotting/create_comparison_analysis.py --mode full --output artifacts/my_analysis
+# Custom output location
+PYTHONPATH=/path/to/nnef-dists python -m scripts.plotters.plot_learning_errors \
+  --model-dir artifacts/my_model \
+  --save my_custom_plot.png
 ```
 
-**Features:**
-- **Two modes**: `full` (comprehensive results) or `test` (small architecture results)
-- **Comprehensive plots**: 8-panel comparison with performance metrics
-- **Performance tables**: CSV and formatted text output
-- **Model ranking**: Sorted by MSE with timing information
-- **Results in**: `artifacts/comprehensive_comparison/` (or custom directory)
+**4-Panel Analysis Includes:**
+1. **Training History**: Loss curves with theoretical minimum MSE lines
+2. **Predictions vs True**: Scatter plot of predicted vs actual mu_T values
+3. **Error vs True mu_T**: Residual analysis showing prediction errors
+4. **Error vs ||eta||**: Error magnitude as a function of input norm
 
-## Data Generation (`src/utils/generate_normal_data.py`)
+## Working Example
 
-Utilities for generating training datasets:
+Here's a complete workflow example:
 
 ```bash
-# Generate challenging datasets
-python src/utils/generate_normal_data.py
+# 1. Set up environment
+export PYTHONPATH=/home/jebeck/GitHub/nnef-dists:$PYTHONPATH
+cd /home/jebeck/GitHub/nnef-dists
+
+# 2. Train a model (automatically creates analysis plot)
+python -m scripts.train_mlp_et_simple \
+  --data data/training_data_2ae1e5d27f80bd60b739390026cc5465.pkl \
+  --epochs 20 \
+  --model-name example_model
+
+# 3. Check what was created
+ls -la artifacts/example_model/
+# Output: config.json, learning_errors.png, model_params.pkl, training_results.pkl
+
+# 4. Load the model and make predictions
+python -m scripts.load_model_and_data \
+  --model-dir artifacts/example_model
+
+# 5. Create additional analysis plots
+python -m scripts.plotters.plot_learning_errors \
+  --model-dir artifacts/example_model \
+  --save artifacts/example_model/custom_analysis.png
 ```
 
-## Model Listing (`list_available_models.py`)
+## Python API Usage
 
-Overview of all available models and configurations:
-
-```bash
-# List all models and their configurations
-python scripts/list_available_models.py
-```
-
-**Features:**
-- **Model overview**: All 11 models with architecture details
-- **Configuration summary**: Parameter counts and training settings
-- **Artifacts structure**: Directory organization overview
-
-## Standardized Plotting (`plot_training_results.py`)
-
-Centralized plotting functions used by all training scripts:
+You can also use the system programmatically:
 
 ```python
-from scripts.plot_training_results import plot_training_results, plot_model_comparison, save_results_summary
+from scripts.load_model_and_data import load_model_and_data, make_predictions
 
-# Create individual model plots
-plot_training_results(trainer, eta_data, ground_truth, predictions, losses, config, model_name)
+# Load everything
+config, results, data, model, params, metadata = load_model_and_data(
+    "artifacts/my_model"
+)
 
-# Create comparison plots
-plot_model_comparison(results, output_dir)
+# Make predictions
+predictions = make_predictions(model, params, test_data)
 
-# Save results summary
-save_results_summary(results, output_dir)
+# Access training results
+print(f"Final train loss: {results['final_train_loss']}")
+print(f"Final val loss: {results['final_val_loss']}")
+print(f"Training time: {results['training_time']} seconds")
 ```
 
-## Configuration System
+## File Structure
 
-All scripts use the standardized configuration system from `src/config.py`:
+### Training Artifacts
 
-- `NetworkConfig` - Architecture parameters (hidden sizes, activation, etc.)
-- `TrainingConfig` - Training parameters (learning rate, epochs, batch size, etc.)
-- `FullConfig` - Combined configuration for complete model setup
+Each training run creates a directory in `artifacts/[model_name]/` with:
 
-## Workflow Examples
+- `config.json` - Model configuration
+- `training_results.pkl` - Training metrics and results
+- `model_params.pkl` - Trained model parameters
+- `learning_errors.png` - 4-panel analysis plot (auto-generated)
 
-### 1. Quick Development Cycle
+### Training Results
+
+The `training_results.pkl` file contains:
+
+```python
+{
+    'train_losses': [...],           # Training loss per epoch
+    'val_losses': [...],             # Validation loss per epoch
+    'final_train_loss': float,       # Final training loss
+    'final_val_loss': float,         # Final validation loss
+    'best_val_loss': float,          # Best validation loss
+    'training_time': float,          # Total training time (seconds)
+    'inference_time': float,         # Inference time for batch
+    'inference_time_per_sample': float,  # Time per individual sample
+    'inference_batch_size': int,     # Batch size used for timing
+    'config': dict,                  # Model configuration
+    'data_file': str                 # Path to training data file
+}
+```
+
+## Advanced Usage
+
+### Custom Model Types
+
+The system is model-agnostic and works with any model type supported by the training infrastructure:
+
+```python
+from scripts.load_model_and_data import get_supported_model_types
+
+print("Supported model types:", get_supported_model_types())
+# Output: ['geometric_flow', 'noprop_geometric_flow', 'mlp_et', 'glow_et', 'glu_et', 'quadratic_et']
+```
+
+### Batch Processing
+
+Process multiple models:
+
 ```bash
-# Test all models quickly
-python scripts/test_all_training_scripts.py
+# Train multiple models
+for model_name in model1 model2 model3; do
+    python -m scripts.train_mlp_et_simple \
+      --data data/training_data.pkl \
+      --epochs 50 \
+      --model-name $model_name
+done
 
-# Analyze test results
-python scripts/plotting/create_comparison_analysis.py --mode test
+# Analyze all models
+for model_dir in artifacts/model*; do
+    python -m scripts.plotters.plot_learning_errors --model-dir $model_dir
+done
 ```
 
-### 2. Full Research Pipeline
+## Troubleshooting
+
+### Import Errors
+
+If you get import errors, make sure `PYTHONPATH` is set correctly:
+
 ```bash
-# Run comprehensive comparison
-python scripts/run_comprehensive_model_comparison.py --data data/easy_3d_gaussian.pkl --ef gaussian_3d
+# Check current PYTHONPATH
+echo $PYTHONPATH
 
-# Analyze comprehensive results
-python scripts/plotting/create_comparison_analysis.py --mode full
+# Set it correctly
+export PYTHONPATH=/path/to/nnef-dists:$PYTHONPATH
 ```
 
-### 3. Individual Model Development
-```bash
-# Train specific model
-python scripts/training/train_geometric_flow_ET.py
+### Missing Data Files
 
-# List available models
-python scripts/list_available_models.py
-```
+If the plotting system can't find the data file:
 
-## Archive (`scripts/debug/`)
+1. Check that the training results contain the data file path:
+   ```python
+   import pickle
+   with open('artifacts/my_model/training_results.pkl', 'rb') as f:
+       results = pickle.load(f)
+   print(results.get('data_file'))
+   ```
 
-Outdated and experimental scripts are preserved in `scripts/debug/` for reference but should not be used for new experiments:
+2. Specify the data file explicitly:
+   ```bash
+   python -m scripts.plotters.plot_learning_errors \
+     --model-dir artifacts/my_model \
+     --data data/training_data.pkl
+   ```
 
-- `quick_model_test.py`
-- `run_all_model_comparison.sh`
-- `run_all_models_comprehensive.py`
-- `run_comprehensive_comparison.py`
-- `run_model_comparison.py`
-- `test_all_models.py`
-- `train_comparison_models.py`
+## Archive and Debug
+
+- `archive/` - Contains old training scripts for reference
+- `debug/` - Debug utilities and experimental scripts
+
+These directories are preserved for reference but should not be used for new experiments.
+
+## TODO
+
+### Model Status
+- **✅ MLP ET Network**: Fully debugged and tested with all improvements
+  - ✅ Eta embedding support
+  - ✅ Corrected ResNet architecture
+  - ✅ Parameter sharing control
+  - ✅ Layer normalization disabled by default
+  - ✅ Dimension-expanding architecture
+  - ✅ All config fields properly implemented
+
+- **⚠️ Other ET Networks**: Improvements propagated but need testing
+  - **GLU ET Network**: Architecture updated, needs validation
+  - **Quadratic ET Network**: Architecture updated, needs validation  
+  - **NoProp CT ET Network**: Partial updates applied, needs completion
+  - **NoProp Geometric Flow ET Network**: Uses different architecture pattern
+  - **Glow ET Network**: Uses flow-based architecture, needs validation
+
+### Pending Tasks
+- [ ] Test all training scripts to ensure they work correctly with the current codebase
+- [ ] Homogenize data loading and creation scripts for consistency
+- [ ] Implement Laplace approximation for estimation of mu_T
+- [ ] Update .gitignore to ignore contents of artifacts directory but keep the directory itself
+- [ ] Add papers directory to .gitignore
+- [ ] Rename load_model_and_data.py to load_model_and_results.py and move to scripts/loaders directory
+- [ ] Validate GLU ET, Quadratic ET, and other networks with training runs
+- [ ] Complete NoProp CT ET network updates
 
 ## Notes
 
-- All training scripts use **MSE loss with L1 regularization**
-- **No covariance-based losses** are used (purged from memory)
-- All models use **standardized data loading** from `easy_3d_gaussian.pkl`
-- **Memory optimization** with automatic `cov_tt` purging
-- **Consistent output format** for seamless analysis integration
+- All scripts use **clean imports** with no `sys.path` manipulation
+- **Model-agnostic design** works with any supported model type
+- **Automatic data inference** eliminates the need to specify data files manually
+- **Integrated workflow** provides seamless training and analysis
+- **Production-ready** with proper Python package structure
+- **Only MLP ET network is fully debugged** - other networks need validation

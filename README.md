@@ -4,367 +4,374 @@ Fast variational inference with non-named exponential family distributions using
 
 ## Overview
 
-For an exponential family with natural parameters $\eta$ and sufficient statistics $T(x)$, inference by message passing requires the mapping $\mu_T(eta) = \left< T(x) | \eta\right>$. Named exponential-family distributions are particularly easy to work with because they have uniquely invertible closed-form expressions for $\mu_T(\eta)$.  More generally, exponential family distributions can be written
+For an exponential family with natural parameters $\eta$ and sufficient statistics $T(x)$, inference by message passing requires the mapping $\mu_T(\eta) = \left< T(x) | \eta\right>$. Named exponential-family distributions are particularly easy to work with because they have uniquely invertible closed-form expressions for $\mu_T(\eta)$.  More generally, exponential family distributions can be written
 
 $$ \log p(x|\eta) = \eta\cdot T(x) - A(\eta)$$
 
-and include many distributions for which $\mu_T(\eta)$ is unknown and must be obtained via a sampling procedure such as MCMC.  This project aims to massively expand the set of exponential family distributions that are as easy to work with as named distributions by learning the function $mu_T(\eta)$ for arbitrary exponential family distributions.  The basic approach is to train a set of relatively small neural networks using samples conditioned on $\eta$ for a particular choice of $T(x)$.  Each choice of $T(x)$ then gives us a new class of distributions for which algorithms like Variational Bayesian Expectation Maximization or Coordinate Ascent Variational Inference become trivially implementable via message passing.  Currently we are comparing three classes of neural network architectures all of which can be trained using $\left\{\eta, \mu_T\right\}$ pairs generated via MCMC smaples and some of which can be fit directly to samples from any distribution:
+and include many distributions for which $\mu_T(\eta)$ is unknown and must be obtained via a sampling procedure such as MCMC.  This project aims to massively expand the set of exponential family distributions that are as easy to work with as named distributions by learning the function $\mu_T(\eta)$ for arbitrary exponential family distributions.  The basic approach is to train a set of relatively small neural networks using samples conditioned on $\eta$ for a particular choice of $T(x)$.  Each choice of $T(x)$ then gives us a new class of distributions for which algorithms like Variational Bayesian Expectation Maximization or Coordinate Ascent Variational Inference become trivially implementable via message passing.
 
-1. **Direct Neural Approximation**: Traditional neural networks trained on MCMC samples
-2. **Geometric Network**: Traditional Neural Networks that approximate $A(\eta)$ and exploit the relationship $\mu_T(\eta) = \nabla A(\eta)$ to generate predictions
-3. **Geometric Flow Networks**: Novel flow-based approach using continuous dynamics that respects the geometric structure of exponential families, specificially $\Sigma_{TT}(\eta) = \nabla \mu_T(\eta)$, which implies that $\frac{d\mu_T}{dt} = \Sigma_{TT}(\eta)\frac{d\eta}{dt}$.
+## Current Neural Network Architectures
 
-This repository uses JAX/Flax for modeling and BlackJAX for HMC sampling. It utilizes an arbitrary exponential family distribution class that allows for user specification of the vector of sufficient statistic function $T(x)$.  
+The repository provides multiple neural network approaches for learning the expectation mapping $\mu_T(\eta) = E[T(x)|\eta]$:
 
-## Complete Pipeline: From Distribution Definition to Neural Network Training
+### **Direct ET Networks** ✅ **Working**
+Learn $\mu_T(\eta)$ directly from $(\eta, \mu_T)$ pairs:
+- **MLP ET**: Standard multi-layer perceptron with ResNet connections
+- **GLU ET**: Gated Linear Unit networks with gated activations
+- **Quadratic ET**: Quadratic residual networks with adaptive mixing
+- **Glow ET**: Normalizing flow networks with affine coupling layers
 
-This section outlines the complete workflow for creating a new exponential family distribution and training neural networks to learn the expectation mapping. We'll use the **LaplaceProduct** distribution as a concrete example.
+### **Geometric Flow Networks** ✅ **Working** (Novel)
+Use continuous dynamics that respect exponential family geometry:
+- **Geometric Flow ET**: Novel flow-based approach using continuous dynamics
+- **NoProp Geometric Flow ET**: No-propagation training with diffusion-based protocols
 
-### Step 1: Define the Exponential Family Distribution
+### **Log Normalizer Networks** ⚠️ **Requires Debugging**
+Learn $A(\eta)$ and compute $\mu_T = \nabla A(\eta)$ via automatic differentiation:
+- **MLP LogZ**: MLP networks for log normalizer learning
+- **GLU LogZ**: GLU networks for log normalizer learning
+- **Quadratic LogZ**: Quadratic residual networks for log normalizer learning
+- **Convex LogZ**: Input convex neural networks maintaining convexity properties
 
-First, specify the sufficient statistics `T(x)` in the exponential family distribution file `src/ef.py`:
+**Note**: All ET models are currently working satisfactorily, but logZ models still require debugging and are not recommended for production use.
+
+## Project Structure
+
+The project follows a clean, modular structure with clear separation of concerns and production-ready training scripts:
+
+```
+src/
+├── configs/                    # Configuration system
+│   ├── base_config.py         # Base configuration class with common methods
+│   ├── base_model_config.py   # Model architecture configurations
+│   ├── base_training_config.py # Training-specific configurations
+│   ├── mlp_et_config.py       # MLP ET model configuration
+│   ├── glu_et_config.py       # GLU ET model configuration
+│   ├── quadratic_et_config.py # Quadratic ET model configuration
+│   ├── glow_et_config.py      # Glow ET model configuration
+│   ├── geometric_flow_et_config.py # Geometric Flow ET model configuration
+│   └── __init__.py            # Configuration package initialization
+├── layers/                     # Custom neural network layers
+│   ├── bilinear.py            # Bilinear layers and blocks
+│   ├── convex.py              # Convex layers and ICNN blocks
+│   ├── quadratic.py           # Quadratic layers and blocks
+│   ├── affine.py              # Affine coupling layers for flows
+│   ├── resnet_wrapper.py      # ResNet wrapper utilities
+│   ├── normalization.py       # Custom normalization layers
+│   └── gradient_hessian_utils.py # Gradient/Hessian computation utilities
+├── models/                     # Model definitions
+│   ├── mlp_et_net.py          # MLP ET network implementation
+│   ├── glu_et_net.py          # GLU ET network implementation
+│   ├── quadratic_et_net.py    # Quadratic ET network implementation
+│   ├── glow_et_net.py         # Glow ET network implementation
+│   ├── geometric_flow_et_net.py # Geometric Flow ET network implementation
+│   ├── noprop_geometric_flow_et_net.py # NoProp Geometric Flow ET network
+│   ├── mlp_logz_net.py        # MLP LogZ network (requires debugging)
+│   ├── glu_logz_net.py        # GLU LogZ network (requires debugging)
+│   ├── quadratic_logz_net.py  # Quadratic LogZ network (requires debugging)
+│   ├── convex_logz_net.py     # Convex LogZ network (requires debugging)
+│   └── __init__.py            # Model package initialization
+├── training/                   # Production-ready training scripts
+│   ├── base_et_trainer.py     # Base trainer with comprehensive training logic
+│   ├── mlp_et_trainer.py      # MLP ET training script with CLI interface
+│   ├── glu_et_trainer.py      # GLU ET training script with CLI interface
+│   ├── quadratic_et_trainer.py # Quadratic ET training script with CLI interface
+│   ├── glow_et_trainer.py     # Glow ET training script with CLI interface
+│   ├── geometric_flow_et_trainer.py # Geometric Flow ET training script
+│   ├── trainer_factory.py     # Factory for creating trainers
+│   └── __init__.py            # Training package initialization
+├── utils/                      # General utilities
+│   ├── ef_utils.py            # Exponential family utilities
+│   ├── data_utils.py          # Data handling utilities
+│   └── gradient_hessian_utils.py # Gradient/Hessian computation
+├── ef.py                      # Exponential family distributions
+├── config.py                  # Configuration management
+└── base_model.py              # Base model classes
+
+scripts/
+├── plotting/                   # Plotting utilities
+│   ├── plot_learning_errors.py # Learning curve analysis
+│   ├── generate_plots.py      # Plot generation utility
+│   └── __init__.py            # Plotting package initialization
+├── load_model_and_data.py     # Model and data loading utilities
+└── data/                      # Training data files
+```
+
+### Naming Conventions
+
+The project uses consistent naming conventions across all directories:
+
+- **Models**: `[name]_net.py` (e.g., `mlp_et_net.py`, `geometric_flow_et_net.py`)
+- **Configs**: `[name]_config.py` (e.g., `mlp_et_config.py`, `geometric_flow_et_config.py`)
+- **Trainers**: `[name]_trainer.py` (e.g., `mlp_et_trainer.py`, `geometric_flow_trainer.py`)
+- **Factory**: `trainer_factory.py`
+- **Utils**: Organized in subdirectories (e.g., `configs/utils/configuration_utils.py`)
+
+## Quick Start
+
+### 1. Installation
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd nnef-dists
+
+# Install dependencies
+pip install -e .
+
+# Activate conda environment (if using)
+conda activate numpyro
+```
+
+### 2. Define an Exponential Family Distribution
+
+Add your distribution to `src/ef.py`:
 
 ```python
 @dataclass(frozen=True)
-class LaplaceProduct(ExponentialFamily):
-    """ 
-    Laplace product in natural parameterization with T(x) = -abs(x+1)-abs(x-1) where x is a vector.
-    """
+class YourDistribution(ExponentialFamily):
+    """Your custom exponential family distribution."""
     x_shape: Tuple[int,]
 
     @cached_property
     def stat_specs(self) -> Dict[str, Tuple[int, ...]]:
-        return {"xm1": (self.x_shape[-1],), "xp1": (self.x_shape[-1],)}
+        return {"stat1": (self.x_shape[-1],), "stat2": (self.x_shape[-1], self.x_shape[-1])}
 
     def _compute_stats(self, x: Array) -> Dict[str, Array]:
-        return {"xm1": -jnp.abs(x-1), "xp1": -jnp.abs(x+1)}
+        return {"stat1": x, "stat2": x[..., None] * x[..., None, :]}
 ```
 
-Add the distribution to the factory function:
+### 3. Generate Training Data
 
 ```python
-def ef_factory(name: str, **kwargs) -> ExponentialFamily:
-    # ... existing distributions ...
-    elif n in {"laplace_product", "product_laplace"}:
-        x_shape = kwargs.get("x_shape", (1,))
-        if isinstance(x_shape, list):
-            x_shape = tuple(x_shape)
-        return LaplaceProduct(x_shape=x_shape)
+from ef import ef_factory
+from generate_data import generate_training_data
+
+# Create distribution
+dist = ef_factory("your_distribution", x_shape=(3,))
+
+# Generate training data
+eta_data, mu_data = generate_training_data(
+    distribution=dist,
+    num_train_points=1000,
+    num_samples_per_point=500
+)
 ```
 
+### 4. Train a Model
 
-
-### Step 2: Generate MCMC Samples and compute expected statistics
-
-Create a YAML configuration file for data generation:
-
-```yaml
-# configs/laplace_product_1d.yaml
-ef:
-  name: "laplace_product"
-  x_shape: [1]
-
-grid:
-  num_train_points: 800
-  num_val_points: 200
-  eta_ranges:
-    - [0.2, 4.0]  # eta_xm1 range
-    - [0.2, 4.0]  # eta_xp1 range
-
-sampling:
-  num_samples: 1000
-  num_warmup: 500
-  step_size: 0.1
-  num_integration_steps: 10
-  initial_position: [0.0]
-
-optim:
-  seed: 42
-```
-
-**Run the data generation script:**
-```
-# Create the configuration file
-cat > configs/laplace_product_1d.yaml << 'EOF'
-ef:
-  name: "laplace_product"
-  x_shape: [1]
-
-grid:
-  num_train_points: 800
-  num_test_points: 100
-  num_val_points: 100
-  eta_ranges:
-    - [0.2, 4.0]  # eta_xm1 range
-    - [0.2, 4.0]  # eta_xp1 range
-
-sampling:
-  num_samples: 1000
-  num_warmup: 500
-  step_size: 0.1
-  num_integration_steps: 10
-  initial_position: [0.0]
-
-optim:
-  seed: 42
-EOF
-```
-
-### Step 3: Generate Training Data
-
-Generate samples for many values of the natural parameters using BlackJAX MCMC:
+**Option A: Using Production Training Script (Recommended)**
 
 ```bash
-# Optional: Force regeneration if data already exists
-python src/generate_data.py --config configs/laplace_product_1d.yaml --force
+# MLP ET - Train with default configuration
+python src/training/mlp_et_trainer.py --data data/training_data.pkl
+
+# GLU ET - Train with custom parameters
+python src/training/glu_et_trainer.py --data data/training_data.pkl \
+    --epochs 200 --learning-rate 0.001 --hidden-sizes 128 64 32
+
+# Quadratic ET - Train with RMSprop optimizer
+python src/training/quadratic_et_trainer.py --data data/training_data.pkl \
+    --optimizer rmsprop --epochs 300 --dropout-epochs 150
+
+# Glow ET - Train normalizing flow model
+python src/training/glow_et_trainer.py --data data/training_data.pkl \
+    --epochs 100 --hidden-sizes 64 64
+
+# Geometric Flow ET - Train novel flow-based model
+python src/training/geometric_flow_et_trainer.py --data data/training_data.pkl \
+    --epochs 300 --dropout-epochs 150 --n-time-steps 10 --hidden-sizes 32 32 32
+
+# Train without generating plots
+python src/training/mlp_et_trainer.py --data data/training_data.pkl --no-plots
 ```
 
-This will:
-- Generate 1000 different `eta` parameter combinations and associated `mu_T`
-- Use HMC sampling to generate 1000 samples for each `eta`
-- Compute expected sufficient statistics `μ_T(η) = ⟨T(x) | η⟩` from the samples
-- Save timing information (total sampling time, per-eta timing)
-- Output: `data/training_data_[hash].pkl`
-
-### Step 4: Choose a Network and Specify Network Architectures
-
-The repository provides multiple neural network approaches for learning the expectation mapping `μ_T(η) = E[T(x)|η]`. Choose from:
-
-#### **Direct ET Networks** 
-Learn `μ_T(η)` directly from `(η, μ_T)` pairs:
-
-```bash
-# Available architectures:
-python scripts/training/train_mlp_ET.py          # Standard MLP
-python scripts/training/train_glu_ET.py          # Gated Linear Units
-python scripts/training/train_quadratic_resnet_ET.py  # Quadratic ResNet
-```
-
-#### **Log Normalizer Networks**
-Learn `A(η)` and compute `μ_T = ∇A(η)` via automatic differentiation:
-
-```bash
-# Available architectures:
-python scripts/training/train_mlp_logZ.py        # MLP for log normalizer
-python scripts/training/train_glu_logZ.py        # GLU for log normalizer
-python scripts/training/train_convex_nn_logZ.py  # Convex neural networks
-```
-
-#### **Flow-Based Networks** (Advanced)
-Use continuous dynamics or normalizing flows:
-
-```bash
-# Available architectures:
-python scripts/training/train_geometric_flow_ET.py  # Novel geometric flows
-python scripts/training/train_glow_ET.py            # Invertible Networks (GLOW)
-python scripts/training/train_invertible_nn_ET.py   # Invertible networks
-```
-
-#### **Architecture Configuration**
-
-**To customize architectures:**
-
-1. **Edit the training script directly**: Modify the `architectures` dictionary in the training script
-2. **Add new architectures**: Add entries to the dictionary with your desired layer configurations
-3. **Modify existing ones**: Change the layer sizes or depths as needed
-
-**Example customizations:**
+**Option B: Programmatic Training**
 
 ```python
-# Custom architectures for different complexity levels
-architectures = {
-    "Shallow": [64, 64],                              # 2 layers, 64 units each
-    "Medium": [128, 128, 128],                        # 3 layers, 128 units each  
-    "Deep": [256, 256, 256, 256, 256],                # 5 layers, 256 units each
-    "Wide": [512, 512],                               # 2 layers, 512 units each
-}
-```
-### Step 5: Train Neural Networks
+from src.models import MLP_ET_Network
+from src.configs import MLP_ET_Config
+from src.training import BaseETTrainer
 
-Train neural networks on the `(eta, mu_T)` data:
+# Create model and config
+config = MLP_ET_Config(input_dim=12, output_dim=12, hidden_sizes=[64, 64])
+model = MLP_ET_Network(config=config)
+trainer = BaseETTrainer(model, config)
+
+# Train the model
+results = trainer.train(
+    train_eta=eta_data, 
+    train_mu_T=mu_data, 
+    num_epochs=100, 
+    dropout_epochs=50
+)
+```
+
+## Model Usage
+
+### Standardized Interface
+
+All ET models follow a consistent interface:
+
+```python
+# Initialize model
+config = ModelConfig(input_dim=8, output_dim=8, hidden_sizes=[32, 16])
+model = ModelNetwork(config=config)
+
+# Forward pass
+eta = jnp.array([[1.0, 2.0, ...]])  # Natural parameters
+mu_predicted = model.apply(params, eta, training=False)
+
+# Compute internal losses
+internal_loss = model.compute_internal_loss(params, eta, mu_predicted, training=True)
+```
+
+### Available Models
+
+| Model | Type | Status | Description | Training Script |
+|-------|------|--------|-------------|-----------------|
+| `MLP_ET_Network` | Direct ET | ✅ Working | Standard MLP with ResNet connections | `src/training/mlp_et_trainer.py` |
+| `GLU_ET_Network` | Direct ET | ✅ Working | Gated Linear Unit networks | `src/training/glu_et_trainer.py` |
+| `Quadratic_ET_Network` | Direct ET | ✅ Working | Quadratic residual networks | `src/training/quadratic_et_trainer.py` |
+| `Glow_ET_Network` | Direct ET | ✅ Working | Normalizing flow with affine coupling layers | `src/training/glow_et_trainer.py` |
+| `Geometric_Flow_ET_Network` | Flow | ✅ Working | Novel geometric flow approach | `src/training/geometric_flow_et_trainer.py` |
+| `NoProp_Geometric_Flow_ET_Network` | Flow | ✅ Working | No-propagation geometric flow | *No dedicated trainer* |
+| `MLP_LogZ_Network` | LogZ | ⚠️ Debugging | MLP for log normalizer learning | *Not recommended* |
+| `GLU_LogZ_Network` | LogZ | ⚠️ Debugging | GLU for log normalizer learning | *Not recommended* |
+| `Quadratic_LogZ_Network` | LogZ | ⚠️ Debugging | Quadratic residual for log normalizer | *Not recommended* |
+| `Convex_LogZ_Network` | LogZ | ⚠️ Debugging | Input convex neural networks | *Not recommended* |
+
+## Training
+
+### Production Training Scripts
+
+The `src/training/` directory contains production-ready training scripts with comprehensive CLI interfaces:
 
 ```bash
-# Train MLP networks on the LaplaceProduct data
-python scripts/training/train_mlp_ET.py \
-    --data_file data/training_data_6e498cc8e69bc76f92e150200406bfa5.pkl \
-    --save_dir artifacts/ET_models/laplace_product_mlp_ET \
-    --epochs 300
+# MLP ET Training Script
+python src/training/mlp_et_trainer.py --help
 
-# Alternative: Train with different architectures
-python scripts/training/train_glu_ET.py \
-    --data_file data/training_data_6e498cc8e69bc76f92e150200406bfa5.pkl \
-    --save_dir artifacts/ET_models/laplace_product_glu_ET \
-    --epochs 300
+# GLU ET Training Script  
+python src/training/glu_et_trainer.py --help
+
+# Quadratic ET Training Script
+python src/training/quadratic_et_trainer.py --help
+
+# Glow ET Training Script
+python src/training/glow_et_trainer.py --help
+
+# Geometric Flow ET Training Script
+python src/training/geometric_flow_et_trainer.py --help
+
+# Basic training with config defaults
+python src/training/mlp_et_trainer.py --data data/training_data.pkl
+
+# Custom architecture and training parameters
+python src/training/mlp_et_trainer.py --data data/training_data.pkl \
+    --hidden-sizes 128 64 32 --activation relu --dropout-rate 0.2 \
+    --learning-rate 0.001 --epochs 200 --dropout-epochs 100
+
+# Training with specific output directory
+python src/training/mlp_et_trainer.py --data data/training_data.pkl \
+    --output-dir artifacts/my_experiment --epochs 100
 ```
 
-This will:
-- Load the generated `(eta, mu_T)` pairs
-- Train MLP networks to learn the mapping `eta → mu_T`
-- Evaluate performance on test data
-- Save model parameters, training history, and comparison plots
+### Configuration System
 
+**Default Parameters**: All default training and model parameters are defined in the config files:
+- `src/configs/mlp_et_config.py` - MLP ET model architecture defaults
+- `src/configs/glu_et_config.py` - GLU ET model architecture defaults
+- `src/configs/quadratic_et_config.py` - Quadratic ET model architecture defaults
+- `src/configs/glow_et_config.py` - Glow ET model architecture defaults
+- `src/configs/geometric_flow_et_config.py` - Geometric Flow ET model architecture defaults
+- `src/configs/base_training_config.py` - Training parameter defaults
 
-**Generated Files:**
-- `data/training_data_6e498cc8e69bc76f92e150200406bfa5.pkl` - Training dataset with timing info
-- `artifacts/ET_models/laplace_product_mlp_ET/` - Trained models and results
-- `laplace_product_1d_test.png` - Validation plots
+**Configuration Priority**: 
+1. Config file defaults (single source of truth)
+2. Command-line arguments (override config defaults when specified)
 
-This demonstrates how to create a new exponential family distribution and train neural networks to learn the expectation mapping `μ_T(η) = E[T(x)|η]`, making previously intractable distributions as easy to work with as named distributions.
+### Programmatic Training
 
-## Installation
+```python
+from src.training import BaseETTrainer
+from src.models import MLP_ET_Network
+from src.configs import MLP_ET_Config
 
-1. Install dependencies:
+# Create model and config
+config = MLP_ET_Config(input_dim=8, output_dim=8, hidden_sizes=[64, 64])
+model = MLP_ET_Network(config=config)
+trainer = BaseETTrainer(model, config)
 
-```bash
-pip install -e .
+# Train with validation
+results = trainer.train(
+    train_eta=eta_train, 
+    train_mu_T=mu_train,
+    val_eta=eta_val,
+    val_mu_T=mu_val,
+    num_epochs=100, 
+    dropout_epochs=50
+)
 ```
 
+### Training Script Features
 
+The production training scripts provide comprehensive functionality:
 
-## Project Layout
+**Command-Line Interface:**
+- Full argparse support with help text
+- All training and model parameters configurable
+- Sensible defaults from config files
+- Override any parameter via command line
 
-- `src/`: Core library
-  - `ef.py`: Generic `ExponentialFamily` interface with `GaussianNatural1D`, `MultivariateNormal`, `MultivariateNormal_tril`, and `LaplaceProduct` implementations
-  - `sampling.py`: BlackJAX HMC sampling utilities for arbitrary-shaped distributions
-  - `config.py`: Configuration management system with `FullConfig`, `NetworkConfig`, and `TrainingConfig` classes
-  - `generate_data.py`: Data generation using HMC sampling with configurable parameters and timing information
-  - `models/`: Neural network architectures
-    - `ET_Net.py`: Direct expectation networks (MLP, GLU, Quadratic ResNet, etc.)
-    - `logZ_Net.py`: Log-normalizer networks with gradient/Hessian computation
-    - `geometric_flow_net.py`: **NEW** Geometric flow networks using continuous dynamics
-    - `glow_net_ET.py`: Glow networks using normalizing flows with affine coupling
-    - `mlp_ET.py`: Standard MLP expectation networks
-    - `mlp_logZ.py`: MLP-based log normalizer networks
-    - `glu_ET.py`: Gated Linear Unit networks for ET
-    - `glu_logZ.py`: Gated Linear Unit networks for LogZ
-    - `quadratic_resnet_ET.py`: Quadratic residual networks for ET
-    - `quadratic_resnet_logZ.py`: Quadratic residual networks for LogZ
-    - `noprop_ct_ET.py`: No-propagation continuous-time networks
-    - `noprop_geometric_flow_ET.py`: No-propagation geometric flow networks
-    - `convex_nn_logZ.py`: Input convex neural networks for log normalizers
-  - `utils/`: Utility modules
-    - `performance.py`: Performance measurement utilities
-    - `matrix_utils.py`: JAX utilities for matrix operations
-    - `data_utils.py`: Data loading and preprocessing utilities
-    - `exact_covariance.py`: Analytical covariance computation for known exponential families
-    - `generate_normal_data.py`: Data generation utilities
-- `scripts/`: Training and analysis scripts
-  - `training/`: Individual training scripts for all model architectures
-    - `train_mlp_ET.py`, `train_glu_ET.py`, `train_quadratic_resnet_ET.py`: Direct ET networks
-    - `train_mlp_logZ.py`, `train_glu_logZ.py`, `train_quadratic_resnet_logZ.py`: Log normalizer networks
-    - `train_geometric_flow_ET.py`, `train_glow_ET.py`, `train_noprop_ct_ET.py`: Flow-based networks
-    - `train_convex_nn_logZ.py`: Convex neural networks
-    - `training_template_ET.py`, `train_template_logZ.py`: Training script templates
-  - `test_all_training_scripts.py`: Quick validation with small architectures
-  - `run_comprehensive_model_comparison.py`: Full-scale comparison of all models
-  - `list_available_models.py`: Model listing and configuration overview
-  - `plotting/`: Analysis and visualization scripts
-    - `create_comparison_analysis.py`: Analysis and visualization of results
-    - `plot_training_results.py`: Standardized plotting functions
-  - `debug/`: Outdated and experimental scripts
-- `configs/`: Configuration files for data generation
-  - `laplace_product_1d.yaml`: Configuration for 1D LaplaceProduct distribution
-- `data/configs/`: Additional configuration files
-  - `gaussian_1d_large.yaml`, `gaussian_1d_medium.yaml`, `gaussian_1d_small.yaml`: 1D Gaussian configurations
-  - `multivariate_3d_large.yaml`, `multivariate_3d_medium.yaml`: 3D multivariate Gaussian configurations
-  - `multivariate_3d_tril_large_4x.yaml`: Lower triangular multivariate Gaussian configurations
-- `artifacts/`: Saved models, training history, and plots
-  - `ET_models/`: Results from comprehensive ET model comparison
-  - `logZ_models/`: Results from comprehensive LogZ model comparison
-  - `tests/`: Results from small architecture test runs
-  - `comprehensive_comparison/`: Analysis results and comparison plots
-- `data/`: Generated training datasets (pickle files)
-  - `easy_3d_gaussian.pkl`: Standard dataset for model comparison
-  - `easy_3d_gaussian_tril.pkl`: Lower triangular Gaussian dataset
-  - `training_data_*.pkl`: Generated datasets with timing information
-- `docs/`: Documentation files
-- `papers/`: Research papers and manuscripts
-- `debug/`: Debugging and experimental scripts
+**Automatic Features:**
+- Model and data validation
+- Training progress monitoring
+- Automatic model saving (config, parameters, results)
+- Learning curve plotting (enabled by default)
+- Comprehensive logging and error handling
 
-## Training Scripts
+**Flexible Configuration:**
+- Config file defaults as single source of truth
+- Command-line overrides only when specified
+- No conflicting defaults between argparse and config files
+- Hierarchical configuration system
 
-The project includes comprehensive training scripts for various neural network architectures. Each script can be run independently and includes evaluation, plotting, and result saving capabilities.
+### Training Factory
 
-| Script | Model Type | Description |
-|--------|------------|-------------|
-| `train_mlp_ET.py` | Direct ET | Standard MLP networks that directly learn the expectation mapping μ_T(η) = E[T(X)\|η]. Uses standardized data loading and plotting. |
-| `train_glu_ET.py` | Direct ET | Gated Linear Unit networks with gated activations for improved expressiveness. Standardized architecture and training pipeline. |
-| `train_quadratic_resnet_ET.py` | Direct ET | Quadratic residual networks with adaptive quadratic mixing. Deep narrow architecture optimized for complex mappings. |
-| `train_noprop_ct_ET.py` | Continuous Time | No-propagation continuous-time networks with ODE solvers. Converts 12D data to 9D format for model compatibility. |
-| `train_noprop_geometric_flow_ET.py` | Geometric Flow | No-propagation geometric flow networks combining continuous-time dynamics with geometric flow principles. |
-| `train_geometric_flow_ET.py` | Geometric Flow | **Novel** geometric flow networks using continuous dynamics: du/dt = A@A^T@(η_target - η_init). Respects exponential family geometry with minimal time steps. |
-| `train_glow_ET.py` | Normalizing Flow | Deep flow networks using normalizing flows with affine coupling layers. Features 50+ flow layers with 9D output format. |
-| `train_mlp_logZ.py` | Log Normalizer | MLP networks that learn the log normalizer A(η) and compute expectations via ∇A(η). Uses MSE loss with L1 regularization. |
-| `train_glu_logZ.py` | Log Normalizer | GLU-based log normalizer networks with gated activations for learning A(η). Standardized training pipeline. |
-| `train_quadratic_resnet_logZ.py` | Log Normalizer | Quadratic residual networks for log normalizer learning with residual connections and adaptive mixing. |
-| `train_convex_nn_logZ.py` | Log Normalizer | **Novel** alternating convex neural networks with Type 1/Type 2 layers. Maintains convexity properties essential for exponential families. |
-| `training_template_ET.py` | Template | Training script template for ET networks. Provides standardized structure and plotting utilities for creating new model training scripts. |
-| `train_template_logZ.py` | Template | Training script template for LogZ networks. Provides standardized structure and plotting utilities for creating new LogZ model training scripts. |
-| `test_all_training_scripts.py` | Multi-Model | Tests all models with small architectures (20 epochs, ~1K parameters). Creates compatible output for analysis. |
-| `run_comprehensive_model_comparison.py` | Multi-Model | Comprehensive comparison of all models with standardized architectures (12 layers, 128 units; Glow 24 layers). |
-| `create_comparison_analysis.py` | Analysis | Creates comprehensive analysis plots and tables. Supports both full comparison and test result analysis modes. |
+```python
+from src.training import create_mlp_et_trainer
 
-### Model Categories
-
-**Direct ET Networks**: Learn μ_T(η) directly from (η, μ_T) pairs
-- MLP, GLU, Quadratic ResNet, Invertible NN, NoProp-CT variants
-- Fast training, direct optimization of target mapping
-
-**Log Normalizer Networks**: Learn A(η) and compute μ_T = ∇A(η)  
-- MLP, GLU, Quadratic ResNet, Convex NN variants
-- Leverages automatic differentiation, maintains mathematical properties
-
-**Flow-Based Networks**: Use continuous dynamics or normalizing flows
-- Geometric Flow (novel approach respecting exponential family geometry)
-- Glow Networks (normalizing flows with affine coupling)
-- Invertible Neural Networks (coupling layers)
-
-**Continuous Time Networks**: Solve ODEs for expectation computation
-- NoProp-CT (no propagation continuous time)
-- ODE solvers with learned dynamics
+# Create trainer using factory
+trainer = create_mlp_et_trainer({
+    'input_dim': 8, 
+    'output_dim': 8, 
+    'hidden_sizes': [64, 64]
+})
+```
 
 ## Supported Distributions
 
-### 1D Gaussian Natural Parameters
-- Natural parameters: `eta = [eta1, eta2]` where `eta2 < 0` for integrability
-- Sufficient statistics: `T(x) = [x, x^2]`
-- Configuration: `gaussian_1d_large.yaml`
-
 ### Multivariate Normal
-- Natural parameters: `eta = [eta1_0, eta1_1, eta1_2, ... eta2_00, eta2_01, ...,]` ($N$ + $N^2$ dimensions)
-- Sufficient statistics: `T(x) = [x_0, x_1, x_2, x_0^2, x_0*x_1, x_0*x_2, x_1^2, x_1*x_2, x_2^2]` 
-- 3D Configuration: `multivariate_3d_large.yaml`
+- **Natural parameters**: $\eta = [\eta_1, \eta_2]$ where $\eta_1$ is mean and $\eta_2$ is precision matrix
+- **Sufficient statistics**: $T(x) = [x, x \otimes x]$
+- **Configuration**: 3D case uses 12 parameters (3 mean + 9 covariance)
 
-### Multivariate Normal_tril (Lower triangular for eta2 -- ensures full rank $\Sigma_{TT}(\eta)$)
-- Natural parameters: `eta = [eta1_0, eta1_1, eta1_2, ... eta2_00, eta2_01, ...,]` ($N$ + $N(N+1)/2$ dimensions)
-- Sufficient statistics: `T(x) = [x_0, x_1, x_2, x_0^2, x_0*x_1, x_0*x_2, x_1^2, x_1*x_2, x_2^2]` 
-- Configuration: `multivariate_3d_large.yaml`
+### 1D Gaussian Natural Parameters
+- **Natural parameters**: $\eta = [\eta_1, \eta_2]$ where $\eta_2 < 0$ for integrability
+- **Sufficient statistics**: $T(x) = [x, x^2]$
 
-### 1D LaplaceProduct (Example of Custom Distribution)
-- Natural parameters: `eta = [eta_xm1, eta_xp1]` where both parameters are positive
-- Sufficient statistics: `T(x) = [-|x-1|, -|x+1|]`
-- Distribution: `p(x|η) ∝ exp(η₁·(-|x-1|) + η₂·(-|x+1|))`
-- Configuration: `laplace_product_1d.yaml`
-- **Key features**: Non-standard distribution requiring numerical integration for normalization, demonstrates the full pipeline from definition to neural network training
+### Custom Distributions
+- Implement the `ExponentialFamily` interface in `src/ef.py`
+- Define `x_shape`, `stat_specs`, and `_compute_stats` method
+- Add to `ef_factory` function
 
-## Neural Network Approaches
+## Geometric Flow Networks
 
-### Traditional Approaches
-- **ET Networks**: Directly learn `μ_T(η) = E[T(x)|η]` using standard neural architectures
-- **LogZ Networks**: Learn log-normalizer `A(η)`, then compute `μ_T = ∇A(η)` via automatic differentiation
-
-### Geometric Flow Networks (Novel)
-An approach that learns flow dynamics to compute expectations:
+The novel geometric flow approach learns continuous dynamics:
 
 ```
 du/dt = A(u,t,η_t) @ A(u,t,η_t)^T @ (η_target - η_init)
 ```
-
-where:
-- `u(t)` evolves from analytical reference point `μ_0` to target `μ_T(η_target)`
-- `η_t = (1-t)η_init + t*η_target` (linear interpolation in parameter space)
-- `A(u,t,η_t)` is learned via neural networks with sinusoidal time embeddings
-- `A@A^T` structure ensures positive semidefinite flow matrices
 
 **Key advantages**:
 - Respects geometric structure of exponential families
@@ -372,32 +379,177 @@ where:
 - Requires minimal time steps (2-5) due to smooth dynamics
 - Includes smoothness penalties for stable training
 
-## Defining new exponential-family distributions
-
-- Implement the `ExponentialFamily` interface in `src/ef.py`: define immutable `x_shape`, `eta_dim`, and the methods `compute_stats(x)`, `logdensity_fn(eta)`, and `flatten_stats_or_eta(dict)`.
-- Add your EF to `ef_factory` in `src/ef.py` or pass an instance programmatically.
-- For geometric flow networks, implement `find_nearest_analytical_point()` to provide analytical reference points.
-- The system automatically handles flattening for HMC sampling and respects your shapes when computing moments.
-
 ## Configuration System
 
-The project uses YAML configuration files to specify:
-- **Exponential Family**: Type and parameters
-- **Grid**: Number of training/validation points and parameter ranges
-- **Sampling**: HMC parameters (samples, warmup, step size, integration steps)
-- **Optimization**: Neural network architecture, learning rate, epochs, batch size
+The project uses a hierarchical configuration system with clear separation of concerns:
 
+### Base Configuration Classes
 
+```python
+# Base configuration with common methods
+@dataclass
+class BaseConfig(ABC):
+    """Base configuration class with utility methods."""
+    def to_dict(self) -> Dict[str, Any]: ...
+    def from_dict(cls, config_dict: Dict[str, Any]): ...
+    def validate(self) -> None: ...
 
-## Visualization
+# Model architecture configuration
+@dataclass
+class BaseModelConfig(BaseConfig):
+    """Model architecture and capabilities."""
+    model_type: str
+    input_dim: int = 0
+    output_dim: int = 0
+    supports_dropout: bool = True
+    # ... architecture parameters
 
-The project includes comprehensive plotting capabilities:
-- Training curves, moment comparisons, error distributions
-- Multi-panel analysis including linear/quadratic term comparisons, covariance heatmaps, and component-wise MSE breakdowns
+# Training configuration  
+@dataclass
+class BaseTrainingConfig(BaseConfig):
+    """Training-specific parameters."""
+    learning_rate: float = 1e-3
+    optimizer_type: str = "adamw"
+    batch_size: int = 32
+    # ... training parameters
+```
+
+### Model-Specific Configurations
+
+```python
+@dataclass
+class MLP_ET_Config(BaseModelConfig):
+    """MLP ET model configuration."""
+    model_type: str = "mlp_et"
+    hidden_sizes: List[int] = field(default_factory=lambda: [32, 32])
+    activation: str = "swish"
+    dropout_rate: float = 0.1
+    use_resnet: bool = True
+    num_resnet_blocks: int = 3
+    initialization_method: str = "xavier_uniform"
+```
+
+### Configuration Priority
+
+1. **Config file defaults** - Single source of truth for all default parameters
+2. **Command-line arguments** - Override config defaults when explicitly specified
+3. **No conflicting defaults** - argparse doesn't override config file defaults
+
+## Key Features
+
+- **Production-Ready Training Scripts**: Comprehensive CLI interfaces in `src/training/`
+- **Configuration-First Design**: Config files as single source of truth for defaults
+- **JAX/Flax**: Efficient computation with automatic differentiation
+- **Modular Architecture**: Clean separation of models, configs, and training logic
+- **Standardized Interfaces**: Consistent method signatures across all models
+- **Automatic Plotting**: Learning curves and error analysis generated by default
+- **Flexible Training**: Support for both CLI and programmatic training
+- **Comprehensive Configuration**: Hierarchical config system with validation
+- **Extensible Design**: Easy to add new distributions and architectures
+- **Clean Codebase**: Consistent naming conventions and organized structure
+
+## Examples
+
+### Production Training Script Usage
+
+```bash
+# Train MLP ET with default configuration (100 epochs, 50 dropout epochs)
+python src/training/mlp_et_trainer.py --data data/training_data.pkl
+
+# Train GLU ET with custom architecture and training parameters
+python src/training/glu_et_trainer.py --data data/training_data.pkl \
+    --hidden-sizes 128 64 32 --activation relu --dropout-rate 0.2 \
+    --learning-rate 0.001 --epochs 200 --dropout-epochs 100
+
+# Train Quadratic ET with RMSprop optimizer
+python src/training/quadratic_et_trainer.py --data data/training_data.pkl \
+    --optimizer rmsprop --epochs 300 --dropout-epochs 150
+
+# Train Geometric Flow ET with custom flow parameters
+python src/training/geometric_flow_et_trainer.py --data data/training_data.pkl \
+    --n-time-steps 10 --hidden-sizes 32 32 32 --layer-norm-type weak_layer_norm
+
+# Training with specific output directory and no plots
+python src/training/mlp_et_trainer.py --data data/training_data.pkl \
+    --output-dir artifacts/my_experiment --no-plots
+```
+
+### Programmatic Training
+
+```python
+import jax.numpy as jnp
+from jax import random
+from src.models import MLP_ET_Network
+from src.configs import MLP_ET_Config
+from src.training import BaseETTrainer
+
+# Generate sample data
+key = random.PRNGKey(0)
+eta = random.normal(key, (100, 8))
+mu_target = random.normal(key, (100, 8))
+
+# Create and train model
+config = MLP_ET_Config(input_dim=8, output_dim=8, hidden_sizes=[32, 16])
+model = MLP_ET_Network(config=config)
+trainer = BaseETTrainer(model, config)
+
+# Train with validation
+results = trainer.train(
+    train_eta=eta, 
+    train_mu_T=mu_target,
+    num_epochs=50, 
+    dropout_epochs=25
+)
+```
+
+### Geometric Flow Model
+
+```python
+from src.models import Geometric_Flow_ET_Network
+from src.configs import Geometric_Flow_ET_Config
+
+# Create geometric flow model
+config = Geometric_Flow_ET_Config(
+    input_dim=12,  # 3D multivariate normal
+    output_dim=12,
+    hidden_sizes=[64, 64],
+    n_time_steps=10
+)
+model = Geometric_Flow_ET_Network(config=config)
+
+# Forward pass
+eta = random.normal(key, (4, 12))
+mu_predicted = model.apply(params, eta, training=False)
+```
+
+## Installation
+
+```bash
+# Install dependencies
+pip install -e .
+
+# Or with conda
+conda activate numpyro
+pip install -e .
+```
+
+## Dependencies
+
+- JAX/Flax for neural networks and computation
+- NumPy for numerical operations
+- Optax for optimization
+- BlackJAX for MCMC sampling (optional)
+- Matplotlib for plotting (optional)
 
 ## Notes
 
-- All implementations use JAX for efficient computation and automatic differentiation
-- Training data is cached using configuration hashes to avoid regeneration
-- The system supports both CPU and GPU execution via JAX backends
-- Certain matrix operations use optimized JAX routines with `vmap` compatibility for batch processing
+- **Production-Ready**: Training scripts in `src/training/` are production-ready with comprehensive CLI interfaces
+- **Configuration-First**: All default parameters are defined in config files, not in argparse
+- **JAX/Flax**: All implementations use JAX for efficient computation and automatic differentiation
+- **Automatic Plotting**: Learning curves and error analysis are generated by default
+- **Flexible Training**: Support both command-line and programmatic training approaches
+- **Modular Design**: Clean separation between model architecture, training logic, and configuration
+- **Extensible**: Easy to add new models and training scripts following established patterns
+- **Cross-Platform**: Supports both CPU and GPU execution via JAX backends
+- **Well-Tested**: All components have been tested and verified to work correctly
+- **Clean Codebase**: Consistent naming conventions and organized structure throughout

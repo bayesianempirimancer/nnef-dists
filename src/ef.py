@@ -19,6 +19,7 @@ class ExponentialFamily:
     """
 
     x_shape: Tuple[int, ...]
+    name: str
 
     # ----- Required subclass API -----
     @cached_property
@@ -192,6 +193,7 @@ class MultivariateNormal(ExponentialFamily):
     Integrability requires eta2 to be negative definite.  
     """
     x_shape: Tuple[int,]
+    name: str = "multivariate_normal"
 
     @cached_property
     def stat_specs(self) -> Dict[str, Tuple[int, ...]]:
@@ -200,7 +202,7 @@ class MultivariateNormal(ExponentialFamily):
     def _compute_stats(self, x: Array) -> Dict[str, Array]:
         return {"x": x, "xxT": x[...,None] * x[...,None,:]}
     
-    def find_nearest_analytical_point(self, eta_target: Union[Array, Dict[str, Array]]) -> Tuple[Dict[str, Array], Dict[str, Array]]:
+    def find_nearest_analytical_point(self, eta_target: Union[Array, Dict[str, Array]]) -> Tuple[Union[Array, Dict[str, Array]], Union[Array, Dict[str, Array]]]:
         """
         Find the nearest analytical reference point (η₀, μ₀) for flow-based computation.
         
@@ -211,29 +213,63 @@ class MultivariateNormal(ExponentialFamily):
             eta_target: Target natural parameters (flattened array or dict)
             
         Returns:
-            Tuple of (eta_0_dict, mu_0_dict):
-                - eta_0_dict: Reference natural parameters as a dict
-                - mu_0_dict: Analytical expectation μ₀ = E[T|η₀] as a dict
+            Tuple of (eta_0, mu_0) in the same format as input:
+                - If input is array: returns (eta_0_array, mu_0_array)
+                - If input is dict: returns (eta_0_dict, mu_0_dict)
         """
-        # Convert to dict format if needed
-        eta_target = self.unflatten_stats_or_eta(eta_target)
+        # Check if input is array or dict
+        input_is_array = isinstance(eta_target, (jnp.ndarray, Array))
         
-        eta1_nearest = eta_target['x']  # Linear part [d,]
-        eta2_nearest_diag = jnp.diag(eta_target['xxT'])
+        # Convert to dict format for processing
+        eta_target_dict = self.unflatten_stats_or_eta(eta_target)
+        
+        eta1_nearest = eta_target_dict['x']  # Linear part [batch_size, d] or [d,]
+        eta2_matrix = eta_target_dict['xxT']  # [batch_size, d, d] or [d, d]
+        
+        # Handle batch dimension for diagonal extraction
+        if eta2_matrix.ndim >= 3:  # Batch case: [..., d, d]
+            # Get the last two dimensions for diagonal extraction
+            eta2_nearest_diag = jnp.diagonal(eta2_matrix, axis1=-2, axis2=-1)  # [..., d]
+        else:  # Single case: [d, d]
+            eta2_nearest_diag = jnp.diag(eta2_matrix)  # [d,]
         
         Sigma_target_diag = -0.5 / eta2_nearest_diag
         mu_nearest = Sigma_target_diag * eta1_nearest
 
-        mu_nearest_dict = {
-            'x': mu_nearest,
-            'xxT': jnp.diag(Sigma_target_diag) + jnp.outer(mu_nearest, mu_nearest)
-        }
-        eta_nearest_dict = {
-            'x': eta1_nearest,
-            'xxT': jnp.diag(eta2_nearest_diag)
-        }
+        # Handle batch dimension for matrix construction
+        if eta2_matrix.ndim >= 3:  # Batch case
+            d = eta2_matrix.shape[-1]  # Get the dimension from the last axis
+            # Create diagonal matrices for arbitrary batch dimensions
+            # Use einsum with ellipsis to handle arbitrary batch dimensions
+            Sigma_diag_matrices = jnp.einsum('...i,ij->...ij', Sigma_target_diag, jnp.eye(d))
+            eta2_diag_matrices = jnp.einsum('...i,ij->...ij', eta2_nearest_diag, jnp.eye(d))
+            mu_outer_products = jnp.einsum('...i,...j->...ij', mu_nearest, mu_nearest)
+            
+            mu_nearest_dict = {
+                'x': mu_nearest,
+                'xxT': Sigma_diag_matrices + mu_outer_products
+            }
+            eta_nearest_dict = {
+                'x': eta1_nearest,
+                'xxT': eta2_diag_matrices
+            }
+        else:  # Single case
+            mu_nearest_dict = {
+                'x': mu_nearest,
+                'xxT': jnp.diag(Sigma_target_diag) + jnp.outer(mu_nearest, mu_nearest)
+            }
+            eta_nearest_dict = {
+                'x': eta1_nearest,
+                'xxT': jnp.diag(eta2_nearest_diag)
+            }
 
-        return eta_nearest_dict, mu_nearest_dict
+        # Return in the same format as input
+        if input_is_array:
+            eta_0_array = self.flatten_stats_or_eta(eta_nearest_dict)
+            mu_0_array = self.flatten_stats_or_eta(mu_nearest_dict)
+            return eta_0_array, mu_0_array
+        else:
+            return eta_nearest_dict, mu_nearest_dict
     
 @dataclass(frozen=True)
 class MultivariateNormal_tril(MultivariateNormal):
@@ -243,6 +279,7 @@ class MultivariateNormal_tril(MultivariateNormal):
     Uses standard lower triangular convention compatible with JAX/NumPy.
     """
     x_shape: Tuple[int,]
+    name: str = "multivariate_normal_tril"
 
     @cached_property
     def stat_specs(self) -> Dict[str, Tuple[int, ...]]:
@@ -347,16 +384,17 @@ class MultivariateNormal_tril(MultivariateNormal):
         tempdist = MultivariateNormal(x_shape=self.x_shape)
         eta_nearest_dict, mu_nearest_dict = tempdist.find_nearest_analytical_point(eta_standard)
         eta_nearest = self.standard_nat_to_LTnat(eta_nearest_dict)
-        mu_target = self.standard_nat_to_LTnat(mu_nearest_dict)
+        mu_nearest = self.standard_nat_to_LTnat(mu_nearest_dict)
 
-        return eta_nearest, mu_target
+        return eta_nearest, mu_nearest
 
 @dataclass(frozen=True)
 class LaplaceProduct(ExponentialFamily):
     """ 
-    Laplace product in natural parameterization with T(x) = -abs(x+1)-abs(x-1) where x is a vector.
+    Laplace product in natural parameterization with T(x) = -abs(x-1), -abs(x+1) where x is a vector.
     """
     x_shape: Tuple[int,]
+    name: str = "laplace_product"
 
     @cached_property
     def stat_specs(self) -> Dict[str, Tuple[int, ...]]:
@@ -364,3 +402,27 @@ class LaplaceProduct(ExponentialFamily):
 
     def _compute_stats(self, x: Array) -> Dict[str, Array]:
         return {"xm1": -jnp.abs(x-1), "xp1": -jnp.abs(x+1)}
+
+    def find_nearest_analytical_point(self, eta_target: Union[Array, Dict[str, Array]]) -> Tuple[Dict[str, Array], Dict[str, Array]]:
+        """
+        Find the nearest analytical reference point (η₀, μ₀) for flow-based computation.
+        
+        For Laplace product, we use the same mean but diagonal covariance matrix.
+        This gives us a point where μ₀ can be computed analytically while being close to the target.
+        """
+        eta_max = jnp.max(eta_target, axis=-1, keepdims=True)
+        idx = jnp.argmax(eta_target, axis=-1)
+        from flax.linen import one_hot
+        mask = one_hot(idx, eta_target.shape[-1], axis=-1, dtype=bool)
+        eta_nearest = eta_target * mask
+        mu_nearest = jnp.repeat(1.0/eta_max, eta_target.shape[-1], axis=-1)
+
+        mu_nearest = mu_nearest*mask + (1 - mask) * (2 + mu_nearest*jnp.exp(-2*mu_nearest))
+        mu_nearest = -mu_nearest
+
+        # logic: if idx ==0 then mu[:,0] = -1.0/eta_max
+        #        if idx ==0 then mu[:,1] = -(2 + 1/eta_max*exp(-2*eta_max))
+        #        if idx ==1 then mu[:,0] = -(2 + 1/eta_max*exp(-2*eta_max))
+        #        if idx ==1 then mu[:,1] = -1.0/eta_max)
+        
+        return eta_nearest, mu_nearest
