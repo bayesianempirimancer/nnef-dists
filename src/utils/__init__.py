@@ -3,6 +3,7 @@ Utility functions for the nnef-dists package.
 """
 
 # from .performance import measure_jit_runtime, measure_memory_usage, benchmark_model  # Not available
+from .activation_utils import get_activation_function, get_activation_name
 from .matrix_utils import vector_to_upper_triangular, upper_triangular_to_vector
 from .training import TrainingProgress, add_timing_to_history, train_with_progress
 from .ef_utils import (
@@ -34,6 +35,8 @@ __all__ = [
     # 'measure_jit_runtime',  # Not available
     # 'measure_memory_usage', 
     # 'benchmark_model',
+    'get_activation_function',
+    'get_activation_name',
     'vector_to_upper_triangular',
     'upper_triangular_to_vector',
     'TrainingProgress',

@@ -115,32 +115,31 @@ def create_mlp_layer(features: int,
     )
 
 
-def create_mlp_block(features: tuple,
-                    use_bias: bool = True,
-                    activation: Callable = nn.swish,
-                    use_layer_norm: bool = True,
-                    dropout_rate: float = 0.0) -> MLPBlock:
-    """Create an MLP block with multiple layers.
-    
-    Args:
-        features: Tuple of feature sizes for each layer in the block
-        use_bias: Whether to use bias in dense layers
-        activation: Activation function
-        use_layer_norm: Whether to use layer normalization
-        dropout_rate: Dropout rate
-        
-    Examples:
-        create_mlp_block((64, 64, 64))  # 3 layers: 64 -> 64 -> 64
-        create_mlp_block((128, 64))     # 2 layers: 128 -> 64
-        create_mlp_block((64,))         # 1 layer: 64
+class MatrixMLP(nn.Module):
     """
-    return MLPBlock(
-        features=features,
-        use_bias=use_bias,
-        activation=activation,
-        use_layer_norm=use_layer_norm,
-        dropout_rate=dropout_rate
-    )
+    MLP that outputs a matrix a m x n.  This is useful for learning matrix-valued functions.
+    """
+    m: int
+    n: int  # output is a m x n matrix
+    features: [int, ...]
+    activation: Callable = nn.swish # because it is fun to say
+    use_layer_norm: bool = False
+    dropout_rate: float = 0.0
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+        """
+        Forward pass through MatrixMLP.
+        """
+        batch_shape = x.shape[:-1]
+        vectorized_output = MLPBlock(features=self.features, 
+                                    use_bias=self.use_bias, 
+                                    activation=self.activation, 
+                                    use_layer_norm=self.use_layer_norm, 
+                                    dropout_rate=self.dropout_rate)(x, training=training)
+        vectorized_output = nn.Dense(self.m * self.n, name='vectorized_output')(vectorized_output)
+        return vectorized_output.reshape(batch_shape + (self.m, self.n))
+
 
 
 # Example usage and testing

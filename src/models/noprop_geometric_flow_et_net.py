@@ -12,6 +12,7 @@ import flax.linen as nn
 from ..configs.noprop_geometric_flow_et_config import NoProp_Geometric_Flow_ET_Config
 from ..embeddings.eta_embedding import EtaEmbedding
 from ..utils.activation_utils import get_activation_function
+from ..layers.normalization import get_normalization_layer
 
 
 class NoProp_Geometric_Flow_ET_Network(nn.Module):
@@ -119,8 +120,7 @@ class NoProp_Geometric_Flow_ET_Network(nn.Module):
         time_embed_dim = self.config.time_embed_dim if self.config.time_embed_dim is not None else eta_dim
         embed_dim = min(time_embed_dim, 16)
         
-        from embeddings.time_embeddings import SimpleTimeEmbedding
-        from ..layers.normalization import WeakLayerNorm
+        from ..embeddings.time_embeddings import SimpleTimeEmbedding
         
         # Handle batch time values
         if t.ndim == 0:
@@ -151,33 +151,38 @@ class NoProp_Geometric_Flow_ET_Network(nn.Module):
             x = net_input
             for j, hidden_size in enumerate(self.config.hidden_sizes):
                 x = nn.Dense(hidden_size, name=f'mlp_{j}',
-                           kernel_init=nn.initializers.lecun_normal(),
+                           kernel_init=lambda key, shape, dtype: nn.initializers.xavier_normal()(key, shape, dtype) / jnp.sqrt(matrix_rank),
                            bias_init=nn.initializers.zeros)(x)
                 x = get_activation_function(self.config.activation)(x)
-                if self.config.use_layer_norm:
-                    x = WeakLayerNorm(name=f'weak_layer_norm_mlp_{j}')(x)
+                if self.config.layer_norm_type != "none":
+                    norm_layer = get_normalization_layer(self.config.layer_norm_type, features=hidden_size, name=f'norm_mlp_{j}')
+                    if norm_layer is not None:
+                        x = norm_layer(x)
                 # Note: dropout not used in geometric flow model
             
             A_flat = nn.Dense(eta_dim * matrix_rank, name='matrix_A_output',
-                            kernel_init=nn.initializers.lecun_normal(),
+                            kernel_init=lambda key, shape, dtype: nn.initializers.xavier_normal()(key, shape, dtype) / jnp.sqrt(matrix_rank),
                             bias_init=nn.initializers.zeros)(x)
         elif self.config.architecture == "glu":
             x = net_input
             for j, hidden_size in enumerate(self.config.hidden_sizes):
                 gate = nn.Dense(hidden_size, name=f'glu_gate_{j}',
-                              kernel_init=nn.initializers.lecun_normal(),
+                              kernel_init=nn.initializers.xavier_normal,
                               bias_init=nn.initializers.zeros)(x)
                 value = nn.Dense(hidden_size, name=f'glu_value_{j}',
-                               kernel_init=nn.initializers.lecun_normal(),
+                               kernel_init=nn.initializers.xavier_normal,
                                bias_init=nn.initializers.zeros)(x)
                 
                 gate = get_activation_function('sigmoid')(gate)
                 value = get_activation_function(self.config.activation)(value)
                 x = gate * value
-                x = WeakLayerNorm(name=f'weak_layer_norm_glu_{j}')(x)
+                if self.config.layer_norm_type != "none":
+                    norm_layer = get_normalization_layer(self.config.layer_norm_type, features=hidden_size, name=f'norm_glu_{j}')
+                    if norm_layer is not None:
+                        x = norm_layer(x)
             
             A_flat = nn.Dense(eta_dim * matrix_rank, name='matrix_A_output',
-                            kernel_init=nn.initializers.lecun_normal(),
+                            kernel_init=lambda key, shape, dtype: nn.initializers.xavier_normal()(key, shape, dtype) / jnp.sqrt(matrix_rank),
                             bias_init=nn.initializers.zeros)(x)
         else:
             raise ValueError(f"Architecture {self.config.architecture} not supported")
