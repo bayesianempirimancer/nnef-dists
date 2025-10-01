@@ -87,9 +87,7 @@ def create_configs_from_args(args, eta_dim: int, mu_dim: int) -> tuple[Quadratic
         if hasattr(args, attribute) and getattr(args, attribute) is not None:
             model_kwargs[attribute] = getattr(args, attribute)
     
-    # Provide default hidden_sizes if not specified
-    if 'hidden_sizes' not in model_kwargs:
-        model_kwargs['hidden_sizes'] = [16]
+    # Note: hidden_sizes default comes from config class if not specified
     
     # Create model configuration
     model_config = create_quadratic_et_config(**model_kwargs)
@@ -144,7 +142,7 @@ def train_model(model_config: Quadratic_ET_Config, training_config: BaseTraining
         val_eta=data['val']['eta'],
         val_mu_T=data['val']['mu_T'],
         num_epochs=args.epochs,
-        dropout_epochs=args.dropout_epochs,
+        dropout_epochs=training_config.dropout_epochs,
         learning_rate=training_config.learning_rate,
         batch_size=training_config.batch_size,
         eval_steps=training_config.eval_steps,
@@ -161,91 +159,31 @@ def train_model(model_config: Quadratic_ET_Config, training_config: BaseTraining
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Quadratic ET Training Script")
+    # Start with base parser
+    parser = BaseETTrainer.create_base_argument_parser("Quadratic ET Training Script")
     
-    # Required arguments
-    parser.add_argument("--data", type=str, required=True,
-                       help="Path to training data pickle file")
-    parser.add_argument("--epochs", type=int, required=True,
-                       help="Number of training epochs")
-    
-    # Optional arguments with defaults
-    parser.add_argument("--dropout-epochs", type=int, default=0,
-                       help="Number of epochs to use dropout (default: 0)")
-    parser.add_argument("--output-dir", type=str,
-                       help="Output directory for results (default: auto-generated)")
-    
-    # Optimizer arguments
-    parser.add_argument("--learning-rate", type=float,
-                       help="Learning rate")
-    parser.add_argument("--batch-size", type=int,
-                       help="Batch size")
-    parser.add_argument("--optimizer", type=str, 
-                       choices=["adam", "adamw", "sgd", "rmsprop"],
-                       help="Optimizer type")
-    parser.add_argument("--weight-decay", type=float,
-                       help="Weight decay")
-    parser.add_argument("--beta1", type=float,
-                       help="Adam beta1 parameter")
-    parser.add_argument("--beta2", type=float,
-                       help="Adam beta2 parameter")
-    parser.add_argument("--eps", type=float,
-                       help="Adam epsilon parameter")
-    parser.add_argument("--loss-function", type=str, 
-                       choices=["mse", "mae", "huber", "model_specific"],
-                       help="Loss function")
-    parser.add_argument("--l1-reg-weight", type=float,
-                       help="L1 regularization weight")
-    
-    # Model architecture arguments
+    # Add model-specific arguments
     parser.add_argument("--hidden-sizes", type=int, nargs="+",
-                       help="Hidden layer sizes for quadratic blocks")
+                       help="Hidden layer sizes for quadratic blocks (default from config)")
     parser.add_argument("--activation", type=str, choices=["relu", "gelu", "swish", "tanh", "none", "linear"],
-                       help="Activation function")
+                       help="Activation function (default from config)")
     parser.add_argument("--use-layer-norm", action="store_true",
-                       help="Use layer normalization")
+                       help="Use layer normalization (default from config)")
     parser.add_argument("--use-quadratic-norm", action="store_true",
-                       help="Use quadratic normalization")
+                       help="Use quadratic normalization (default from config)")
     parser.add_argument("--dropout-rate", type=float,
-                       help="Dropout rate")
+                       help="Dropout rate (default from config)")
     parser.add_argument("--num-resnet-blocks", type=int,
-                       help="Number of ResNet blocks")
+                       help="Number of ResNet blocks (default from config)")
     parser.add_argument("--share-parameters", action="store_true",
-                       help="Share parameters across ResNet blocks")
+                       help="Share parameters across ResNet blocks (default from config)")
     parser.add_argument("--weight-residual", action="store_true",
-                       help="Weight residual connections")
+                       help="Weight residual connections (default from config)")
     parser.add_argument("--residual-weight", type=float,
-                       help="Weight for residual connections")
+                       help="Weight for residual connections (default from config)")
     parser.add_argument("--initialization-method", type=str,
                        choices=["xavier_uniform", "xavier_normal", "kaiming_uniform", "kaiming_normal", "lecun_normal"],
-                       help="Weight initialization method")
-    
-    # Training control arguments
-    parser.add_argument("--use-mini-batching", action="store_true",
-                       help="Enable mini-batching")
-    parser.add_argument("--no-mini-batching", dest="use_mini_batching", action="store_false",
-                       help="Disable mini-batching")
-    parser.add_argument("--random-batch-sampling", action="store_true",
-                       help="Use random batch sampling")
-    parser.add_argument("--sequential-batch-sampling", dest="random_batch_sampling", action="store_false",
-                       help="Use sequential batch sampling")
-    parser.add_argument("--eval-steps", type=int,
-                       help="Evaluation frequency in epochs")
-    parser.add_argument("--save-steps", type=int,
-                       help="Model saving frequency in epochs")
-    parser.add_argument("--early-stopping-patience", type=int,
-                       help="Early stopping patience in epochs")
-    parser.add_argument("--early-stopping-min-delta", type=float,
-                       help="Early stopping minimum delta")
-    parser.add_argument("--log-frequency", type=int,
-                       help="Logging frequency in epochs")
-    parser.add_argument("--random-seed", type=int,
-                       help="Random seed")    
-    # Plotting arguments
-    parser.add_argument("--no-plots", action="store_true",
-                       help="Skip generating plots")
-    parser.add_argument("--plot-data", type=str,
-                       help="Data file for plotting (default: same as training data)")
+                       help="Weight initialization method (default from config)")
     
     return parser.parse_args()
 

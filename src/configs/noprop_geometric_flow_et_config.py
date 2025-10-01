@@ -41,10 +41,10 @@ class NoProp_Geometric_Flow_ET_Config(BaseModelConfig):
     embedding_type: Optional[str] = "default"
     
     # Regularization parameters
-    dropout_rate: float = 0.0  # Geometric flow doesn't use dropout by default
+    dropout_rate: float = 0.1  # Dropout rate for Fisher flow field
     
     # Model capabilities
-    supports_dropout: bool = False  # Geometric flow doesn't support dropout
+    supports_dropout: bool = True  # Fisher flow field supports dropout
     supports_batch_norm: bool = False
     supports_layer_norm: bool = True
     
@@ -118,6 +118,8 @@ class NoProp_Geometric_Flow_ET_Config(BaseModelConfig):
             'use_layer_norm': self.use_layer_norm,
             'layer_norm_type': self.layer_norm_type,
             'embedding_type': self.embedding_type,
+            'dropout_rate': self.dropout_rate,
+            'supports_dropout': self.supports_dropout,
             'noise_schedule': self.noise_schedule,
             'loss_type': self.loss_type,
         }
@@ -160,13 +162,14 @@ def create_noprop_geometric_flow_et_config(
     n_time_steps: int = 10,
     smoothness_weight: float = 0.1,
     matrix_rank: Optional[int] = None,
-    time_embed_dim: Optional[int] = None,
+    time_embed_dim: Optional[int] = 4,
     architecture: str = "mlp",
     hidden_sizes: List[int] = [32, 32],
     activation: str = "swish",
     use_layer_norm: bool = False,
     layer_norm_type: str = "weak_layer_norm",
     embedding_type: Optional[str] = "default",
+    dropout_rate: float = 0.1,
     noise_schedule: str = "noprop_ct",
     loss_type: str = "geometric_flow",
     **kwargs
@@ -180,13 +183,14 @@ def create_noprop_geometric_flow_et_config(
         n_time_steps: Number of time steps for ODE integration
         smoothness_weight: Weight for smoothness penalty
         matrix_rank: Rank of the flow matrix (None = use eta_dim)
-        time_embed_dim: Time embedding dimension (None = use eta_dim)
+        time_embed_dim: Time embedding dimension (default 4, None/0 = disable)
         architecture: Network architecture ("mlp" or "glu")
         hidden_sizes: Hidden layer sizes
         activation: Activation function
         use_layer_norm: Whether to use layer normalization (deprecated)
         layer_norm_type: Type of layer normalization to use
         embedding_type: Type of embedding to use
+        dropout_rate: Dropout rate for Fisher flow field
         noise_schedule: NoProp noise schedule ("noprop_ct" or "flow_matching")
         loss_type: Loss function type ("flow_matching", "geometric_flow", or "simple_target")
         **kwargs: Additional configuration parameters
@@ -210,6 +214,7 @@ def create_noprop_geometric_flow_et_config(
         use_layer_norm=use_layer_norm,
         layer_norm_type=layer_norm_type,
         embedding_type=embedding_type,
+        dropout_rate=dropout_rate,
         noise_schedule=noise_schedule,
         loss_type=loss_type,
         **kwargs

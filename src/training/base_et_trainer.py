@@ -11,6 +11,7 @@ import jax.numpy as jnp
 from jax import random
 import optax
 import time
+import argparse
 from typing import Dict, Any, List, Tuple, Optional
 from pathlib import Path
 import pickle
@@ -34,6 +35,85 @@ class BaseETTrainer:
     """
     
     @staticmethod
+    def create_base_argument_parser(description: str = "ET Training Script") -> argparse.ArgumentParser:
+        """
+        Create a base argument parser with common arguments for all ET models.
+        
+        Args:
+            description: Description for the argument parser
+            
+        Returns:
+            ArgumentParser with common arguments
+        """
+        parser = argparse.ArgumentParser(description=description)
+        
+        # Required arguments
+        parser.add_argument("--data", type=str, required=True,
+                           help="Path to training data pickle file")
+        parser.add_argument("--epochs", type=int, required=True,
+                           help="Number of training epochs")
+        
+        # Optional arguments (no defaults - use config class defaults)
+        parser.add_argument("--dropout-epochs", type=int,
+                           help="Number of epochs to use dropout (default from config)")
+        parser.add_argument("--output-dir", type=str,
+                           help="Output directory for results (default: auto-generated)")
+        
+        # Optimizer arguments
+        parser.add_argument("--learning-rate", type=float,
+                           help="Learning rate (default from config)")
+        parser.add_argument("--batch-size", type=int,
+                           help="Batch size (default from config)")
+        parser.add_argument("--optimizer", type=str, 
+                           choices=["adam", "adamw", "sgd", "rmsprop"],
+                           help="Optimizer type (default from config)")
+        parser.add_argument("--weight-decay", type=float,
+                           help="Weight decay (default from config)")
+        parser.add_argument("--beta1", type=float,
+                           help="Adam beta1 parameter (default from config)")
+        parser.add_argument("--beta2", type=float,
+                           help="Adam beta2 parameter (default from config)")
+        parser.add_argument("--eps", type=float,
+                           help="Adam epsilon parameter (default from config)")
+        parser.add_argument("--loss-function", type=str, 
+                           choices=["mse", "mae", "huber", "model_specific"],
+                           help="Loss function (default from config)")
+        parser.add_argument("--l1-reg-weight", type=float,
+                           help="L1 regularization weight (default from config)")
+        
+        # Training control arguments
+        parser.add_argument("--use-mini-batching", action="store_true",
+                           help="Use mini-batching (default from config)")
+        parser.add_argument("--no-mini-batching", action="store_true",
+                           help="Disable mini-batching (default from config)")
+        parser.add_argument("--random-batch-sampling", action="store_true",
+                           help="Use random batch sampling (default from config)")
+        parser.add_argument("--sequential-batch-sampling", action="store_true",
+                           help="Use sequential batch sampling (default from config)")
+        
+        # Training monitoring arguments
+        parser.add_argument("--eval-steps", type=int,
+                           help="Steps between evaluations (default from config)")
+        parser.add_argument("--save-steps", type=int,
+                           help="Steps between model saves (default from config)")
+        parser.add_argument("--early-stopping-patience", type=int,
+                           help="Epochs to wait before early stopping (default from config)")
+        parser.add_argument("--early-stopping-min-delta", type=float,
+                           help="Minimum change to qualify as improvement (default from config)")
+        parser.add_argument("--log-frequency", type=int,
+                           help="Steps between logging (default from config)")
+        parser.add_argument("--random-seed", type=int,
+                           help="Random seed for reproducibility (default from config)")
+        
+        # Plotting arguments
+        parser.add_argument("--no-plots", action="store_true",
+                           help="Skip generating plots")
+        parser.add_argument("--plot-data", type=str,
+                           help="Path to data file for plotting (default: same as training data)")
+        
+        return parser
+
+    @staticmethod
     def create_training_config_from_args(args) -> BaseTrainingConfig:
         """
         Create a training configuration from command line arguments.
@@ -55,7 +135,7 @@ class BaseETTrainer:
             'learning_rate', 'batch_size', 'weight_decay', 'beta1', 'beta2', 'eps',
             'loss_function', 'l1_reg_weight', 'use_mini_batching', 'random_batch_sampling',
             'eval_steps', 'save_steps', 'early_stopping_patience', 'early_stopping_min_delta',
-            'log_frequency', 'random_seed', 'optimizer'
+            'log_frequency', 'random_seed', 'optimizer', 'dropout_epochs'
         ]
         
         for attribute in training_attributes:
@@ -170,17 +250,11 @@ class BaseETTrainer:
         loss_alpha = getattr(self.config, 'loss_alpha', 1.0)
         loss_beta = getattr(self.config, 'loss_beta', 0.0)
         
-        # Handle model-specific loss function (most efficient path)
-        if loss_function == 'model_specific' and hasattr(self.model, 'loss_fn'):
+        # Always use model's loss_fn if available (most efficient path)
+        if hasattr(self.model, 'loss_fn'):
             primary_loss = self.model.loss_fn(params, eta, targets, training=training, rngs=rngs)
-        elif loss_function == 'model_specific' and not hasattr(self.model, 'loss_fn'):
-            # Error: model-specific loss requested but not available
-            raise ValueError(
-                f"Model-specific loss requested but model {type(self.model).__name__} does not have a 'loss_fn' method. "
-                f"Either implement the 'loss_fn' method in your model or change the loss_function to 'mse', 'mae', or 'huber'."
-            )
         else:
-            # For standard loss functions, compute predictions once
+            # Fallback: compute predictions and loss manually
             predictions = self.model.apply(params, eta, training=training, rngs=rngs)
             
             # Primary loss computation
@@ -530,7 +604,7 @@ class BaseETTrainer:
             epoch_train_loss /= num_batches
             
             # Validation loss (no dropout)
-            val_predictions = self.model.apply(params, val_eta, training=False)
+            val_predictions = self.model.predict(params, val_eta)
             val_loss = jnp.mean((val_predictions - val_mu_T) ** 2)
             
             train_losses.append(float(epoch_train_loss))

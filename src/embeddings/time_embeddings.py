@@ -18,11 +18,8 @@ class TimeEmbedding(nn.Module):
     Provides a standardized interface for creating time embeddings
     from continuous time values t ∈ [0, 1].
     """
-    
+
     embed_dim: int
-    max_freq: float = 10.0
-    include_linear: bool = True
-    linear_weight: float = 0.1
     
     @nn.compact
     def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
@@ -38,14 +35,104 @@ class TimeEmbedding(nn.Module):
         raise NotImplementedError("Subclasses must implement __call__")
 
 
-class FourierTimeEmbedding(TimeEmbedding):
+class ConstantTimeEmbedding(TimeEmbedding):
+    """
+    Constant time embedding that returns a constant value.
+    
+    This effectively disables temporal information by returning
+    the same embedding regardless of the input time value.
+    """
+    
+    def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
+        """
+        Create constant time embedding.
+        
+        Args:
+            t: Time value(s) ∈ [0, 1] (ignored)
+            
+        Returns:
+            Constant embedding [embed_dim,] or [batch_shape..., embed_dim]
+        """
+        # Convert scalar to (1,) array to unify handling
+        is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
+        if is_scalar:
+            t = jnp.array(t)[None]
+        
+        # Create constant embeddings: batch_shape + (embed_dim,)
+        embeddings = jnp.ones(t.shape + (self.embed_dim,))
+        
+        # Squeeze out the batch dimension if input was scalar
+        return embeddings
+
+class LinearTimeEmbedding(TimeEmbedding):
+    def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
+        """
+        Create linear time embedding.
+        
+        Args:
+            t: Time value(s) ∈ [0, 1]
+            
+        Returns:
+            Time embedding [embed_dim,] or [batch_shape..., embed_dim]
+        """
+        # Convert scalar to (1,) array to unify handling
+        is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
+        if is_scalar:
+            t = jnp.array(t)[None]
+        
+        # Repeat t along the last dimension to create embeddings
+        embeddings = jnp.repeat(t[..., None], self.embed_dim, axis=-1)
+        
+        # Squeeze out the batch dimension if input was scalar
+        return embeddings
+
+class CyclicalFourierTimeEmbedding(TimeEmbedding):
+    """
+    Fourier-based time embedding using sinusoidal functions integer frequencies.  
+    This assumes that there is a max period of the signal, T_max
+    
+    Creates embeddings using sin and cos functions with different frequencies.
+    """
+
+    T_max: float = 1.0
+
+    def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
+        """
+        Create cyclical Fourier time embedding.
+        
+        Args:
+            t: Time value(s) ∈ [0, 1]
+            
+        Returns:
+            Time embedding [embed_dim,] or [batch_shape..., embed_dim]
+        """
+        if self.embed_dim%2 != 0:
+            raise ValueError("Cyclical Fourier time embedding requires embed_dim to be even")
+        
+        # Convert scalar to (1,) array to unify handling
+        is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
+        if is_scalar:
+            t = jnp.array(t)[None]
+        
+        n_freqs = self.embed_dim//2
+        freqs = jnp.linspace(0, 2*jnp.pi/self.T_max*n_freqs, n_freqs)
+        sin_embeddings = jnp.sin(2 * jnp.pi * freqs * t[..., None])
+        cos_embeddings = jnp.cos(2 * jnp.pi * freqs * t[..., None])
+        embeddings = jnp.concatenate([sin_embeddings, cos_embeddings], axis=-1)
+        
+        # Squeeze out the batch dimension if input was scalar
+        return embeddings
+
+class LogFreqTimeEmbedding(TimeEmbedding):
     """
     Fourier-based time embedding using sinusoidal functions.
     
-    Creates embeddings using sin and cos functions with different frequencies,
-    optionally combined with a linear component for time progression.
+    Creates embeddings using sin and cos functions with different frequencies.
     """
-    
+
+    min_freq: float = 0.1
+    max_freq: Optional[float] = 10
+
     def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
         """
         Create Fourier time embedding.
@@ -54,127 +141,71 @@ class FourierTimeEmbedding(TimeEmbedding):
             t: Time value(s) ∈ [0, 1]
             
         Returns:
-            Time embedding [embed_dim,] or [batch_size, embed_dim]
+            Time embedding [embed_dim,] or [batch_shape..., embed_dim]
         """
-        # Ensure t is a JAX array
-        if isinstance(t, float):
-            t = jnp.array(t)
+        if self.embed_dim%2 != 0:
+            raise ValueError("Fourier time embedding requires embed_dim to be even")
+
+        if self.max_freq is None: 
+            self.max_freq = self.embed_dim//2
+
+        # Convert scalar to (1,) array to unify handling
+        is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
+        if is_scalar:
+            t = jnp.array(t)[None]
         
         # Create frequency schedule
-        n_freqs = max(1, self.embed_dim // 4)  # Use 1/4 of dimension for frequencies
-        freqs = jnp.logspace(0, jnp.log10(self.max_freq), n_freqs)
+        n_freqs = self.embed_dim//2
+        log_freqs = jnp.linspace(jnp.log(self.min_freq), jnp.log(self.max_freq), n_freqs)
+        freqs = jnp.exp(log_freqs)
         
         # Create sin and cos embeddings
-        sin_embeddings = jnp.sin(2 * jnp.pi * freqs * t)
-        cos_embeddings = jnp.cos(2 * jnp.pi * freqs * t)
+        # freqs has shape (n_freqs,), t has shape (batch_shape,)
+        # We need to broadcast: (n_freqs,) * (batch_shape,) -> (batch_shape, n_freqs)
+        sin_embeddings = jnp.sin(2 * jnp.pi * freqs * t[..., None])
+        cos_embeddings = jnp.cos(2 * jnp.pi * freqs * t[..., None])        
+        # Combine sin and cos: (batch_shape, n_freqs) -> (batch_shape, 2*n_freqs)
+        embeddings = jnp.concatenate([sin_embeddings, cos_embeddings], axis=-1)
         
-        # Combine sin and cos
-        freq_embeddings = jnp.concatenate([sin_embeddings, cos_embeddings])
-        
-        # Adjust to target dimension
-        if len(freq_embeddings) < self.embed_dim:
-            # Repeat with different phase shifts if needed
-            n_repeats = (self.embed_dim + len(freq_embeddings) - 1) // len(freq_embeddings)
-            repeated_embeddings = jnp.tile(freq_embeddings, n_repeats)
-            embeddings = repeated_embeddings[:self.embed_dim]
-        else:
-            # Truncate if too many
-            embeddings = freq_embeddings[:self.embed_dim]
-        
-        # Add linear component if requested
-        if self.include_linear:
-            linear_component = jnp.linspace(0, t, self.embed_dim)
-            embeddings = embeddings + self.linear_weight * linear_component
-        
+        # Squeeze out the batch dimension if input was scalar
         return embeddings
-
-
-class SimpleTimeEmbedding(TimeEmbedding):
-    """
-    Simple time embedding using basic sinusoidal functions.
-    
-    A simpler version that uses evenly spaced frequencies and doesn't
-    include the linear component or complex frequency scheduling.
-    """
-    
-    def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
-        """
-        Create simple time embedding.
         
-        Args:
-            t: Time value(s) ∈ [0, 1]
-            
-        Returns:
-            Time embedding [embed_dim,] or [batch_size, embed_dim]
-        """
-        # Ensure t is a JAX array
-        if isinstance(t, float):
-            t = jnp.array(t)
-        
-        # Use evenly spaced frequencies
-        embed_dim = min(self.embed_dim, 16)  # Cap at 16 for simplicity
-        freqs = jnp.linspace(0, 1, embed_dim // 2)
-        
-        # Create sin and cos embeddings
-        sin_embeddings = jnp.sin(2 * jnp.pi * freqs * t)
-        cos_embeddings = jnp.cos(2 * jnp.pi * freqs * t)
-        
-        # Combine and pad/truncate to target dimension
-        time_embed = jnp.concatenate([sin_embeddings, cos_embeddings])
-        
-        if len(time_embed) < self.embed_dim:
-            # Pad with zeros
-            padding = jnp.zeros(self.embed_dim - len(time_embed))
-            time_embed = jnp.concatenate([time_embed, padding])
-        else:
-            # Truncate
-            time_embed = time_embed[:self.embed_dim]
-        
-        return time_embed
-
 
 # Convenience functions for creating time embeddings
 def create_time_embedding(embed_dim: int, 
                          method: str = "fourier",
-                         max_freq: float = 10.0,
-                         include_linear: bool = True,
-                         linear_weight: float = 0.1) -> TimeEmbedding:
+                         max_freq: float = 10.0) -> TimeEmbedding:
     """
     Create a time embedding instance.
     
     Args:
         embed_dim: Dimension of the time embedding
-        method: Method to use ("fourier" or "simple")
+        method: Method to use ("fourier", "simple", or "constant")
         max_freq: Maximum frequency for Fourier embeddings
-        include_linear: Whether to include linear component
-        linear_weight: Weight for linear component
         
     Returns:
         TimeEmbedding instance
     """
     if method == "fourier":
-        return FourierTimeEmbedding(
+        return LogFreqTimeEmbedding(
             embed_dim=embed_dim,
-            max_freq=max_freq,
-            include_linear=include_linear,
-            linear_weight=linear_weight
+            max_freq=max_freq
         )
     elif method == "simple":
-        return SimpleTimeEmbedding(
-            embed_dim=embed_dim,
-            max_freq=max_freq,
-            include_linear=include_linear,
-            linear_weight=linear_weight
+        return LinearTimeEmbedding(
+            embed_dim=embed_dim
+        )
+    elif method == "constant":
+        return ConstantTimeEmbedding(
+            embed_dim=embed_dim
         )
     else:
-        raise ValueError(f"Unknown method: {method}. Use 'fourier' or 'simple'")
+        raise ValueError(f"Unknown method: {method}. Use 'fourier', 'simple', or 'constant'")
 
 
 def fourier_time_embedding(t: Union[float, jnp.ndarray], 
                           embed_dim: int,
-                          max_freq: float = 10.0,
-                          include_linear: bool = True,
-                          linear_weight: float = 0.1) -> jnp.ndarray:
+                          max_freq: float = 10.0) -> jnp.ndarray:
     """
     Create Fourier time embedding directly without class instantiation.
     
@@ -182,17 +213,13 @@ def fourier_time_embedding(t: Union[float, jnp.ndarray],
         t: Time value(s) ∈ [0, 1]
         embed_dim: Dimension of the embedding
         max_freq: Maximum frequency
-        include_linear: Whether to include linear component
-        linear_weight: Weight for linear component
         
     Returns:
         Time embedding [embed_dim,] or [batch_size, embed_dim]
     """
-    embedding = FourierTimeEmbedding(
+    embedding = LogFreqTimeEmbedding(
         embed_dim=embed_dim,
-        max_freq=max_freq,
-        include_linear=include_linear,
-        linear_weight=linear_weight
+        max_freq=max_freq
     )
     return embedding(t)
 
@@ -209,7 +236,7 @@ def simple_time_embedding(t: Union[float, jnp.ndarray],
     Returns:
         Time embedding [embed_dim,] or [batch_size, embed_dim]
     """
-    embedding = SimpleTimeEmbedding(embed_dim=embed_dim)
+    embedding = LinearTimeEmbedding(embed_dim=embed_dim)
     return embedding(t)
 
 

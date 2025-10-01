@@ -19,7 +19,10 @@ from .eta_embedding import (
 
 from .time_embeddings import (
     TimeEmbedding,
-    FourierTimeEmbedding,
+    ConstantTimeEmbedding,
+    LinearTimeEmbedding,
+    CyclicalFourierTimeEmbedding,
+    LogFreqTimeEmbedding,
     create_time_embedding
 )
 
@@ -35,6 +38,9 @@ __all__ = [
     
     # Time embeddings
     'TimeEmbedding',
-    'FourierTimeEmbedding',
+    'ConstantTimeEmbedding',
+    'LinearTimeEmbedding',
+    'CyclicalFourierTimeEmbedding',
+    'LogFreqTimeEmbedding',
     'create_time_embedding'
 ]

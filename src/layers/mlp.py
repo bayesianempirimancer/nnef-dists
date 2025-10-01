@@ -25,13 +25,14 @@ class MLPLayer(nn.Module):
     dropout_rate: float = 0.0
     
     @nn.compact
-    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
         """
         Forward pass through MLP layer.
         
         Args:
             x: Input tensor [batch_size, input_dim]
             training: Whether in training mode
+            rngs: Random number generator keys for stochastic operations
             
         Returns:
             MLP output [batch_size, features]
@@ -74,13 +75,14 @@ class MLPBlock(nn.Module):
     dropout_rate: float = 0.0
     
     @nn.compact
-    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
         """
         Forward pass through MLP block.
         
         Args:
             x: Input tensor [batch_size, input_dim]
             training: Whether in training mode
+            rngs: Random number generator keys for stochastic operations
             
         Returns:
             MLP block output [batch_size, features[-1]]
@@ -94,7 +96,7 @@ class MLPBlock(nn.Module):
                 use_layer_norm=self.use_layer_norm,
                 dropout_rate=self.dropout_rate,
                 name=f'layer_{i}'
-            )(x, training=training)
+            )(x, training=training, rngs=rngs)
         
         return x
 

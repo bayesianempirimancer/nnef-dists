@@ -124,7 +124,7 @@ def make_predictions(model, params, eta_data: np.ndarray, batch_size: int = 100)
     
     for i in range(0, len(eta_data), batch_size):
         batch_eta = jnp.array(eta_data[i:i+batch_size])
-        batch_pred = model.apply(params, batch_eta, training=False)
+        batch_pred = model.predict(params, batch_eta)
         predictions.append(batch_pred)
     
     return jnp.concatenate(predictions, axis=0)

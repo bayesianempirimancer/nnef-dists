@@ -104,6 +104,12 @@ class Quadratic_ET_Network(nn.Module):
         """
         return self.__call__(eta, training=training, **kwargs)
     
+    def predict(self, params: dict, eta: jnp.ndarray, **kwargs) -> jnp.ndarray:
+        """
+        Make predictions (for trainer compatibility).
+        """
+        return self.apply(params, eta, training=False, **kwargs)
+    
     def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
                             predicted_mu: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         """

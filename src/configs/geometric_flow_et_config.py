@@ -27,7 +27,7 @@ class Geometric_Flow_ET_Config(BaseModelConfig):
     n_time_steps: int = 10  # Number of time steps for ODE integration
     smoothness_weight: float = 0.1  # Weight for smoothness penalty
     matrix_rank: Optional[int] = None  # Rank of the flow matrix (None = use eta_dim)
-    time_embed_dim: Optional[int] = None  # Time embedding dimension (None = use eta_dim)
+    time_embed_dim: Optional[int] = 4  # Time embedding dimension (default 4, None/0 = disable)
     
     # Network architecture parameters
     architecture: str = "mlp"  # "mlp" or "glu"
@@ -40,10 +40,10 @@ class Geometric_Flow_ET_Config(BaseModelConfig):
     embedding_type: Optional[str] = "default"
     
     # Regularization parameters
-    dropout_rate: float = 0.0  # Geometric flow doesn't use dropout by default
+    dropout_rate: float = 0.1  # Dropout rate for regularization
     
     # Model capabilities
-    supports_dropout: bool = False  # Geometric flow doesn't support dropout
+    supports_dropout: bool = True  # Geometric flow supports dropout
     supports_batch_norm: bool = False
     supports_layer_norm: bool = True
     
@@ -105,7 +105,9 @@ class Geometric_Flow_ET_Config(BaseModelConfig):
             'activation': self.activation,
             'use_layer_norm': self.use_layer_norm,
             'layer_norm_type': self.layer_norm_type,
-            'embedding_type': self.embedding_type
+            'embedding_type': self.embedding_type,
+            'dropout_rate': self.dropout_rate,
+            'supports_dropout': self.supports_dropout
         }
     
     @classmethod
@@ -144,7 +146,7 @@ def create_geometric_flow_et_config(
     n_time_steps: int = 10,
     smoothness_weight: float = 0.1,
     matrix_rank: Optional[int] = None,
-    time_embed_dim: Optional[int] = None,
+    time_embed_dim: Optional[int] = 4,
     architecture: str = "mlp",
     hidden_sizes: List[int] = [32, 32],
     activation: str = "swish",

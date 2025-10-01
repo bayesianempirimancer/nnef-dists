@@ -13,7 +13,7 @@ import flax.linen as nn
 from typing import Optional, Tuple, Callable
 from .mlp import MLPBlock
 from .concatsquash import ConcatSquash
-from ..embeddings.time_embeddings import SimpleTimeEmbedding
+from ..embeddings.time_embeddings import LogFreqTimeEmbedding
 
 class FlowFieldMLP(nn.Module):
     """
@@ -22,7 +22,7 @@ class FlowFieldMLP(nn.Module):
     dim: int
     features: [int, ...]
     t_embed_dim: int 
-    t_embedding_fn: Callable = SimpleTimeEmbedding
+    t_embedding_fn: Callable = LogFreqTimeEmbedding
     activation: Callable = nn.swish # because it is fun to say
     use_layer_norm: bool = False
     dropout_rate: float = 0.0
@@ -82,13 +82,13 @@ class FisherFlowFieldMLP(nn.Module):
     features: [int, ...]
     t_embed_dim: int 
     matrix_rank: Optional[int] = None
-    t_embedding_fn: Callable = SimpleTimeEmbedding
+    t_embedding_fn: Callable = LogFreqTimeEmbedding
     activation: Callable = nn.swish # because it is fun to say
     use_layer_norm: bool = False
     dropout_rate: float = 0.0
 
     @nn.compact
-    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: float, deta_dt: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: float, deta_dt: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
         """
         Compute Fisher flow field using an MLP network.
         
@@ -123,7 +123,7 @@ class FisherFlowFieldMLP(nn.Module):
                 use_layer_norm=self.use_layer_norm,
                 dropout_rate=self.dropout_rate
             )
-            output = mlp(output)
+            output = mlp(output, training=training, rngs=rngs)
             
         matrix_rank = self.dim if self.matrix_rank is None else self.matrix_rank
         
@@ -134,7 +134,9 @@ class FisherFlowFieldMLP(nn.Module):
         fisher_matrix = output @ output.mT  # Shape: (..., dim, dim)
         
         # Apply to deta_dt: F @ deta_dt
-        return fisher_matrix @ deta_dt[..., None]  # Shape: (..., dim, 1) -> (..., dim)
+        # Ensure deta_dt has the right shape for matrix multiplication
+        result = fisher_matrix @ deta_dt[..., None]  # Shape: (..., dim, 1)
+        return result.squeeze(-1)  # Shape: (..., dim)
  
 class GeodesicFlowFieldMLP(nn.Module):
     """
@@ -150,7 +152,7 @@ class GeodesicFlowFieldMLP(nn.Module):
     dim: int # the dimension of x so z.shape[-1] = dim + dim
     features: [int, ...]
     t_embed_dim: int
-    t_embedding_fn: Callable = SimpleTimeEmbedding
+    t_embedding_fn: Callable = LogFreqTimeEmbedding
     activation: Callable = nn.swish # because it is fun to say
     use_layer_norm: bool = False
     dropout_rate: float = 0.0

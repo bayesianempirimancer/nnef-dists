@@ -7,14 +7,14 @@ in the nnef-dists package, following Hugging Face conventions.
 
 # Import all configuration classes
 from .mlp_et_config import MLP_ET_Config
-from .base_config import BaseConfig
+# from .base_config import BaseConfig  # File doesn't exist
 from .base_training_config import BaseTrainingConfig
 from .base_model_config import BaseModelConfig
 
 # Public API
 __all__ = [
     "MLP_ET_Config",
-    "BaseConfig",
+    # "BaseConfig",  # File doesn't exist
     "BaseTrainingConfig",
     "BaseModelConfig",
 ]

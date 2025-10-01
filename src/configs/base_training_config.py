@@ -50,6 +50,7 @@ class BaseTrainingConfig:
     use_mini_batching: bool = True  # Whether to use mini-batching (False = process entire dataset at once)
     batch_size: int = 32
     random_batch_sampling: bool = True  # Whether to use random sampling (True) or sequential batching (False)
+    dropout_epochs: int = 0  # Number of epochs to use dropout (0 = no dropout)
     
     # === TRAINING MONITORING PARAMETERS ===
     eval_steps: int = 10  # Steps between evaluations
