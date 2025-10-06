@@ -14,6 +14,8 @@ import jax.numpy as jnp
 import flax.linen as nn
 from typing import Callable, Optional
 
+from numpy import False_
+
 
 class ConcatSquash(nn.Module):
     """
@@ -30,7 +32,7 @@ class ConcatSquash(nn.Module):
     """
     
     features: int
-    use_bias: bool = True
+    use_bias: bool = False_
     use_input_layer_norm: bool = False
     
     @nn.compact

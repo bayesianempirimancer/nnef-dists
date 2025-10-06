@@ -27,10 +27,10 @@ import jax.numpy as jnp
 import jax.random as random
 
 from src.configs.base_training_config import BaseTrainingConfig
-from src.configs.quadratic_et_config import Quadratic_ET_Config, create_quadratic_et_config, create_quadratic_training_config_from_args
+from src.configs.quadratic_et_config import Quadratic_ET_Config, create_quadratic_et_config
 from src.training.base_et_trainer import BaseETTrainer
 from src.models.quadratic_et_net import Quadratic_ET_Network
-from scripts.plotting.generate_plots import generate_plots
+from scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
 
 
 def load_training_data(data_path: str) -> tuple[Dict[str, Any], int, int]:
@@ -87,13 +87,19 @@ def create_configs_from_args(args, eta_dim: int, mu_dim: int) -> tuple[Quadratic
         if hasattr(args, attribute) and getattr(args, attribute) is not None:
             model_kwargs[attribute] = getattr(args, attribute)
     
-    # Note: hidden_sizes default comes from config class if not specified
+    # For required parameters that weren't provided via command line, use class defaults
+    if 'hidden_sizes' not in model_kwargs:
+        model_kwargs['hidden_sizes'] = [16]       # Class default
+    if 'use_quadratic_norm' not in model_kwargs:
+        model_kwargs['use_quadratic_norm'] = True # Class default
+    if 'num_resnet_blocks' not in model_kwargs:
+        model_kwargs['num_resnet_blocks'] = 5     # Class default
     
     # Create model configuration
     model_config = create_quadratic_et_config(**model_kwargs)
 
     # Create training config using the quadratic-specific method (defaults to RMSprop)
-    training_config = create_quadratic_training_config_from_args(args)
+    training_config = BaseETTrainer.create_training_config_from_args(args)
     
     return model_config, training_config
 
@@ -224,7 +230,11 @@ def main():
     if not args.no_plots:
         print("5. Generating plots...")
         plot_data_path = args.plot_data if args.plot_data else args.data
-        generate_plots(output_dir, plot_data_path)
+        # Generate enhanced learning curves plot
+        from scripts.load_model_and_data import load_model_and_data
+        config, results, data, model, params, metadata = load_model_and_data(str(output_dir), plot_data_path)
+        save_path = Path(output_dir) / "learning_errors_enhanced.png"
+        create_enhanced_learning_plot(config, results, data, model, params, metadata, save_path)
         print("✅ Training plots generated successfully!")
     else:
         print("5. Skipping plots (--no-plots specified)")

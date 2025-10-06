@@ -5,15 +5,16 @@ This module provides a Hugging Face compatible Geometric Flow ET model
 that learns flow dynamics for exponential families.
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 import jax.numpy as jnp
 import flax.linen as nn
+from .base_model import BaseETModel
 from ..configs.geometric_flow_et_config import Geometric_Flow_ET_Config
 from ..layers.flow_field_net import FisherFlowFieldMLP
 from ..utils.activation_utils import get_activation_function
-from ..embeddings.time_embeddings import SimpleTimeEmbedding, ConstantTimeEmbedding
+from ..embeddings.time_embeddings import LogFreqTimeEmbedding, ConstantTimeEmbedding
 
-class Geometric_Flow_ET_Network(nn.Module):
+class Geometric_Flow_ET_Network(BaseETModel[Geometric_Flow_ET_Config]):
     """
     Geometric Flow ET Network that learns flow dynamics for exponential families.
     
@@ -28,7 +29,7 @@ class Geometric_Flow_ET_Network(nn.Module):
     config: Geometric_Flow_ET_Config
 
     @nn.compact
-    def __call__(self, eta: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> jnp.ndarray:
+    def __call__(self, eta: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Geometric flow computation using inherited ET network architecture.
         
@@ -42,7 +43,6 @@ class Geometric_Flow_ET_Network(nn.Module):
         # Generate initial values
         eta_init, mu_init = self.generate_initial_values(eta)
         deta_dt = eta - eta_init
-        u = mu_init
         
         # Create Fisher flow field network ONCE (not in compute_flow_field)
         eta_dim = eta.shape[-1]
@@ -53,7 +53,14 @@ class Geometric_Flow_ET_Network(nn.Module):
             time_embedding_fn = lambda embed_dim: ConstantTimeEmbedding(embed_dim=embed_dim)
         else:
             time_embed_dim = min(self.config.time_embed_dim, 16)
-            time_embedding_fn = SimpleTimeEmbedding
+            # Ensure even dimension for log frequency embedding
+            if time_embed_dim % 2 != 0:
+                time_embed_dim += 1
+            time_embedding_fn = lambda embed_dim: LogFreqTimeEmbedding(
+                embed_dim=embed_dim,
+                min_freq=self.config.time_embed_min_freq,
+                max_freq=self.config.time_embed_max_freq
+            )
         
         # Get activation function
         activation_fn = get_activation_function(self.config.activation)
@@ -73,40 +80,45 @@ class Geometric_Flow_ET_Network(nn.Module):
         # Simple forward Euler integration
         dt = 1.0 / self.config.n_time_steps
         internal_loss = 0.0
+        u = mu_init
         for i in range(self.config.n_time_steps):
             t = i * dt
             # Use the shared fisher_flow network
             # Note: deta_dt should have the same batch shape as u and eta
-            du_dt = fisher_flow(u, eta, t, deta_dt, training=training, rngs=rngs)
+            du_dt = dt*fisher_flow(u, eta, t, deta_dt, training=training, rngs=rngs)
             # Forward Euler step
-            u = u + dt * du_dt            
+            u = u + du_dt            
             internal_loss += jnp.sum(du_dt ** 2, axis=-1)
+        # Return predictions and internal loss
+        internal_loss = jnp.array(0.0)  # For now, no internal loss
         return u, internal_loss
 
-    def loss_fn(self, params: dict, eta: jnp.ndarray, mu_T: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
-        """Legacy loss method - kept for backward compatibility."""
+    def loss(self, params: dict, eta: jnp.ndarray, mu_T: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
         mu_hat, internal_loss = self.apply(params, eta, training=training, rngs=rngs)
         primary_loss = jnp.mean((mu_hat - mu_T) ** 2)
-        smoothness_loss = jnp.mean(internal_loss)
-        return primary_loss + self.config.smoothness_weight * smoothness_loss
+        # For now, we'll compute internal loss separately if needed
+        # This maintains compatibility with the unified interface
+        return primary_loss
 
     def compute_internal_loss(self, params: dict, eta: jnp.ndarray, 
-                            predicted_mu: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+                            predicted_mu: jnp.ndarray) -> jnp.ndarray:
         """
-        Helper that just computes internal losses independently.  Not used.  
+        Helper that just computes internal losses independently.  Not used for training.  
         """
-        return 0.0
+        return self.apply(params, eta, training=False, rngs={})[1]
 
-    @nn.compact
-    def forward(self, eta: jnp.ndarray, training: bool = True, **kwargs) -> jnp.ndarray:
-        """
-        Forward pass (alias for __call__ for compatibility).
-        """
-        return self.__call__(eta, training=training, **kwargs)[0]  # Return only mu_hat, not internal_loss
-
-    def predict(self, params: dict, eta: jnp.ndarray, **kwargs) -> jnp.ndarray:
-        return self.apply(params, eta, training=False, **kwargs)[0]
-
+    def predict(self, params: dict, eta: jnp.ndarray, rngs: dict = None, **kwargs) -> jnp.ndarray:
+        if rngs is None:
+            rngs = {}
+        predictions, _ = self.apply(params, eta, training=False, rngs=rngs, **kwargs)
+        return predictions
+    
+    @classmethod
+    def from_pretrained(cls, model_name_or_path: str, **kwargs):
+        """Load model from pretrained configuration."""
+        config = Geometric_Flow_ET_Config.from_pretrained(model_name_or_path)
+        return cls.from_config(config, **kwargs)
+    
     def generate_initial_values(self, eta: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         # Get the exponential family distribution from config
         dist = self.config.get_ef_distribution()

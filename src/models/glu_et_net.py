@@ -1,8 +1,9 @@
 """
-Hugging Face compatible GLU ET model implementation.
+Unified GLU ET model implementation.
 
-This module provides a Hugging Face compatible GLU-based ET model
-for directly predicting expected sufficient statistics from natural parameters.
+This module provides a self-contained GLU-based ET model that implements
+the unified interface for directly predicting expected sufficient statistics
+from natural parameters.
 """
 
 import jax
@@ -11,6 +12,7 @@ import flax.linen as nn
 from typing import Dict, Any, Tuple, Optional, Union, List
 from flax.core import FrozenDict
 
+from .base_model import BaseETModel
 from ..configs.glu_et_config import GLU_ET_Config
 from ..layers.glu import GLUBlock
 from ..layers.resnet_wrapper import ResNetWrapper
@@ -18,7 +20,7 @@ from ..embeddings.eta_embedding import EtaEmbedding
 from ..utils.activation_utils import get_activation_function
 
 
-class GLU_ET_Network(nn.Module):
+class GLU_ET_Network(BaseETModel[GLU_ET_Config]):
     """
     Hugging Face compatible GLU-based ET Network.
     
@@ -31,7 +33,7 @@ class GLU_ET_Network(nn.Module):
     config: GLU_ET_Config
     
     @nn.compact
-    def __call__(self, eta: jnp.ndarray, training: bool = True, **kwargs) -> jnp.ndarray:
+    def __call__(self, eta: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Forward pass through the GLU ET network.
         
@@ -99,21 +101,31 @@ class GLU_ET_Network(nn.Module):
         
         # Final projection to expected statistics
         x = nn.Dense(self.config.output_dim, name='et_output')(x)
-        return x  # Return (batch_size, output_dim) shape
-    
-    def forward(self, eta: jnp.ndarray, training: bool = True, **kwargs) -> jnp.ndarray:
-        """
-        Forward pass (alias for __call__ for compatibility).
-        """
-        return self.__call__(eta, training=training, **kwargs)
-    
-    def loss_fn(self, params: Dict, eta: jnp.ndarray, targets: jnp.ndarray, 
-                training: bool = True, rngs: dict = None) -> jnp.ndarray:
-        """
-        Compute model-specific loss function.
         
-        This method is called by the trainer when loss_function='model_specific'.
-        It should compute the loss in a single forward pass for efficiency.
+        # Return predictions and internal loss (usually 0.0 for standard models)
+        internal_loss = jnp.array(0.0)
+        return x, internal_loss
+    
+    def predict(self, params: Dict, eta: jnp.ndarray, rngs: dict = None, **kwargs) -> jnp.ndarray:
+        """
+        Make predictions using the model.
+        
+        Args:
+            params: Model parameters
+            eta: Natural parameters of shape (batch_size, eta_dim)
+            rngs: Random number generator keys for stochastic operations
+            **kwargs: Additional arguments
+            
+        Returns:
+            Predicted expected sufficient statistics of shape (batch_size, output_dim)
+        """
+        predictions, _ = self.apply(params, eta, training=False, rngs=rngs, **kwargs)
+        return predictions
+    
+    def loss(self, params: Dict, eta: jnp.ndarray, targets: jnp.ndarray, 
+             training: bool = True, rngs: dict = None, **kwargs) -> jnp.ndarray:
+        """
+        Compute training loss.
         
         Args:
             params: Model parameters
@@ -121,128 +133,24 @@ class GLU_ET_Network(nn.Module):
             targets: Target expected sufficient statistics of shape (batch_size, output_dim)
             training: Whether in training mode
             rngs: Random number generator keys for stochastic operations
+            **kwargs: Additional arguments
             
         Returns:
             Loss value (scalar)
         """
-        # Forward pass to get predictions
-        predictions = self.apply(params, eta, training=training, rngs=rngs)
+        predictions, internal_loss = self.apply(params, eta, training=training, rngs=rngs, **kwargs)
         
         # Primary loss (MSE)
         primary_loss = jnp.mean((predictions - targets) ** 2)
-        
-        # Internal loss (e.g., smoothness penalties, regularization)
-        internal_loss = self.compute_internal_loss(params, eta, predictions, training=training)
         
         # Total loss
         total_loss = primary_loss + internal_loss
         
         return total_loss
-        
-    def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
-                            predicted_mu: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        """
-        Compute internal losses (e.g., smoothness penalties, regularization).
-        
-        Args:
-            params: Model parameters
-            eta: Natural parameters
-            predicted_mu: Predicted expected sufficient statistics
-            training: Whether in training mode
-            
-        Returns:
-            Internal loss value
-        """
-        return 0.0
-    
-    @classmethod
-    def from_config(cls, config: GLU_ET_Config, **kwargs):
-        """
-        Create model from configuration.
-        
-        Args:
-            config: Model configuration
-            **kwargs: Additional arguments
-            
-        Returns:
-            Initialized model
-        """
-        return cls(config=config, **kwargs)
-    
-    def save_pretrained(self, save_directory: str, params: Optional[Dict] = None):
-        """
-        Save model and configuration to directory.
-        
-        Args:
-            save_directory: Directory to save to
-            params: Model parameters to save
-        """
-        import os
-        import pickle
-        
-        os.makedirs(save_directory, exist_ok=True)
-        
-        # Save configuration
-        self.config.save_pretrained(save_directory)
-        
-        # Save model parameters if provided
-        if params is not None:
-            params_path = os.path.join(save_directory, "model_params.pkl")
-            with open(params_path, "wb") as f:
-                pickle.dump(params, f)
     
     @classmethod
     def from_pretrained(cls, model_name_or_path: str, **kwargs):
-        """
-        Load model from directory or model name.
-        
-        Args:
-            model_name_or_path: Path to model directory or model name
-            **kwargs: Additional arguments
-            
-        Returns:
-            Model instance (without parameters)
-        """
-        # Load configuration
+        """Load model from pretrained configuration."""
         config = GLU_ET_Config.from_pretrained(model_name_or_path)
-        
-        # Create model from config
-        model = cls.from_config(config, **kwargs)
-        
-        return model
+        return cls.from_config(config, **kwargs)
     
-    def get_config(self) -> GLU_ET_Config:
-        """Get model configuration."""
-        return self.config
-    
-    def get_input_embeddings(self):
-        """Get input embeddings (for HF compatibility)."""
-        return None  # This model doesn't use embeddings
-    
-    def set_input_embeddings(self, value):
-        """Set input embeddings (for HF compatibility)."""
-        pass  # This model doesn't use embeddings
-    
-    def get_output_embeddings(self):
-        """Get output embeddings (for HF compatibility)."""
-        return None  # This model doesn't use embeddings in the HF sense
-    
-    def set_output_embeddings(self, new_embeddings):
-        """Set output embeddings (for HF compatibility)."""
-        pass  # Not applicable for this model
-    
-    def resize_token_embeddings(self, new_num_tokens: Optional[int] = None):
-        """Resize token embeddings (for HF compatibility)."""
-        return self.get_output_embeddings()
-    
-    def tie_weights(self):
-        """Tie weights (for HF compatibility)."""
-        pass  # Not applicable for this model
-    
-    def init_weights(self, rng: jax.random.PRNGKey):
-        """Initialize model weights."""
-        pass  # This is handled by Flax's initialization
-    
-    def _init_weights(self, module):
-        """Initialize weights for a module (for HF compatibility)."""
-        pass  # This is handled by Flax's initialization

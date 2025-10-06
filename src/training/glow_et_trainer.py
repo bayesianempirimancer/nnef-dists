@@ -30,7 +30,7 @@ from src.configs.base_training_config import BaseTrainingConfig
 from src.configs.glow_et_config import Glow_ET_Config, create_glow_et_config
 from src.training.base_et_trainer import BaseETTrainer
 from src.models.glow_et_net import Glow_ET_Network
-from scripts.plotting.generate_plots import generate_plots
+from scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
 
 
 def load_training_data(data_path: str) -> tuple[Dict[str, Any], int, int]:
@@ -85,6 +85,14 @@ def create_configs_from_args(args, eta_dim: int, mu_dim: int) -> tuple[Glow_ET_C
     for attribute in model_attributes:
         if hasattr(args, attribute) and getattr(args, attribute) is not None:
             model_kwargs[attribute] = getattr(args, attribute)
+    
+    # For required parameters that weren't provided via command line, use class defaults
+    if 'num_flow_layers' not in model_kwargs:
+        model_kwargs['num_flow_layers'] = 8  # Class default
+    if 'features' not in model_kwargs:
+        model_kwargs['features'] = [32, 32]  # Class default (updated to two layers)
+    if 'activation' not in model_kwargs:
+        model_kwargs['activation'] = "swish" # Class default
     
     # Create model configuration
     model_config = create_glow_et_config(**model_kwargs)
@@ -221,7 +229,11 @@ def main():
     if not args.no_plots:
         print("5. Generating plots...")
         plot_data_path = args.plot_data if args.plot_data else args.data
-        generate_plots(output_dir, plot_data_path)
+        # Generate enhanced learning curves plot
+        from scripts.load_model_and_data import load_model_and_data
+        config, results, data, model, params, metadata = load_model_and_data(str(output_dir), plot_data_path)
+        save_path = Path(output_dir) / "learning_errors_enhanced.png"
+        create_enhanced_learning_plot(config, results, data, model, params, metadata, save_path)
         print("✅ Training plots generated successfully!")
     else:
         print("5. Skipping plots (--no-plots specified)")

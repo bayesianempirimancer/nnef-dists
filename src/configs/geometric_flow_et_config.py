@@ -20,21 +20,23 @@ class Geometric_Flow_ET_Config(BaseModelConfig):
     """
     model_type: str = "geometric_flow_et"
     model_name: str = "geometric_flow_et_network"
-    input_dim: int = 4
-    output_dim: int = 4
+    input_dim: int = 0  # Must be set by caller based on actual data
+    output_dim: int = 0  # Must be set by caller based on actual data
     
     # Geometric flow specific parameters
     n_time_steps: int = 10  # Number of time steps for ODE integration
-    smoothness_weight: float = 0.1  # Weight for smoothness penalty
+    smoothness_weight: float = 0.0  # Weight for smoothness penalty
     matrix_rank: Optional[int] = None  # Rank of the flow matrix (None = use eta_dim)
-    time_embed_dim: Optional[int] = 4  # Time embedding dimension (default 4, None/0 = disable)
+    time_embed_dim: Optional[int] = 6  # Time embedding dimension (default 6, None/0 = disable)
+    time_embed_min_freq: float = 0.25  # Minimum frequency for log frequency time embedding
+    time_embed_max_freq: float = 4.0  # Maximum frequency for log frequency time embedding
     
     # Network architecture parameters
     architecture: str = "mlp"  # "mlp" or "glu"
-    hidden_sizes: List[int] = field(default_factory=lambda: [32, 32])  # Hidden layer sizes
+    hidden_sizes: List[int] = field(default_factory=lambda: [32, 32, 32])  # Hidden layer sizes
     activation: str = "swish"  # Activation function
     use_layer_norm: bool = False  # Whether to use layer normalization (deprecated, use layer_norm_type)
-    layer_norm_type: str = "weak_layer_norm"  # Type of layer normalization to use
+    layer_norm_type: str = "weak_layer_norm"  # Type of layer normalization to use (None, weak_layer_norm, rms_norm, group_norm, instance_norm, weight_norm, spectral_norm, adaptive_norm, pre_norm, post_norm)
     
     # Embedding parameters
     embedding_type: Optional[str] = "default"
@@ -82,6 +84,10 @@ class Geometric_Flow_ET_Config(BaseModelConfig):
         # Geometric flow specific validation is handled in __post_init__
         pass
     
+    def disable_temporal_embedding(self) -> None:
+        """Disable temporal embedding by setting time_embed_dim to 1."""
+        self.time_embed_dim = 1
+    
     def get_architecture_summary(self) -> str:
         """Get a summary of the model architecture."""
         hidden_str = " -> ".join(map(str, self.hidden_sizes))
@@ -100,6 +106,8 @@ class Geometric_Flow_ET_Config(BaseModelConfig):
             'smoothness_weight': self.smoothness_weight,
             'matrix_rank': self.matrix_rank,
             'time_embed_dim': self.time_embed_dim,
+            'time_embed_min_freq': self.time_embed_min_freq,
+            'time_embed_max_freq': self.time_embed_max_freq,
             'architecture': self.architecture,
             'hidden_sizes': self.hidden_sizes,
             'activation': self.activation,
@@ -146,7 +154,9 @@ def create_geometric_flow_et_config(
     n_time_steps: int = 10,
     smoothness_weight: float = 0.1,
     matrix_rank: Optional[int] = None,
-    time_embed_dim: Optional[int] = 4,
+    time_embed_dim: Optional[int] = 6,
+    time_embed_min_freq: float = 0.25,
+    time_embed_max_freq: float = 1.0,
     architecture: str = "mlp",
     hidden_sizes: List[int] = [32, 32],
     activation: str = "swish",
@@ -164,7 +174,9 @@ def create_geometric_flow_et_config(
         n_time_steps: Number of time steps for ODE integration
         smoothness_weight: Weight for smoothness penalty
         matrix_rank: Rank of the flow matrix (None = use eta_dim)
-        time_embed_dim: Time embedding dimension (None = use eta_dim)
+        time_embed_dim: Time embedding dimension (default 6, None/0 = disable)
+        time_embed_min_freq: Minimum frequency for log frequency time embedding (default 0.25)
+        time_embed_max_freq: Maximum frequency for log frequency time embedding (default 1.0)
         architecture: Network architecture ("mlp" or "glu")
         hidden_sizes: Hidden layer sizes
         activation: Activation function
@@ -179,13 +191,15 @@ def create_geometric_flow_et_config(
     if hidden_sizes is None:
         raise ValueError("hidden_sizes cannot be None")
     
-    return Geometric_Flow_ET_Config(
+    config = Geometric_Flow_ET_Config(
         input_dim=input_dim,
         output_dim=output_dim,
         n_time_steps=n_time_steps,
         smoothness_weight=smoothness_weight,
         matrix_rank=matrix_rank,
         time_embed_dim=time_embed_dim,
+        time_embed_min_freq=time_embed_min_freq,
+        time_embed_max_freq=time_embed_max_freq,
         architecture=architecture,
         hidden_sizes=hidden_sizes,
         activation=activation,
@@ -194,3 +208,5 @@ def create_geometric_flow_et_config(
         embedding_type=embedding_type,
         **kwargs
     )
+    
+    return config

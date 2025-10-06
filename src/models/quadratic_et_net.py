@@ -11,6 +11,7 @@ import flax.linen as nn
 from typing import Dict, Any, Tuple, Optional, Union, List
 from flax.core import FrozenDict
 
+from .base_model import BaseETModel
 from ..configs.quadratic_et_config import Quadratic_ET_Config
 from ..layers.quadratic import QuadraticProjectionBlock
 from ..layers.resnet_wrapper import ResNetWrapper
@@ -18,7 +19,7 @@ from ..embeddings.eta_embedding import EtaEmbedding
 from ..utils.activation_utils import get_activation_function
 
 
-class Quadratic_ET_Network(nn.Module):
+class Quadratic_ET_Network(BaseETModel[Quadratic_ET_Config]):
     """
     Hugging Face compatible Quadratic ET Network.
     
@@ -31,7 +32,7 @@ class Quadratic_ET_Network(nn.Module):
     config: Quadratic_ET_Config
     
     @nn.compact
-    def __call__(self, eta: jnp.ndarray, training: bool = True, **kwargs) -> jnp.ndarray:
+    def __call__(self, eta: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Forward pass through the Quadratic ET network.
         
@@ -96,124 +97,47 @@ class Quadratic_ET_Network(nn.Module):
             x = quadratic_block(x, training=training)
         # Final projection to expected statistics
         x = nn.Dense(self.config.output_dim, name='et_output')(x)
-        return x  # Return (batch_size, output_dim) shape
+        
+        # Return predictions and internal loss (usually 0.0 for standard models)
+        internal_loss = jnp.array(0.0)
+        return x, internal_loss
     
-    def forward(self, eta: jnp.ndarray, training: bool = True, **kwargs) -> jnp.ndarray:
-        """
-        Forward pass (alias for __call__ for HF compatibility).
-        """
-        return self.__call__(eta, training=training, **kwargs)
-    
-    def predict(self, params: dict, eta: jnp.ndarray, **kwargs) -> jnp.ndarray:
+    def predict(self, params: dict, eta: jnp.ndarray, rngs: dict = None, **kwargs) -> jnp.ndarray:
         """
         Make predictions (for trainer compatibility).
         """
-        return self.apply(params, eta, training=False, **kwargs)
+        predictions, _ = self.apply(params, eta, training=False, rngs=rngs, **kwargs)
+        return predictions
     
-    def compute_internal_loss(self, params: Dict, eta: jnp.ndarray, 
-                            predicted_mu: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def loss(self, params: Dict, eta: jnp.ndarray, targets: jnp.ndarray, 
+             training: bool = True, rngs: dict = None, **kwargs) -> jnp.ndarray:
         """
-        Compute internal losses (e.g., smoothness penalties, regularization).
+        Compute training loss.
         
         Args:
             params: Model parameters
-            eta: Natural parameters
-            predicted_mu: Predicted expected sufficient statistics
+            eta: Natural parameters of shape (batch_size, input_dim)
+            targets: Target expected sufficient statistics of shape (batch_size, output_dim)
             training: Whether in training mode
-            
-        Returns:
-            Internal loss value
-        """
-        return 0.0
-    
-    @classmethod
-    def from_config(cls, config: Quadratic_ET_Config, **kwargs):
-        """
-        Create model from configuration.
-        
-        Args:
-            config: Model configuration
+            rngs: Random number generator keys for stochastic operations
             **kwargs: Additional arguments
             
         Returns:
-            Initialized model
+            Loss value (scalar)
         """
-        return cls(config=config, **kwargs)
-    
-    def save_pretrained(self, save_directory: str, params: Optional[Dict] = None):
-        """
-        Save model and configuration to directory.
+        predictions, internal_loss = self.apply(params, eta, training=training, rngs=rngs, **kwargs)
         
-        Args:
-            save_directory: Directory to save to
-            params: Model parameters to save
-        """
-        import os
-        import pickle
+        # Primary loss (MSE)
+        primary_loss = jnp.mean((predictions - targets) ** 2)
         
-        os.makedirs(save_directory, exist_ok=True)
+        # Total loss
+        total_loss = primary_loss + internal_loss
         
-        # Save configuration
-        self.config.save_pretrained(save_directory)
-        
-        # Save model parameters if provided
-        if params is not None:
-            params_path = os.path.join(save_directory, "model_params.pkl")
-            with open(params_path, "wb") as f:
-                pickle.dump(params, f)
+        return total_loss
     
     @classmethod
     def from_pretrained(cls, model_name_or_path: str, **kwargs):
-        """
-        Load model from directory or model name.
-        
-        Args:
-            model_name_or_path: Path to model directory or model name
-            **kwargs: Additional arguments
-            
-        Returns:
-            Model instance (without parameters)
-        """
-        # Load configuration
+        """Load model from pretrained configuration."""
         config = Quadratic_ET_Config.from_pretrained(model_name_or_path)
-        
-        # Create model from config
-        model = cls.from_config(config, **kwargs)
-        
-        return model
+        return cls.from_config(config, **kwargs)
     
-    def get_config(self) -> Quadratic_ET_Config:
-        """Get model configuration."""
-        return self.config
-    
-    def get_input_embeddings(self):
-        """Get input embeddings (for HF compatibility)."""
-        return None  # This model doesn't use embeddings
-    
-    def set_input_embeddings(self, value):
-        """Set input embeddings (for HF compatibility)."""
-        pass  # This model doesn't use embeddings
-    
-    def get_output_embeddings(self):
-        """Get output embeddings (for HF compatibility)."""
-        return None  # This model doesn't use embeddings in the HF sense
-    
-    def set_output_embeddings(self, new_embeddings):
-        """Set output embeddings (for HF compatibility)."""
-        pass  # Not applicable for this model
-    
-    def resize_token_embeddings(self, new_num_tokens: Optional[int] = None):
-        """Resize token embeddings (for HF compatibility)."""
-        return self.get_output_embeddings()
-    
-    def tie_weights(self):
-        """Tie weights (for HF compatibility)."""
-        pass  # Not applicable for this model
-    
-    def init_weights(self, rng: jax.random.PRNGKey):
-        """Initialize model weights."""
-        pass  # This is handled by Flax's initialization
-    
-    def _init_weights(self, module):
-        """Initialize weights for a module (for HF compatibility)."""
-        pass  # This is handled by Flax's initialization

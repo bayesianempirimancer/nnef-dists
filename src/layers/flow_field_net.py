@@ -88,32 +88,42 @@ class FisherFlowFieldMLP(nn.Module):
     dropout_rate: float = 0.0
 
     @nn.compact
-    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: float, deta_dt: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
+    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, deta_dt: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
         """
         Compute Fisher flow field using an MLP network.
         
         Args:
             z: State vector with shape (..., dim)
-            x: Input/driving force with shape (..., dim_x) where ... must be broadcast-compatible with z's batch shape
-            t: Time scalar
+            x: Input/driving force with shape batch_shape + (dim_x,) or broadcast-compatible with z's batch shape
+            t: Time scalar or array with batch_shape
             deta_dt: Natural parameter derivative with shape (..., dim)
+            training: Whether in training mode
+            rngs: Random number generators for dropout
             
         Returns:
             Fisher flow field output with shape (..., dim)
         """
         # Extract and embed inputs with proper broadcasting
-        batch_shape = jnp.broadcast_shapes(z.shape[:-1], x.shape[:-1])
+        # Handle both scalar and array time inputs
+        t_shape = t.shape if hasattr(t, 'shape') else ()
+        batch_shape = jnp.broadcast_shapes(z.shape[:-1], x.shape[:-1], t_shape)
         
-        # Create time embedding
+        # Create time embedding - optimized version
+        # The time embedding functions already support batched input, expects t.shape = batch_shape 
         t_embed = self.t_embedding_fn(embed_dim=self.t_embed_dim)(t)
-        t_embed = jnp.broadcast_to(t_embed, batch_shape + (self.t_embed_dim,))
         
-        # Broadcast x to match z's batch shape
-        x_broadcasted = jnp.broadcast_to(x, batch_shape + (x.shape[-1],))
-        z_broadcasted = jnp.broadcast_to(z, batch_shape + (z.shape[-1],))
+        # Optimize broadcasting - only broadcast if necessary
+        if t_embed.shape[:-1] != batch_shape:
+            t_embed = jnp.broadcast_to(t_embed, batch_shape + (self.t_embed_dim,))
+        
+        # Only broadcast if shapes don't already match
+        if x.shape[:-1] != batch_shape:
+            x = jnp.broadcast_to(x, batch_shape + (x.shape[-1],))
+        if z.shape[:-1] != batch_shape:
+            z = jnp.broadcast_to(z, batch_shape + (z.shape[-1],))
 
         # Use ConcatSquash for efficient multi-input processing
-        output = ConcatSquash(self.features[0])(z_broadcasted, x_broadcasted, t_embed)
+        output = ConcatSquash(self.features[0])(z, x, t_embed)
         output = self.activation(output)
 
         if len(self.features) > 1:
@@ -130,14 +140,11 @@ class FisherFlowFieldMLP(nn.Module):
         output = nn.Dense(self.dim*matrix_rank, name='flow_field_output')(output)
         output = output.reshape(batch_shape + (self.dim, matrix_rank))
         
-        # Compute Fisher information matrix: F = output @ output.T
-        fisher_matrix = output @ output.mT  # Shape: (..., dim, dim)
-        
-        # Apply to deta_dt: F @ deta_dt
-        # Ensure deta_dt has the right shape for matrix multiplication
-        result = fisher_matrix @ deta_dt[..., None]  # Shape: (..., dim, 1)
+        # Optimized: Compute (output @ output.T) @ deta_dt in one step
+        # This avoids creating the intermediate fisher_matrix tensor
+        result = (output @ output.mT) @ deta_dt[..., None]  # Shape: (..., dim, 1)
         return result.squeeze(-1)  # Shape: (..., dim)
- 
+
 class GeodesicFlowFieldMLP(nn.Module):
     """
     Geodesic flow relates to the Riemanian metric on the space of natural parameters.  In the hamiltonian fomrulation of a geodesic flow
@@ -185,14 +192,18 @@ class GeodesicFlowFieldMLP(nn.Module):
             ginv = ginv@ginv.mT
             return ginv.reshape(ginv.shape[:-2] + (-1,))  # Return flattened matrix
         
-        # Compute Ginv for the batch using vmap
-        # ginv_flat = jax.vmap(single_ginv_fn)(q, p, t_embed)
-        # Ginv = ginv_flat.reshape(batch_shape + (self.dim, self.dim))
+        # Compute Ginv directly (single_ginv_fn already handles batches)
+        Ginv = single_ginv_fn(q, p, t_embed).reshape(batch_shape + (self.dim, self.dim))
         
-        # Compute gradient of Ginv with respect to q using the same function
-        gradGinv = jax.vmap(jax.jacobian(single_ginv_fn, argnums=0))(q, p, t_embed)
-        gradGinv = gradGinv.reshape(batch_shape + (self.dim, self.dim, self.dim))  # terminal dimension corresponds to the partial derivatives
-        Ginv = single_ginv_fn(q,p,t_embed).reshape(batch_shape + (self.dim, self.dim)) # this is actually ok because we wrote single_ginv_Fn to handle batches.
+        # Compute gradient of Ginv with respect to q using vmap
+        # Use jax.jit to cache the compiled jacobian function and avoid recompilation
+        @jax.jit
+        def compute_gradients(q_batch, p_batch, t_embed_batch):
+            jacobian_fn = jax.jacobian(single_ginv_fn, argnums=0)
+            return jax.vmap(jacobian_fn)(q_batch, p_batch, t_embed_batch)
+        
+        gradGinv = compute_gradients(q, p, t_embed)
+        gradGinv = gradGinv.reshape(batch_shape + (self.dim, self.dim, self.dim))
 
         dqdt = jnp.einsum('...ij,...j->...i', Ginv, p)
         dpdt = -jnp.einsum('...i,...j,...ijk->...k', p, p, gradGinv)

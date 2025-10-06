@@ -30,7 +30,7 @@ from src.configs.base_training_config import BaseTrainingConfig
 from src.configs.mlp_et_config import MLP_ET_Config, create_mlp_et_config
 from src.training.base_et_trainer import BaseETTrainer
 from src.models.mlp_et_net import MLP_ET_Network
-from scripts.plotting.generate_plots import generate_plots
+from scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
 
 
 def load_training_data(data_path: str) -> tuple[Dict[str, Any], int, int]:
@@ -85,6 +85,16 @@ def create_configs_from_args(args, eta_dim: int, mu_dim: int) -> tuple[MLP_ET_Co
     for attribute in model_attributes:
         if hasattr(args, attribute) and getattr(args, attribute) is not None:
             model_kwargs[attribute] = getattr(args, attribute)
+    
+    # For required parameters that weren't provided via command line, use class defaults
+    if 'hidden_sizes' not in model_kwargs:
+        model_kwargs['hidden_sizes'] = [32, 32]  # Class default
+    if 'activation' not in model_kwargs:
+        model_kwargs['activation'] = "swish"     # Class default
+    if 'use_resnet' not in model_kwargs:
+        model_kwargs['use_resnet'] = True        # Class default
+    if 'num_resnet_blocks' not in model_kwargs:
+        model_kwargs['num_resnet_blocks'] = 3    # Class default
     
     # Create model configuration
     model_config = create_mlp_et_config(**model_kwargs)
@@ -241,7 +251,11 @@ Examples:
     # Generate plots (default to True unless --no-plots is used)
     if not args.no_plots:
         print("5. Generating plots...")
-        generate_plots(output_dir, args.data)
+        # Generate enhanced learning curves plot
+        from scripts.load_model_and_data import load_model_and_data
+        config, results, data, model, params, metadata = load_model_and_data(str(output_dir), args.data)
+        save_path = Path(output_dir) / "learning_errors_enhanced.png"
+        create_enhanced_learning_plot(config, results, data, model, params, metadata, save_path)
     else:
         print("5. Skipping plot generation (explicitly disabled)")
     

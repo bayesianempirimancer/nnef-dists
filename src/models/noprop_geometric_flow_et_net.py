@@ -16,107 +16,120 @@ from ..layers.normalization import get_normalization_layer
 from ..layers.flow_field_net import FisherFlowFieldMLP
 from ..embeddings.time_embeddings import LogFreqTimeEmbedding, ConstantTimeEmbedding
 
+# JIT compilation removed for debugging
+
 
 class NoProp_Geometric_Flow_ET_Network(nn.Module):
     """
     NoProp Geometric Flow ET Network that learns flow dynamics using NoProp training.
     
-    This network learns the geometric flow dynamics:
-        du/dt = A(u, t, η_t) @ A(u, t, η_t)^T @ (η_target - η_init)
+    This network learns the flow dynamics:
+        du/dt = F(z, η, t)
     
-    where A is learned using NoProp continuous-time training protocols.
+    where F is learned using NoProp continuous-time training protocols.  Moreover, because 
+    this is a denoising/diffusion-like model we do not require precise initial conditions 
+    for the dynamics.  Conceptually, this is like starting with a flat distribution 
+    and denoising to one associated with the natural parameter η.  
     
     Key differences from regular geometric flow:
     - __call__ doesn't integrate over time (for training)
     - predict integrates over time (for inference)
     - Includes NoProp-specific noise schedules and loss functions
+    - du/dt is a direct function of (z, η, t) without deta_dt dependency
+    - no need to generate initial values and so works with any ef distribution specified solely by T(x)
     """
     config: NoProp_Geometric_Flow_ET_Config
     
-    def generate_initial_values(self, eta: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """
-        Generate eta_init and mu_init from eta using the exponential family distribution.
-        
-        Args:
-            eta: Target natural parameters [batch_shape, eta_dim]
-            
-        Returns:
-            Tuple of (eta_init, mu_init):
-                - eta_init: Initial natural parameters [batch_shape, eta_dim]
-                - mu_init: Initial expectations [batch_shape, mu_dim]
-        """
-        # Get the exponential family distribution from config
-        dist = self.config.get_ef_distribution()
-        eta_init, mu_init = dist.find_nearest_analytical_point(eta)
-        return eta_init, mu_init
+
+    #########################################################
+    # Noise and SNR scheduling functions.  In principle these are learnable but are fixed for now.
+    # Required functions are gamma, gamma_prime, alpha_bar, snr, snr_prime, added_noise
+    #########################################################
+    '''
+    In the original noprop paper, the authors parameterized SNR directly via a real valued gamma(t) so that
+    SNR(t) = exp(-gamma(t)), where gamma(t) is a real value decreasing function.  Here we choose a different
+    parameterization that seem more consistent with the continuous time formulation.  Specifically, we define
+    delta(t)dt to be the variance of the weiner process noise added during the backward proccess.  
+    In terms of the original no-prop paper this is equivalent to defining 1-alpha(t) = dt*delta(t) and 
+    1-alpha_bar(t) = Delta(t) = Delta(T=1) + int_t^T delta(t)dt which imlies alpha_bar_prime(t) = delta(t).  
+    This parameterization is easier to constrain in a manner that is consistent with the continuous time formulation.
+    For example, The cumulative noise added to the backward process from t = 1 to t = 0, should be Delta(0) = 1.0.  
+    This suggests the parameterization Delta(t) = exp(-gamma(t)) where gamma(0) = 0 and gamma(t) is an increasing function, 
+    terminating at gamma(1) = -log(Delta(1)) > 0.  
+    This lead to the following identities
+
+        Delta(t) = exp(-gamma(t))
+        1-alpha_bar(t) = Delta(t) 
+        1-alpha(t) = -Delta'(t)dt = gamma'(t)exp(-gamma(t)) dt 
+        SNR(t) = alpha_bar(t)/(1-alpha_bar(t)) = (1-Delta(t))/Delta(t) = exp(gamma(t)) - 1
+        SNR'(t) = gamma'(t)exp(gamma(t))
+
+    With forward prcess identities a,b,c for mu_t = a(t) u_net(z(t-dt), x , t) + b(t) z(t-dt) + c(t) noise, given by 
+       a(t) = -sqrt(1-Delta(t))/Delta(t)*Delta'(t) * dt  = sqrt(1-Delta(t)) * gamma'(t) dt
+       b(t) = 1 + 1/2*Delta'(t) * dt + Delta'(t)/Delta(t) dt   = 1 - gamma'(t) (Delta(t)/2 + 1) dt  
+       c(t) =     ...
+
+    '''
+
+    def gamma_prime(self, gamma_rate: jnp.ndarray) -> jnp.ndarray:  # positive valued function so that gamma is increasing.
+        return nn.softplus(gamma_rate)
+
+    def gamma(self, t: jnp.ndarray, gamma_rate: jnp.ndarray) -> jnp.ndarray:
+        return self.gamma_prime(gamma_rate) * t
+
+    def Delta(self, t: jnp.ndarray, gamma_rate: jnp.ndarray) -> jnp.ndarray:
+#        return jnp.exp(-self.gamma(t, gamma_rate))
+        return 1.0-t
+
+    def Delta_prime(self, t: jnp.ndarray, gamma_rate: jnp.ndarray) -> jnp.ndarray:
+#        return -self.gamma_prime(gamma_rate) * jnp.exp(-self.gamma(t, gamma_rate))
+        return -1.0
+
+    def SNR(self, t: jnp.ndarray, gamma_rate: jnp.ndarray) -> jnp.ndarray:
+#        return jnp.exp(self.gamma(t, gamma_rate)) - 1.0
+        return 1.0/self.Delta(t, gamma_rate)-1
     
-    def get_gamma_at_time(self, t: float) -> float:
-        """Get γ(t) at continuous time t ∈ [0, 1]."""
-        if self.config.noise_schedule == "noprop_ct":
-            return jnp.array(t)
-        elif self.config.noise_schedule == "flow_matching":
-            return jnp.array(0.0)  # Not directly used in flow matching
-        else:
-            raise ValueError(f"Unknown noise schedule: {self.config.noise_schedule}")
-    
-    def get_noise_at_time(self, t: float) -> float:
-        """Get noise level at continuous time t ∈ [0, 1] using ᾱ_t = σ(-γ(t))."""
-        gamma_t = self.get_gamma_at_time(t)
-        alpha_bar_t = jax.nn.sigmoid(-gamma_t)
-        return alpha_bar_t
-    
-    def get_snr_at_time(self, t: float) -> float:
-        """Get signal-to-noise ratio at continuous time t ∈ [0, 1]."""
-        alpha_bar_t = self.get_noise_at_time(t)
-        return alpha_bar_t / (1 - alpha_bar_t)
-    
-    def get_snr_derivative_at_time(self, t: float) -> float:
-        """Get derivative of SNR at continuous time t ∈ [0, 1]."""
-        gamma_t = self.get_gamma_at_time(t)
-        gamma_prime_t = 1.0  # For linear γ(t) = t
-        alpha_bar_t = self.get_noise_at_time(t)
-        alpha_bar_prime = -gamma_prime_t * alpha_bar_t * (1 - alpha_bar_t)
-        snr_derivative = alpha_bar_prime / ((1 - alpha_bar_t) ** 2)
-        return snr_derivative
-    
-    def add_noise(self, x: jnp.ndarray, noise: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
-        """Add noise to input at continuous time t ∈ [0, 1] using variance-preserving OU process."""
-        # Handle both scalar and batch t values
-        if t.ndim == 0:
-            # Scalar t
-            alpha_bar_t = self.get_noise_at_time(t)
-            sqrt_alpha_bar = jnp.sqrt(alpha_bar_t)
-            sqrt_one_minus_alpha_bar = jnp.sqrt(1 - alpha_bar_t)
-            return sqrt_alpha_bar * x + sqrt_one_minus_alpha_bar * noise
-        else:
-            # Batch t values
-            alpha_bar_t = jax.vmap(self.get_noise_at_time)(t)
-            sqrt_alpha_bar = jnp.sqrt(alpha_bar_t)
-            sqrt_one_minus_alpha_bar = jnp.sqrt(1 - alpha_bar_t)
-            # Broadcast to match x and noise shapes
-            sqrt_alpha_bar = sqrt_alpha_bar[..., None]
-            sqrt_one_minus_alpha_bar = sqrt_one_minus_alpha_bar[..., None]
-            return sqrt_alpha_bar * x + sqrt_one_minus_alpha_bar * noise
-    
+    def SNR_prime(self, t: jnp.ndarray, gamma_rate: jnp.ndarray) -> jnp.ndarray:
+#        return jnp.exp(self.gamma(t, gamma_rate)) * self.gamma_prime(gamma_rate)
+        return -self.Delta_prime(t, gamma_rate)/self.Delta(t, gamma_rate)**2
+
+    def alpha_bar(self, t: jnp.ndarray, gamma_rate: jnp.ndarray) -> jnp.ndarray:
+        # this is called alpha_bar in the paper: recall that noise added from time t to T is 1 - alpha_bar(t)
+        return 1.0 - self.Delta(t, gamma_rate)
+
+    def one_minus_alpha_over_dt(self, t: jnp.ndarray, gamma_rate: jnp.ndarray) -> jnp.ndarray:  
+        return -self.Delta_prime(t, gamma_rate)
+
+    def get_a_b_minus_1(self, t: jnp.ndarray, gamma_rate: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        Delta = self.Delta(t, gamma_rate)
+        Delta_prime = self.Delta_prime(t, gamma_rate)
+        gamma_prime = self.gamma_prime(gamma_rate)
+
+        a = -jnp.sqrt(1-Delta)*Delta_prime/Delta
+        b_minus_1 = (Delta/2.0 + 1)*Delta_prime/Delta
+        return a, b_minus_1
+
     @nn.compact
-    def __call__(self, eta_init: jnp.ndarray, eta_target: jnp.ndarray, 
-                 mu_current: jnp.ndarray, t: float, training: bool = True, rngs: dict = None) -> jnp.ndarray:
+    def __call__(self, z: jnp.ndarray, eta: jnp.ndarray, t: float, training: bool = True, rngs: dict = None) -> jnp.ndarray:
         """
-        NoProp training call - computes du/dt at a single time point (no integration).
-        
+        NoProp Network.  Builds u(z,eta,t) for use in forward pass using using the equation:
+        z(t+dt) = z(t) + dt*a*u(z(t),eta,t) + dt*(b-1)*z(t) + dt*c*noise (note noise is not added in forward pass during inference)
+
         Args:
-            eta_init: Initial natural parameters [batch_shape, eta_dim]
-            eta_target: Target natural parameters [batch_shape, eta_dim]
-            mu_current: Current mu values [batch_shape, mu_dim]
+            z: network activity used to build estimate noisy estimate, u(z(t),eta,t)[batch_shape, eta_dim]
+            eta: Natural parameters serving as input to the network [batch_shape, eta_dim]
             t: Continuous time t ∈ [0, 1]
             training: Whether in training mode
             rngs: Random number generators for dropout
             
         Returns:
-            du_dt: Flow field at time t [batch_shape, mu_dim]
+            u_t: Flow field at time t [batch_shape, mu_dim]
         """
-        eta_dim = eta_target.shape[-1]
-        mu_dim = mu_current.shape[-1]
+        # Define gamma_rate parameter
+        gamma_rate = self.param('gamma_rate', nn.initializers.constant(4.0), ())
+        
+        # Get eta_dim from input
+        eta_dim = eta.shape[-1]
         matrix_rank = self.config.matrix_rank if self.config.matrix_rank is not None else eta_dim
         
         # Handle temporal embedding: None or 0 means disable (use constant), otherwise use specified dim
@@ -124,12 +137,12 @@ class NoProp_Geometric_Flow_ET_Network(nn.Module):
             time_embed_dim = 1  # Use dimension 1 for constant embedding
             time_embedding_fn = lambda embed_dim: ConstantTimeEmbedding(embed_dim=embed_dim)
         else:
-            time_embed_dim = min(self.config.time_embed_dim, 16)
+            time_embed_dim = max(self.config.time_embed_dim, 4)
             time_embedding_fn = LogFreqTimeEmbedding
         
-        # Create Fisher flow field network (shared across all time steps)
+        # Create Fisher flow field network
         fisher_flow = FisherFlowFieldMLP(
-            dim=mu_dim,  # Output dimension (mu_dim)
+            dim=eta_dim,  # Output dimension (mu_dim)
             features=self.config.hidden_sizes,
             t_embed_dim=time_embed_dim,
             t_embedding_fn=time_embedding_fn,
@@ -139,129 +152,170 @@ class NoProp_Geometric_Flow_ET_Network(nn.Module):
             dropout_rate=self.config.dropout_rate
         )
         
-        # Apply eta embedding if specified
+        # Create eta embedding if specified
         if hasattr(self.config, 'embedding_type') and self.config.embedding_type is not None:
             eta_embedding = EtaEmbedding(
                 embedding_type=self.config.embedding_type,
-                eta_dim=eta_target.shape[-1]
+                eta_dim=eta_dim
             )
-            eta_embedded = eta_embedding(eta_target)
-            eta_init_embedded = eta_embedding(eta_init)
+            eta_embedded = eta_embedding(eta)
         else:
-            eta_embedded = eta_target
-            eta_init_embedded = eta_init
+            eta_embedded = eta
         
-        # Compute deta_dt = eta_target - eta_init
-        deta_dt = eta_target - eta_init
-        
-        # Use Fisher flow field: du/dt = F(eta) @ deta_dt
-        # where F(eta) is the Fisher information matrix parameterized by the network
-        du_dt = fisher_flow(
-            z=mu_current,  # Current state
+        # Use Fisher flow field: du/dt = F(z, eta, t) @ deta_dt
+        # where F is the Fisher information matrix parameterized by the network
+        # In NoProp context, we can use eta as deta_dt since we want du/dt = F @ eta
+        u_t = fisher_flow(
+            z=z,  # Current state
             x=eta_embedded,  # Target eta (embedded)
-            t=t,  # Time (can be scalar or batch)
-            deta_dt=deta_dt,  # Natural parameter derivative
+            t=t,  # Time (can be scalar or have shape that matches the batch shape)
+            deta_dt=eta,  # Use eta as the "derivative" in NoProp context since eta_init\approx 0 be assumption
             training=training,
             rngs=rngs
         )
+        return u_t  
+    
+    def _compute_noprop_loss_impl(self, params: dict, eta: jnp.ndarray, mu_T: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
+        """Implementation of NoProp loss (no JIT compilation for debugging)."""
+        # Generate random times t ~ Uniform(0, 1) for each sample in the batch
+        if rngs is not None and 'noise' in rngs:
+            noise_rng = rngs['noise']
+        else:
+            noise_rng = jax.random.PRNGKey(0)
+        t_rng, noise_rng = jax.random.split(noise_rng, 2)
         
-        return du_dt
-    
-    
-    def predict(self, eta: jnp.ndarray, params: dict = None, **kwargs) -> jnp.ndarray:
+        # Sample time for each sample in the batch (shape: eta.shape[:-1])
+        batch_shape = eta.shape[:-1]
+        t = jax.random.uniform(t_rng, batch_shape)  # Batch of time values
+        
+        # Use the flow field computation with the new __call__ method
+        gamma_rate = params['params']['gamma_rate']
+        Delta_t = self.Delta(t, gamma_rate)  # Now Delta_t has batch_shape
+        
+        z_t = mu_T*jnp.sqrt(1-Delta_t[..., None]) + jax.random.normal(noise_rng, mu_T.shape)*jnp.sqrt(Delta_t[..., None])
+        u_t = self.apply(params, z_t, eta, t, training=training, rngs=rngs)
+        
+        # NoProp loss (penalize large derivatives)
+        # SNR_prime now has batch_shape, so we need to broadcast it properly
+        SNR_prime_t = self.SNR_prime(t, gamma_rate)  # Shape: batch_shape
+        loss = jnp.mean(SNR_prime_t[..., None] * (u_t - mu_T) ** 2)
+        return loss
+
+    def _compute_noprop_loss(self, params: dict, eta: jnp.ndarray, mu_T: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
+        """Compute NoProp loss (no JIT compilation for debugging)."""
+        return self._compute_noprop_loss_impl(params, eta, mu_T, training, rngs)
+
+
+    def _noprop_predict(self, params: dict, eta: jnp.ndarray, n_time_steps: int = 10) -> jnp.ndarray:
         """
-        Predict method for NoProp geometric flow - integrates over time for inference.
+        Internal NoProp prediction method.
         
         Args:
+            params: Model parameters
             eta: Target natural parameters [batch_shape, eta_dim]
-            params: Model parameters (if None, will be initialized)
-            **kwargs: Additional arguments
+            gamma_rate: Gamma rate parameter
+            n_time_steps: Number of integration steps
             
         Returns:
             mu_target: Predicted expectations at eta [batch_shape, mu_dim]
         """
-        if params is None:
-            # Initialize parameters if not provided
-            key = jax.random.PRNGKey(0)
-            eta_init, mu_init = self.generate_initial_values(eta)
-            t = 0.5  # Dummy time for initialization
-            params = self.init(key, eta_init, eta, mu_init, t)
         
-        # Generate initial values
-        eta_init, mu_init = self.generate_initial_values(eta)
-        
-        # Simple forward Euler integration (same as regular geometric flow)
-        dt = 1.0 / self.config.n_time_steps
-        u_current = mu_init
-        
-        for i in range(self.config.n_time_steps):
+        # Simple forward Euler integration starting at z = 0
+        dt = jnp.array(1.0 / n_time_steps)
+        z_current = jnp.zeros_like(eta)
+        gamma_rate = params['params']['gamma_rate']
+        for i in range(n_time_steps):
             t = i * dt
-            # Use the __call__ method directly (no need for method parameter)
-            du_dt = self.apply(params, eta_init, eta, u_current, t, training=False)
-            u_current = u_current + dt * du_dt
+            # Use the __call__ method directly
+            u_t = self.apply(params, z_current, eta, t, training=False)
+            a, b_minus_1 = self.get_a_b_minus_1(i * dt, gamma_rate)
+            z_current = z_current + dt * (a*u_t + (b_minus_1)*z_current)
         
-        return u_current
+        return z_current
     
-    def compute_noprop_loss(self, params: dict, eta_init: jnp.ndarray, eta_target: jnp.ndarray,
-                           mu_init: jnp.ndarray, t: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
+    def _compute_flow_matching_loss_impl(self, params: dict, eta: jnp.ndarray, mu_T: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
+        """Implementation of flow matching loss (no JIT compilation for debugging)."""
+        # Use the provided rngs or create a default one
+        if rngs is not None and 'noise' in rngs:
+            noise_rng = rngs['noise']
+        else:
+            noise_rng = jax.random.PRNGKey(0)
+        
+        # Generate random times t ~ Uniform(0, 1) for each sample in the batch
+        t_rng, z_0_rng, z_t_rng = jax.random.split(noise_rng, 3)
+        
+        # Sample time for each sample in the batch (shape: eta.shape[:-1])
+        batch_shape = eta.shape[:-1]
+        t = jax.random.uniform(t_rng, batch_shape)  # Batch of time values
+        z_0 = jax.random.normal(z_0_rng, eta.shape)
+        
+        # Linear interpolation with batch-wise time values
+        z_t = t[..., None]*mu_T + (1-t[..., None])*z_0
+        z_t = z_t + jax.random.normal(z_t_rng, eta.shape)*self.config.flow_matching_sigma
+        
+        # Compute predicted flow field using the new __call__ method
+        du_dt_predicted = self.apply(params, z_t, eta, t, training=training, rngs=rngs)
+        
+        # Compute target flow field (simplified for now)
+        loss = jnp.mean((du_dt_predicted -(mu_T-z_0)) ** 2)
+        return loss
+
+    def _compute_flow_matching_loss(self, params: dict, eta: jnp.ndarray, mu_T: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
+        """Compute flow matching loss (no JIT compilation for debugging)."""
+        return self._compute_flow_matching_loss_impl(params, eta, mu_T, training, rngs)
+    
+    def _flow_matching_predict(self, params: dict, eta: jnp.ndarray, n_time_steps: int = 10) -> jnp.ndarray:
+        """Compute flow matching prediction."""
+        # Simple forward Euler integration starting at z = 0
+        dt = jnp.array(1.0 / n_time_steps)
+        z_current = jnp.zeros_like(eta)
+        
+        for i in range(n_time_steps):
+            t = i * dt
+            # Use the __call__ method directly
+            du_dt = self.apply(params, z_current, eta, t, training=False)
+            z_current = z_current + dt * du_dt
+        return z_current
+
+    def predict(self, params: dict, eta: jnp.ndarray, n_time_steps: int = None) -> jnp.ndarray:
+        """
+        Make predictions using the trained model.
+        
+        Args:
+            params: Model parameters
+            eta: Natural parameters [batch_shape, eta_dim]
+            n_time_steps: Number of integration steps (default from config)
+            
+        Returns:
+            Predicted expectations [batch_shape, mu_dim]
+        """
+        if n_time_steps is None:
+            n_time_steps = self.config.n_time_steps
+            
+        if self.config.loss_type == "flow_matching":
+            return self._flow_matching_predict(params, eta, n_time_steps)
+        elif self.config.loss_type == "noprop":
+            return self._noprop_predict(params, eta, n_time_steps)
+        else:
+            raise ValueError(f"Unknown loss type: {self.config.loss_type}. Use 'flow_matching' or 'noprop'")
+
+    def loss_fn(self, params: dict, eta: jnp.ndarray, mu_T: jnp.ndarray, training: bool = True, rngs: dict = None) -> jnp.ndarray:
         """
         Compute NoProp-specific loss functions.
         
         Args:
             params: Model parameters
-            eta_init: Initial natural parameters [batch_shape, eta_dim]
-            eta_target: Target natural parameters [batch_shape, eta_dim]
-            mu_init: Initial mu values [batch_shape, mu_dim]
-            t: Continuous time t ∈ [0, 1] [batch_shape]
+            eta: Natural parameters [batch_shape, eta_dim]
+            mu_T: Target expectations [batch_shape, mu_dim]
             training: Whether in training mode
+            rngs: Random number generators for dropout
             
         Returns:
             loss: NoProp loss value
         """
         if self.config.loss_type == "flow_matching":
-            return self._compute_flow_matching_loss(params, eta_init, eta_target, mu_init, t, rngs)
-        elif self.config.loss_type == "geometric_flow":
-            return self._compute_geometric_flow_loss(params, eta_init, eta_target, mu_init, t, rngs)
-        elif self.config.loss_type == "simple_target":
-            return self._compute_simple_target_loss(params, eta_init, eta_target, mu_init, t, rngs)
+            return self._compute_flow_matching_loss(params, eta, mu_T, training=training, rngs=rngs)
+        elif self.config.loss_type == "noprop":
+            return self._compute_noprop_loss(params, eta, mu_T, training=training, rngs=rngs)
         else:
-            raise ValueError(f"Unknown loss type: {self.config.loss_type}")
-    
-    def _compute_flow_matching_loss(self, params: dict, eta_init: jnp.ndarray, eta_target: jnp.ndarray,
-                                   mu_init: jnp.ndarray, t: jnp.ndarray, rngs: dict = None) -> jnp.ndarray:
-        """Compute flow matching loss."""
-        # Sample random noise for each sample in batch
-        noise = jax.random.normal(jax.random.PRNGKey(0), mu_init.shape)
-        
-        # Add noise to mu_init for each sample
-        mu_current = self.add_noise(mu_init, noise, t)
-        
-        # Compute predicted flow field using the new __call__ method
-        du_dt_predicted = self.apply(params, eta_init, eta_target, mu_current, t, training=True, rngs=rngs)
-        
-        # Compute target flow field (simplified for now)
-        du_dt_target = eta_target - eta_init  # Simplified target
-        
-        # Flow matching loss
-        loss = jnp.mean((du_dt_predicted - du_dt_target) ** 2)
-        return loss
-    
-    def _compute_geometric_flow_loss(self, params: dict, eta_init: jnp.ndarray, eta_target: jnp.ndarray,
-                                    mu_init: jnp.ndarray, t: jnp.ndarray, rngs: dict = None) -> jnp.ndarray:
-        """Compute geometric flow loss."""
-        # Use the flow field computation with the new __call__ method
-        du_dt = self.apply(params, eta_init, eta_target, mu_init, t, training=True, rngs=rngs)
-        
-        # Geometric flow loss (penalize large derivatives)
-        loss = jnp.mean(du_dt ** 2)
-        return loss
-    
-    def _compute_simple_target_loss(self, params: dict, eta_init: jnp.ndarray, eta_target: jnp.ndarray,
-                                   mu_init: jnp.ndarray, t: jnp.ndarray, rngs: dict = None) -> jnp.ndarray:
-        """Compute simple target loss."""
-        # Predict final mu
-        mu_predicted = self.predict(eta_target, params)
-        
-        # Simple target loss
-        loss = jnp.mean((mu_predicted - eta_target) ** 2)
-        return loss
+            raise ValueError(f"Unknown loss type: {self.config.loss_type}. Use 'flow_matching' or 'noprop'")

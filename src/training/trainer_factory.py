@@ -94,6 +94,26 @@ def create_model_and_trainer(model_type: str, config_dict: dict):
         trainer = BaseETTrainer(model, config)
         return model, trainer
     
+    elif model_type == "noprop_geometric_flow_et":
+        from ..configs.noprop_geometric_flow_et_config import NoProp_Geometric_Flow_ET_Config
+        from ..models.noprop_geometric_flow_et_net import NoProp_Geometric_Flow_ET_Network
+        from .noprop_geometric_flow_et_trainer import NoPropGeometricFlowETTrainer
+        config = NoProp_Geometric_Flow_ET_Config(**config_dict)
+        model = NoProp_Geometric_Flow_ET_Network(config=config)
+        trainer = NoPropGeometricFlowETTrainer(model, config)
+        return model, trainer
+    
+    elif model_type == "noprop_mlp":
+        from ..configs.noprop_mlp_config import NoProp_MLP_Config
+        from ..models.noprop_mlp_net import NoProp_MLP_Network
+        from .noprop_mlp_trainer import NoPropMLPTrainer
+        # Filter out model_type from config_dict as it's not expected by NoProp_MLP_Config
+        filtered_config = {k: v for k, v in config_dict.items() if k != 'model_type'}
+        config = NoProp_MLP_Config(**filtered_config)
+        model = NoProp_MLP_Network(config=config)
+        trainer = NoPropMLPTrainer(model, config)
+        return model, trainer
+    
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 

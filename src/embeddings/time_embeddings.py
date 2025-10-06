@@ -112,7 +112,7 @@ class CyclicalFourierTimeEmbedding(TimeEmbedding):
         # Convert scalar to (1,) array to unify handling
         is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
         if is_scalar:
-            t = jnp.array(t)[None]
+            t = jnp.array(t)
         
         n_freqs = self.embed_dim//2
         freqs = jnp.linspace(0, 2*jnp.pi/self.T_max*n_freqs, n_freqs)
@@ -130,7 +130,7 @@ class LogFreqTimeEmbedding(TimeEmbedding):
     Creates embeddings using sin and cos functions with different frequencies.
     """
 
-    min_freq: float = 0.1
+    min_freq: Optional[float] = 0.1
     max_freq: Optional[float] = 10
 
     def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
@@ -152,7 +152,7 @@ class LogFreqTimeEmbedding(TimeEmbedding):
         # Convert scalar to (1,) array to unify handling
         is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
         if is_scalar:
-            t = jnp.array(t)[None]
+            t = jnp.array(t)
         
         # Create frequency schedule
         n_freqs = self.embed_dim//2

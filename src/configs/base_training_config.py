@@ -21,7 +21,7 @@ class BaseTrainingConfig:
     """
     
     # === OPTIMIZER PARAMETERS ===
-    learning_rate: float = 1e-3
+    learning_rate: float = 0.001
     optimizer: str = "adamw"  # 'adam', 'adamw', 'sgd', 'rmsprop'
     weight_decay: float = 1e-4
     

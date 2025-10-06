@@ -30,7 +30,7 @@ from src.configs.base_training_config import BaseTrainingConfig
 from src.configs.geometric_flow_et_config import Geometric_Flow_ET_Config, create_geometric_flow_et_config
 from src.training.base_et_trainer import BaseETTrainer
 from src.models.geometric_flow_et_net import Geometric_Flow_ET_Network
-from scripts.plotting.generate_plots import generate_plots
+from scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
 
 
 def load_training_data(data_path: str) -> tuple[Dict[str, Any], int, int]:
@@ -80,8 +80,13 @@ def create_configs_from_args(args, eta_dim: int, mu_dim: int) -> tuple[Geometric
         'x_shape': (eta_dim,)  # Set x_shape based on eta dimension
     }
     
+    # Handle temporal embedding disable flag
+    if hasattr(args, 'disable_temporal_embedding') and args.disable_temporal_embedding:
+        model_kwargs['time_embed_dim'] = 1  # Force constant embedding
+    
     # Parse model configuration arguments
     model_attributes = ['n_time_steps', 'smoothness_weight', 'matrix_rank', 'time_embed_dim',
+                       'time_embed_min_freq', 'time_embed_max_freq',
                        'architecture', 'hidden_sizes', 'activation', 'use_layer_norm', 
                        'layer_norm_type', 'initialization_method']
     for attribute in model_attributes:
@@ -174,6 +179,12 @@ def parse_arguments() -> argparse.Namespace:
                        help="Rank of the flow matrix (default from config)")
     parser.add_argument("--time-embed-dim", type=int,
                        help="Time embedding dimension (default from config)")
+    parser.add_argument("--time-embed-min-freq", type=float,
+                       help="Minimum frequency for log frequency time embedding (default from config)")
+    parser.add_argument("--time-embed-max-freq", type=float,
+                       help="Maximum frequency for log frequency time embedding (default from config)")
+    parser.add_argument("--disable-temporal-embedding", action="store_true",
+                       help="Disable temporal embedding (force time_embed_dim=1, use constant embedding)")
     parser.add_argument("--architecture", type=str, choices=["mlp only for now"],
                        help="Network architecture (default from config)")
     parser.add_argument("--hidden-sizes", type=int, nargs="+",
@@ -219,7 +230,7 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = Path(f"artifacts/geometric_flow_et_{timestamp}")
     
-    print(f"Output directory: {output_dir}")
+    print(f"Output directory: {output_dir}") 
     
     # Train model
     print("4. Training model...")
@@ -229,7 +240,11 @@ def main():
     if not args.no_plots:
         print("5. Generating plots...")
         plot_data_path = args.plot_data if args.plot_data else args.data
-        generate_plots(output_dir, plot_data_path)
+        # Generate enhanced learning curves plot
+        from scripts.load_model_and_data import load_model_and_data
+        config, results, data, model, params, metadata = load_model_and_data(str(output_dir), plot_data_path)
+        save_path = Path(output_dir) / "learning_errors_enhanced.png"
+        create_enhanced_learning_plot(config, results, data, model, params, metadata, save_path)
         print("✅ Training plots generated successfully!")
     else:
         print("5. Skipping plots (--no-plots specified)")

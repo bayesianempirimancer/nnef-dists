@@ -7,6 +7,33 @@ to callable activation functions, which is commonly needed across different laye
 
 from typing import Callable, Union
 import flax.linen as nn
+import jax.numpy as jnp
+
+
+def swiglu(x: jnp.ndarray) -> jnp.ndarray:
+    """
+    SwiGLU activation function.
+    
+    SwiGLU combines Swish activation with a gating mechanism:
+    - Splits input into two equal parts
+    - Applies Swish to first part: swish(x1) = x1 * sigmoid(x1)
+    - Applies sigmoid to second part: sigmoid(x2)
+    - Returns element-wise product: swish(x1) * sigmoid(x2)
+    
+    Args:
+        x: Input tensor of shape (..., 2*dim)
+        
+    Returns:
+        Output tensor of shape (..., dim)
+        
+    Note:
+        Input dimension must be even (divisible by 2)
+    """
+    # Split input into two equal parts along the last dimension
+    x1, x2 = jnp.split(x, 2, axis=-1)
+    
+    # Apply Swish to first part and sigmoid to second part
+    return nn.swish(x1) * nn.sigmoid(x2)
 
 
 def get_activation_function(activation: Union[str, Callable]) -> Callable:
@@ -33,6 +60,7 @@ def get_activation_function(activation: Union[str, Callable]) -> Callable:
         "leaky_relu": nn.leaky_relu,
         "gelu": nn.gelu,
         "swish": nn.swish,
+        "swiglu": swiglu,
         "sigmoid": nn.sigmoid,
         "tanh": nn.tanh,
         "softplus": nn.softplus,
@@ -68,6 +96,7 @@ def get_activation_name(activation: Union[str, Callable]) -> str:
         nn.leaky_relu: "leaky_relu", 
         nn.gelu: "gelu",
         nn.swish: "swish",
+        swiglu: "swiglu",
         nn.sigmoid: "sigmoid",
         nn.tanh: "tanh",
         nn.softplus: "softplus",
