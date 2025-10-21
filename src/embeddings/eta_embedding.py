@@ -61,30 +61,38 @@ class EtaEmbedding(nn.Module):
         if method == 'none':
             return eta
 
-        features = []
-        
-        # Always include original eta
-        features.append(eta)
-
         # Compute eta norm and normalized eta (used by multiple features)
         eta_norm = jnp.linalg.norm(eta, axis=-1, keepdims=True)
         eta_norm_safe = jnp.maximum(eta_norm, 1e-6)  # Avoid division by zero
         eta_normalized = eta / eta_norm_safe
 
-        eta_inverse = jnp.clip(1./eta,-100.0,100.0)   
+        features = []
+
+        if method == 'minimal':
+            # Minimal: just normalized eta + quadratic terms
+            features.append(eta_normalized)
+            features.append(eta_norm)
         
         # Apply method-specific feature selection
-        if method == 'default':
+        elif method == 'default':
             # Default: eta, eta/||eta||, eta/||eta||^2, norm features
+            features.append(nn.softplus(eta))
+            features.append(nn.softplus(-eta))
+            features.append(nn.sigmoid(eta))
+            features.append(eta*jnp.exp(-jnp.abs(eta)))
+            features.append(jnp.exp(-jnp.abs(eta)))
             features.append(eta_normalized)  # eta/||eta||
-            features.append(eta / (eta_norm_safe ** 2))  # eta/||eta||^2
+            features.append(eta_normalized/eta_norm_safe)
+            eta_inverse = jnp.clip(1./eta,-1000.0,1000.0)
+            features.append(eta_inverse*jnp.exp(-jnp.abs(eta_inverse)))   
+            features.append(jnp.log(jnp.abs(eta)+0.001))
             features.append(eta_norm)  # ||eta||
-            features.append(1/eta_norm_safe)  # 1/||eta||
-            features.append(1/(eta_norm_safe ** 2))  # 1/||eta||^2
+            features.append(1.0/eta_norm_safe)  # 1/||eta||
             features.append(-jnp.log(1.0 + eta_norm))  # -log(1+||eta||)
             
         elif method == 'polynomial':
             # Polynomial: default + polynomial features
+            features.append(eta)
             features.append(eta_normalized)
             features.append(eta / (eta_norm_safe ** 2))
             features.append(eta_norm)
@@ -98,6 +106,7 @@ class EtaEmbedding(nn.Module):
             
         elif method == 'advanced':
             # Advanced: all features including cross-products and inverse
+            features.append(eta)
             features.append(eta_normalized)
             features.append(eta / (eta_norm_safe ** 2))
             features.append(eta_norm)
@@ -125,11 +134,11 @@ class EtaEmbedding(nn.Module):
         elif method == 'minimal':
             # Minimal: just normalized eta + quadratic terms
             features.append(eta_normalized)
-            features.append(eta / (eta_norm_safe ** 2))
-            features.append(eta_normalized ** 2)
+            features.append(eta_norm)
             
         elif method == 'convex_only':
             # Convex-only features for convex neural networks
+            features.append(eta)                
             features.append(eta_norm)  # ||eta|| is convex
             features.append(1/eta_norm_safe)  # 1/||eta|| is convex
             features.append(1/(eta_norm_safe ** 2))  # 1/||eta||^2 is convex

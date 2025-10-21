@@ -11,9 +11,9 @@ import numpy as np
 import jax.numpy as jnp
 import sys
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict
 
-from ..ef import ExponentialFamily, MultivariateNormal, MultivariateNormal_tril
+from ..expfam.ef import ExponentialFamily, MultivariateNormal, MultivariateNormal_tril
 
 
 # =============================================================================

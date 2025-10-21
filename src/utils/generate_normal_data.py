@@ -15,7 +15,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from src.ef import ef_factory
+from src.expfam.ef import ef_factory
 
 def identify_extreme_points(eta: jnp.ndarray, mu_T: jnp.ndarray, num_extreme_per_dim: int = 2) -> jnp.ndarray:
     """

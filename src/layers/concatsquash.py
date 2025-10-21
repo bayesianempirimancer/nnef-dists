@@ -12,9 +12,6 @@ multiple inputs efficiently without creating large intermediate tensors.
 
 import jax.numpy as jnp
 import flax.linen as nn
-from typing import Callable, Optional
-
-from numpy import False_
 
 
 class ConcatSquash(nn.Module):
@@ -32,11 +29,11 @@ class ConcatSquash(nn.Module):
     """
     
     features: int
-    use_bias: bool = False_
-    use_input_layer_norm: bool = False
+    use_bias: bool = False
+    use_layer_norm: bool = False
     
     @nn.compact
-    def __call__(self, *inputs: jnp.ndarray, training: bool = True) -> jnp.ndarray:
+    def __call__(self, *inputs: jnp.ndarray) -> jnp.ndarray:
         """
         Apply ConcatSquash transformation to multiple inputs.
         
@@ -57,7 +54,7 @@ class ConcatSquash(nn.Module):
         
         output = 0.0
         for i, input in enumerate(inputs):
-            if self.use_input_layer_norm:
+            if self.use_layer_norm:
                 input = nn.LayerNorm()(input)
             output += nn.Dense(self.features, use_bias=False, name=f'input_proj_{i}')(input)
 

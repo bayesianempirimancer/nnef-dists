@@ -7,7 +7,6 @@ that use bilinear transformations.
 
 import jax.numpy as jnp
 import flax.linen as nn
-from typing import Callable
 
 
 class BilinearLayer(nn.Module):
@@ -15,7 +14,7 @@ class BilinearLayer(nn.Module):
     features: int
     
     @nn.compact
-    def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray, y: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         # Initialize bilinear weight matrix
         Wxy = self.param('W', nn.initializers.lecun_normal(), use_bias=False, shape=(x.shape[-1], y.shape[-1], self.features))
         Wx = self.param('Wx', nn.initializers.lecun_normal(), use_bias=False, shape=(x.shape[-1], self.features))
@@ -29,6 +28,10 @@ class BilinearLayer(nn.Module):
         linear_x = x @ Wx
         linear_y = y @ Wy
 
+        bilinear_term = nn.Dropout(rate=self.dropout_rate)(bilinear_term, deterministic=not training)
+        linear_x = nn.Dropout(rate=self.dropout_rate)(linear_x, deterministic=not training)
+        linear_y = nn.Dropout(rate=self.dropout_rate)(linear_y, deterministic=not training)
+
         return bilinear_term + linear_x + linear_y + bias
 
 
@@ -37,7 +40,7 @@ class BilinearProjectionLayer(nn.Module):
     features: int
     
     @nn.compact
-    def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray, y: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         # Project both inputs to the same feature space with LeCun normal initialization
 
         kernel_init = lambda key, shape, dtype: nn.initializers.lecun_normal()(key, shape, dtype) / jnp.sqrt(x.shape[-1])
@@ -49,26 +52,4 @@ class BilinearProjectionLayer(nn.Module):
         return x_proj * y_proj + x_linear + y_linear
 
 
-class BilinearResidualBlock(nn.Module):
-    """Bilinear residual block with multiple layers and optional layer normalization."""
-    hidden_sizes: tuple[int, ...]
-    activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.swish
-    use_layer_norm: bool = True
-    
-    @nn.compact
-    def __call__(self, x: jnp.ndarray, y: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        in_features = x.shape[-1]
-        residual = x
-        
-        # Multiple bilinear layers with different hidden sizes
-        for i, hidden_size in enumerate(self.hidden_sizes):
-            x = BilinearLayer(hidden_size, name=f'bilinear_layer_{i}')(x, y)
-            x = self.activation(x)
-            
-            # Optional layer normalization after each layer
-            if self.use_layer_norm:
-                x = nn.LayerNorm(name=f'layer_norm_{i}')(x)
-        
-        # Project back to input dimension and add residual
-        return nn.Dense(in_features)(x) + residual
 

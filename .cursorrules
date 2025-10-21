@@ -1,0 +1,196 @@
+# nnef-dists Project Rules
+
+## Project Overview
+This is a machine learning research project for fast variational inference with non-named exponential family distributions. The project uses neural networks to learn the mapping between natural parameters (η) and expected sufficient statistics (μ_T) for exponential family distributions.
+
+## Key Concepts
+- **Exponential Family**: Distributions of the form log p(x|η) = η·T(x) - A(η)
+- **Natural Parameters**: η (input to neural networks)
+- **Sufficient Statistics**: T(x), the vector of functions that defined the distribution
+- **Expected Sufficient Statistics**: μ_T(η) = E[T(x)|η], the expected sufficient statistics (This is what the neural nets are predicting)
+- **Log Normalizer**: A(η) (partition function)
+
+## Architecture & Code Organization
+
+### Project Structure
+```
+src/
+├── models/            # Model implementations organized by model type
+│   ├── base_config.py     # Base configuration class
+│   ├── base_model.py      # Base model class
+│   ├── base_trainer.py    # Base trainer class with train-val-test splitter
+│   ├── base_training_config.py  # Base training configuration class
+│   ├── mlp_et/        # MLP ET model directory
+│   │   ├── model.py   # Model implementation and config class
+│   │   └── train.py   # Training script
+│   ├── glu_et/        # GLU ET model directory
+│   │   ├── model.py   # Model implementation and config class
+│   │   └── train.py   # Training script
+│   ├── quadratic_et/  # Quadratic ET model directory
+│   │   ├── model.py   # Model implementation and config class
+│   │   └── train.py   # Training script
+│   ├── glow_et/       # Glow ET model directory
+│   │   ├── model.py   # Model implementation and config class
+│   │   └── train.py   # Training script
+│   ├── geometric_flow_et/     # Geometric Flow ET model directory
+│   │   ├── model.py           # Model implementation and config class
+│   │   └── train.py           # Training script
+│   ├── noprop_geometric_flow_et/  # NoProp Geometric Flow ET model directory
+│   │   ├── model.py               # Model implementation and config class
+│   │   └── train.py               # Training script
+│   ├── noprop_mlp_et/    # NoProp MLP ET model directory
+│   │   ├── model.py   # Model implementation and config class
+│   │   ├── train.py   # Training script
+│   │   └── train_flow_matching.py  # Flow matching training script
+│   ├── archive/       # Archived/legacy code (IGNORE - do not modify)
+│   └── __init__.py    # Model registry and imports
+├── expfam/            # Exponential family distributions and data generation
+│   ├── ef.py                  # Exponential family definitions
+│   ├── generate_data.py       # Data generation CLI/script
+│   └── data_generator.py      # Programmatic data generation utilities
+├── training/          # Training infrastructure (legacy - use models/ instead)
+└── utils/             # General utilities
+```
+
+### Naming Conventions
+- **Model Directories**: `[name]_et/` (e.g., `mlp_et/`, `glu_et/`)
+- **Model Files**: `model.py` (contains model implementation and config class)
+- **Training Files**: `train.py` (contains training script)
+- **Config Classes**: `Config` class defined at top of model.py file (e.g., `Config` in `mlp_et/model.py`)
+- **Model Classes**: `{directory_name}_Net` (e.g., `MLP_ET_Net`, `GLU_ET_Net`)
+- **Training Config Classes**: `TrainingConfig` class in train.py files
+
+### Model Types & Status
+- **Direct ET Networks** ✅ Working: Learn μ_T(η) directly
+  - MLP ET, GLU ET, Quadratic ET, Glow ET
+- **Geometric Flow Networks** ✅ Working: Novel flow-based approach
+  - Geometric Flow ET, NoProp Geometric Flow ET
+- **Log Normalizer Networks** ⚠️ Debugging: Learn A(η) and compute μ_T = ∇A(η) and optinally the covariance \Sigma_{TT} = ∇∇A(η)
+  - MLP LogZ, GLU LogZ, Quadratic LogZ, Convex LogZ
+
+## Development Guidelines
+
+### Configuration System
+- **Single Source of Truth**: All default parameters defined in model config classes, NOT in argparse
+- **Config Location**: Config classes are defined at the top of each model file (e.g., `Config` in `model.py`)
+- **Config Priority**: Model config defaults → Command-line overrides
+- **No Conflicting Defaults**: argparse never overrides config class defaults
+- **Base Class Inheritance**: All config classes inherit from `BaseConfig` in `src/models/base_config.py`
+- **Training Configs**: Each train.py file has a `TrainingConfig` class inheriting from `BaseTrainingConfig`
+- **Centralized Methods**: `create`, `create_from_args`, `to_dict`, and `get_architecture_summary` methods in base classes
+
+### Import System
+- **Clean Relative Imports**: All module files use relative imports (e.g., `from ..base_config import BaseConfig`)
+- **Empty __init__.py Files**: All `__init__.py` files are empty - no package-level exports
+- **Script Special Treatment**: Only `train.py` files use conditional imports for direct script execution
+- **Explicit Import Paths**: Import paths show exactly where classes come from (no package-level aliases)
+- **Run as Modules**: Always run scripts with `python -m` from the project root (e.g., `conda run -n numpyro python -m ...) so relative imports work.
+
+### Training Scripts
+- Use production-ready training scripts in `src/models/[model]/train.py`
+- All trainers use `BaseETTrainer` from `src/models/base_trainer.py`
+- Each train.py file has a `TrainingConfig` class with `training_switches` attribute
+- Common arguments defined once in base parser
+- Model-specific arguments added by each trainer
+- Training configs use `create_from_args` method from base class
+
+### Data Format
+- **Single Format Only**: All data files must use the new format with keys: `'eta'`, `'mu_T'`, `'cov_TT'`, `'ess'`
+- **Automatic Splitting**: `BaseETTrainer.load_training_data()` automatically splits data into 80-10-10 train-val-test
+- **Randomization**: Data is shuffled before splitting using seed 101 (configurable)
+- **No Legacy Support**: Old pre-split data formats are rejected with clear error messages
+
+### Code Quality
+- Use JAX/Flax for all neural network implementations
+- Follow consistent method signatures across all models
+- Implement proper error handling and validation
+- Use type hints and docstrings
+- Follow the established modular architecture
+
+
+### Adding a New Model
+1. Create model directory: `src/models/[name]_et/`
+2. Create `model.py` file with model implementation and config class inheriting from `BaseConfig`
+3. Config class should define model-specific parameters and use inherited methods
+4. Create `train.py` file with `TrainingConfig` class and training script
+5. Update `src/models/__init__.py` to include new model imports
+6. Follow existing patterns for consistency
+
+### Training Models
+# Basic training (uses config defaults)
+conda activate numpyro
+python src/models/mlp_et/train.py --data data/datafile.pkl
+
+### Generating data
+conda activate numpyro
+python -m src.expfam.generate_data --config data/configs/laplace_product.yaml
+
+
+
+### Data Generation & Training Workflow
+1. **Generate Data**: Use `src/expfam/generate_data.py` to create data in new format
+2. **Data Format**: Files must contain dict with keys: `'eta'`, `'mu_T'`, `'cov_TT'`, `'ess'`
+3. **Automatic Splitting**: `BaseETTrainer.load_training_data()` handles train-val-test split (80-10-10)
+4. **Training**: All training scripts automatically use the splitter with seed 101
+5. **Test Evaluation**: Optional test set evaluation available in all trainers
+
+### Adding New Distributions
+1. Implement `ExponentialFamily` interface in `src/expfam/ef.py`
+2. Define `x_shape`, `stat_specs`, and `_compute_stats` method
+3. Add to `ef_factory` function
+
+## Technical Details
+
+### Dependencies
+- JAX/Flax for neural networks and computation
+- Optax for optimization
+- BlackJAX for MCMC sampling
+- Matplotlib for plotting
+
+### Key Features
+- Clean argument parser architecture (67% code reduction)
+- Configuration-first design with base class inheritance
+- Automatic plotting and model saving
+- Comprehensive CLI interfaces
+- Modular, extensible design
+- Centralized base classes for configs, models, and trainers
+- Consistent TrainingConfig pattern across all models
+- Clean import system with empty __init__.py files and relative imports
+- Train-val-test data splitting with randomization (80-10-10 default)
+- Single data format enforcement with clear error messages
+
+## Debugging Notes
+- LogZ models (MLP LogZ, GLU LogZ, etc.) require debugging and are not recommended for production
+- All ET models are working satisfactorily
+- Geometric Flow models are novel and working well
+
+## When Making Changes
+1. Follow existing patterns and naming conventions
+2. Update config classes in model files for new default parameters
+3. Ensure training scripts work with both CLI and programmatic usage
+4. Test with the supported distributions (Multivariate Normal, 1D Gaussian)
+5. Use only the new data format (keys: 'eta', 'mu_T', 'cov_TT', 'ess')
+6. Update documentation if adding new features
+7. **IGNORE archive directories** - do not modify any code in `src/models/archive/` or similar legacy directories
+8. **Do not create unnecessary wrappers** - do not create unnecessary wrappers for existing code.
+## Environment Setup
+**IMPORTANT**: Always use the numpyro conda environment for this project:
+
+conda activate numpyro
+
+Do not pip install.
+
+## Common Commands
+```bash
+# Make sure you're in the numpyro environment first!
+conda activate numpyro
+
+# Always run scripts as modules from the project root to enable relative imports
+
+# Train with help
+python src/models/mlp_et/train.py --help
+
+# Generate training data
+conda run -n numpyro python -m src.expfam.generate_data --config /home/jebeck/GitHub/nnef-dists/data/configs/laplace_product.yaml --force
+
+```

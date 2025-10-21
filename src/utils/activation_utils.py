@@ -9,6 +9,38 @@ from typing import Callable, Union
 import flax.linen as nn
 import jax.numpy as jnp
 
+def softplusglu(x: jnp.ndarray) -> jnp.ndarray:
+    """
+    Softplus activation function.
+    """
+    x1, x2 = jnp.split(x, 2, axis=-1)
+    return jnp.concatenate([nn.softplus(x1)*nn.sigmoid(x2), nn.softplus(x2)*nn.sigmoid(x1)], axis=-1)
+
+def switanh(x: jnp.ndarray) -> jnp.ndarray:
+    """
+    SwiTanh activation function.
+    
+    SwiTanh combines Swish activation with a gating mechanism:
+    - Splits input into two equal parts
+    - Applies Swish to first part: swish(x1) = x1 * sigmoid(x1)
+    - Applies tanh to second part: tanh(x2)
+    - Returns element-wise product: swish(x1) * tanh(x2)
+    
+    Args:
+        x: Input tensor of shape (..., 2*dim)
+        
+    Returns:
+        Output tensor of shape (..., dim)
+        
+    Note:
+        Input dimension must be even (divisible by 2)
+    """
+    # Split input into two equal parts along the last dimension
+    x1, x2 = jnp.split(x, 2, axis=-1)
+    
+    # Apply Swish to first part and tanh to second part
+#    return jnp.concatenate([nn.swish(x1) * nn.tanh(x2), nn.swish(x2) * nn.tanh(x1)], axis=-1)
+    return nn.swish(x1) * nn.tanh(x2)
 
 def swiglu(x: jnp.ndarray) -> jnp.ndarray:
     """
@@ -33,8 +65,8 @@ def swiglu(x: jnp.ndarray) -> jnp.ndarray:
     x1, x2 = jnp.split(x, 2, axis=-1)
     
     # Apply Swish to first part and sigmoid to second part
+#    return jnp.concatenate([nn.swish(x1) * nn.sigmoid(x2), nn.swish(x2) * nn.sigmoid(x1)], axis=-1)
     return nn.swish(x1) * nn.sigmoid(x2)
-
 
 def get_activation_function(activation: Union[str, Callable]) -> Callable:
     """
@@ -60,7 +92,9 @@ def get_activation_function(activation: Union[str, Callable]) -> Callable:
         "leaky_relu": nn.leaky_relu,
         "gelu": nn.gelu,
         "swish": nn.swish,
+        "switanh": switanh,
         "swiglu": swiglu,
+        "softplusglu": softplusglu,
         "sigmoid": nn.sigmoid,
         "tanh": nn.tanh,
         "softplus": nn.softplus,
@@ -96,7 +130,9 @@ def get_activation_name(activation: Union[str, Callable]) -> str:
         nn.leaky_relu: "leaky_relu", 
         nn.gelu: "gelu",
         nn.swish: "swish",
+        switanh: "switanh",
         swiglu: "swiglu",
+        softplusglu: "softplusglu",
         nn.sigmoid: "sigmoid",
         nn.tanh: "tanh",
         nn.softplus: "softplus",

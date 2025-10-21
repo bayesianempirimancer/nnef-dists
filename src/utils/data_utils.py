@@ -6,7 +6,7 @@ from typing import Dict, Tuple, Optional
 import jax.numpy as jnp
 
 from jax import Array
-from ..ef import MultivariateNormal_tril
+from ..expfam.ef import MultivariateNormal_tril
 
 def infer_dimensions(eta_data: Array, metadata: Optional[Dict] = None) -> int:
     """

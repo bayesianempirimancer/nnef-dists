@@ -67,7 +67,7 @@ class ConstantTimeEmbedding(TimeEmbedding):
 class LinearTimeEmbedding(TimeEmbedding):
     def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
         """
-        Create linear time embedding.
+        Create linear time embedding by relu of t-thresh[0:embed_dim]
         
         Args:
             t: Time value(s) ∈ [0, 1]
@@ -81,7 +81,9 @@ class LinearTimeEmbedding(TimeEmbedding):
             t = jnp.array(t)[None]
         
         # Repeat t along the last dimension to create embeddings
-        embeddings = jnp.repeat(t[..., None], self.embed_dim, axis=-1)
+        thresh  = jnp.linspace(0, 1.0-1.0/self.embed_dim, self.embed_dim)
+        embeddings = jnp.repeat(t[..., None]-thresh, self.embed_dim, axis=-1)
+        embedding = nn.relu(embeddings)
         
         # Squeeze out the batch dimension if input was scalar
         return embeddings
@@ -122,6 +124,19 @@ class CyclicalFourierTimeEmbedding(TimeEmbedding):
         
         # Squeeze out the batch dimension if input was scalar
         return embeddings
+
+class SinusoidalTimeEmbedding(TimeEmbedding):
+
+    def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
+
+        is_scalar = isinstance(t, float) or (hasattr(t, 'ndim') and t.ndim == 0)
+        if is_scalar:
+            t = jnp.array(t)
+
+        half = self.embed_dim // 2
+        log_freqs = -jnp.log(10000) * jnp.linspace(0, 1, half)        
+        freqs = jnp.exp(log_freqs)
+        return jnp.concatenate([jnp.sin(t[..., None] * freqs), jnp.cos(t[..., None] * freqs)], axis=-1)
 
 class LogFreqTimeEmbedding(TimeEmbedding):
     """
@@ -173,25 +188,39 @@ class LogFreqTimeEmbedding(TimeEmbedding):
 
 # Convenience functions for creating time embeddings
 def create_time_embedding(embed_dim: int, 
-                         method: str = "fourier",
-                         max_freq: float = 10.0) -> TimeEmbedding:
+                         method: str,
+                         min_freq: float = 0.1,
+                         max_freq: float = 10.0,
+                         T_max: float = 1.0) -> TimeEmbedding:
     """
     Create a time embedding instance.
     
     Args:
         embed_dim: Dimension of the time embedding
-        method: Method to use ("fourier", "simple", or "constant")
+        method: Method to use ("fourier", "log_freq", "cyclical_fourier", "sinusoidal", "linear", "constant")
+        min_freq: Minimum frequency for log frequency embeddings
         max_freq: Maximum frequency for Fourier embeddings
+        T_max: Maximum period for cyclical Fourier embeddings
         
     Returns:
         TimeEmbedding instance
     """
-    if method == "fourier":
+    if method == "fourier" or method == "log_freq":
         return LogFreqTimeEmbedding(
             embed_dim=embed_dim,
+            min_freq=min_freq,
             max_freq=max_freq
         )
-    elif method == "simple":
+    elif method == "cyclical_fourier":
+        return CyclicalFourierTimeEmbedding(
+            embed_dim=embed_dim,
+            T_max=T_max
+        )
+    elif method == "sinusoidal":
+        return SinusoidalTimeEmbedding(
+            embed_dim=embed_dim
+        )
+    elif method == "linear" or method == "simple":
         return LinearTimeEmbedding(
             embed_dim=embed_dim
         )
@@ -200,7 +229,7 @@ def create_time_embedding(embed_dim: int,
             embed_dim=embed_dim
         )
     else:
-        raise ValueError(f"Unknown method: {method}. Use 'fourier', 'simple', or 'constant'")
+        raise ValueError(f"Unknown method: {method}. Use 'fourier', 'log_freq', 'cyclical_fourier', 'sinusoidal', 'linear', 'simple', or 'constant'")
 
 
 def fourier_time_embedding(t: Union[float, jnp.ndarray], 

@@ -91,52 +91,6 @@ class ConvexHiddenLayer(nn.Module):
             return nn.softplus(x)
 
 
-class SimpleConvexBlock(nn.Module):
-    """
-    Residual block using convex layers.
-    
-    This block applies multiple convex layers with residual connections
-    while maintaining convexity properties.
-    """
-
-    features: int  # Output dimension
-    hidden_sizes: tuple[int, ...]  # Hidden dimension
-    activation: str = "softplus"  # Only smooth convex activations allowed
-    use_bias: bool = True
-    weight_scale: float = 1.0  # Scale factor for weight initialization (default: 1.0)
-    
-    @nn.compact
-    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        """
-        Forward pass through convex residual block.
-        
-        Args:
-            x: Input tensor [batch_size, input_dim]
-            training: Whether in training mode
-            
-        Returns:
-            Output tensor [batch_size, features]
-        """
-        # Apply multiple convex layers
-        z_prev = None
-        for i, hidden in enumerate(self.hidden_sizes):
-            z_prev = ConvexHiddenLayer(
-                hidden,
-                use_bias=self.use_bias,
-                activation=self.activation,
-                weight_scale=self.weight_scale,
-                name=f'convex_hidden_layer_{i}'
-            )(z_prev, x, training=training)        
-
-        z_prev = ConvexHiddenLayer(
-            features=self.features,
-            use_bias=self.use_bias,
-            activation=self.activation,
-            weight_scale=self.weight_scale,
-            name=f'convex_layer_{i}'
-        )(z_prev, x, training=training)        
-        return z_prev
-
 
 class ICNNBlock(nn.Module):
     """
@@ -320,7 +274,6 @@ class ConvexResNetWrapperBivariate(nn.Module):
     use_bias: bool = True  # Whether to use bias terms
     weight_scale: float = 1.0  # Weight scaling factor
     use_projection: bool = True  # Whether to use projection layers for dimension mismatch
-    block_type: str = "simple"  # Type of block: "simple" or "icnn"
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, training: bool = True) -> jnp.ndarray:
@@ -340,25 +293,15 @@ class ConvexResNetWrapperBivariate(nn.Module):
         # Apply each convex block
         for i in range(self.num_blocks):
             # Create convex block for each iteration (avoids parameter sharing)
-            if self.block_type == "simple":
-                convex_block = SimpleConvexBlock(
-                    features=self.features,
-                    hidden_sizes=self.hidden_sizes,
-                    activation=self.activation,
-                    use_bias=self.use_bias,
-                    weight_scale=self.weight_scale,
-                    name=f'convex_block_{i}'
-                )
-            elif self.block_type == "icnn":
-                convex_block = ICNNBlock(
-                    features=self.features,
-                    hidden_sizes=self.hidden_sizes,
-                    activation=self.activation,
-                    use_bias=self.use_bias,
-                    name=f'icnn_block_{i}'
-                )
-            else:
-                raise ValueError(f"Unknown block_type: {self.block_type}")
+
+            convex_block = ICNNBlock(
+                features=self.features,
+                hidden_sizes=self.hidden_sizes,
+                activation=self.activation,
+                use_bias=self.use_bias,
+                name=f'icnn_block_{i}'
+            )
+
             
             # Apply the convex block (note: convex blocks only take x input, not (x, y))
             # For bivariate case, we need to handle this differently
