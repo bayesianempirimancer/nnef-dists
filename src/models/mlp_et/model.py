@@ -106,7 +106,6 @@ class MLP_ET_Net(BaseModel[Config]):
                     'dropout_rate': self.config.dropout_rate,
                 },
                 num_blocks=self.config.num_resnet_blocks,
-                activation=None,  # Activation is handled by MLPBlock
                 share_parameters=self.config.share_parameters,
                 weight_residual=self.config.weight_residual,
                 residual_weight=self.config.residual_weight,
