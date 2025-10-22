@@ -10,38 +10,15 @@ import jax.numpy as jnp
 import flax.linen as nn
 from typing import Optional, Union, Callable
 
-
-class TimeEmbedding(nn.Module):
-    """
-    Base class for time embeddings.
-    
-    Provides a standardized interface for creating time embeddings
-    from continuous time values t ∈ [0, 1].
-    """
-
-    embed_dim: int
-    
-    @nn.compact
-    def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
-        """
-        Create time embedding from continuous time.
-        
-        Args:
-            t: Time value(s) ∈ [0, 1]
-            
-        Returns:
-            Time embedding [embed_dim,] or [batch_size, embed_dim]
-        """
-        raise NotImplementedError("Subclasses must implement __call__")
-
-
-class ConstantTimeEmbedding(TimeEmbedding):
+class ConstantTimeEmbedding(nn.Module):
     """
     Constant time embedding that returns a constant value.
     
     This effectively disables temporal information by returning
     the same embedding regardless of the input time value.
     """
+    
+    embed_dim: int
     
     def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
         """
@@ -64,7 +41,9 @@ class ConstantTimeEmbedding(TimeEmbedding):
         # Squeeze out the batch dimension if input was scalar
         return embeddings
 
-class LinearTimeEmbedding(TimeEmbedding):
+class LinearTimeEmbedding(nn.Module):
+    embed_dim: int
+    
     def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
         """
         Create linear time embedding by relu of t-thresh[0:embed_dim]
@@ -88,7 +67,7 @@ class LinearTimeEmbedding(TimeEmbedding):
         # Squeeze out the batch dimension if input was scalar
         return embeddings
 
-class CyclicalFourierTimeEmbedding(TimeEmbedding):
+class CyclicalFourierTimeEmbedding(nn.Module):
     """
     Fourier-based time embedding using sinusoidal functions integer frequencies.  
     This assumes that there is a max period of the signal, T_max
@@ -96,6 +75,7 @@ class CyclicalFourierTimeEmbedding(TimeEmbedding):
     Creates embeddings using sin and cos functions with different frequencies.
     """
 
+    embed_dim: int
     T_max: float = 1.0
 
     def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
@@ -125,7 +105,8 @@ class CyclicalFourierTimeEmbedding(TimeEmbedding):
         # Squeeze out the batch dimension if input was scalar
         return embeddings
 
-class SinusoidalTimeEmbedding(TimeEmbedding):
+class SinusoidalTimeEmbedding(nn.Module):
+    embed_dim: int
 
     def __call__(self, t: Union[float, jnp.ndarray]) -> jnp.ndarray:
 
@@ -135,16 +116,17 @@ class SinusoidalTimeEmbedding(TimeEmbedding):
 
         half = self.embed_dim // 2
         log_freqs = -jnp.log(10000) * jnp.linspace(0, 1, half)        
-        freqs = jnp.exp(log_freqs)
+        freqs = 2*jnp.pi*jnp.exp(log_freqs)
         return jnp.concatenate([jnp.sin(t[..., None] * freqs), jnp.cos(t[..., None] * freqs)], axis=-1)
 
-class LogFreqTimeEmbedding(TimeEmbedding):
+class LogFreqTimeEmbedding(nn.Module):
     """
     Fourier-based time embedding using sinusoidal functions.
     
     Creates embeddings using sin and cos functions with different frequencies.
     """
 
+    embed_dim: int
     min_freq: Optional[float] = 0.1
     max_freq: Optional[float] = 10
 
@@ -191,7 +173,7 @@ def create_time_embedding(embed_dim: int,
                          method: str,
                          min_freq: float = 0.1,
                          max_freq: float = 10.0,
-                         T_max: float = 1.0) -> TimeEmbedding:
+                         T_max: float = 1.0):
     """
     Create a time embedding instance.
     
@@ -230,44 +212,6 @@ def create_time_embedding(embed_dim: int,
         )
     else:
         raise ValueError(f"Unknown method: {method}. Use 'fourier', 'log_freq', 'cyclical_fourier', 'sinusoidal', 'linear', 'simple', or 'constant'")
-
-
-def fourier_time_embedding(t: Union[float, jnp.ndarray], 
-                          embed_dim: int,
-                          max_freq: float = 10.0) -> jnp.ndarray:
-    """
-    Create Fourier time embedding directly without class instantiation.
-    
-    Args:
-        t: Time value(s) ∈ [0, 1]
-        embed_dim: Dimension of the embedding
-        max_freq: Maximum frequency
-        
-    Returns:
-        Time embedding [embed_dim,] or [batch_size, embed_dim]
-    """
-    embedding = LogFreqTimeEmbedding(
-        embed_dim=embed_dim,
-        max_freq=max_freq
-    )
-    return embedding(t)
-
-
-def simple_time_embedding(t: Union[float, jnp.ndarray], 
-                         embed_dim: int) -> jnp.ndarray:
-    """
-    Create simple time embedding directly without class instantiation.
-    
-    Args:
-        t: Time value(s) ∈ [0, 1]
-        embed_dim: Dimension of the embedding
-        
-    Returns:
-        Time embedding [embed_dim,] or [batch_size, embed_dim]
-    """
-    embedding = LinearTimeEmbedding(embed_dim=embed_dim)
-    return embedding(t)
-
 
 # Example usage and testing
 if __name__ == "__main__":

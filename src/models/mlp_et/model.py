@@ -24,7 +24,7 @@ from ...utils.activation_utils import get_activation_function
 # CONFIGURATION CLASS
 # ============================================================================
 
-@dataclass
+@dataclass(frozen=True)
 class Config(BaseConfig):
     """
     Configuration class for MLP ET networks.

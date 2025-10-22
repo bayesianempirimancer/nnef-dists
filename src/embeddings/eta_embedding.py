@@ -65,6 +65,7 @@ class EtaEmbedding(nn.Module):
         eta_norm = jnp.linalg.norm(eta, axis=-1, keepdims=True)
         eta_norm_safe = jnp.maximum(eta_norm, 1e-6)  # Avoid division by zero
         eta_normalized = eta / eta_norm_safe
+        eta_inverse_safe = jnp.clip(1./eta,-1000.0,1000.0)
 
         features = []
 
@@ -76,18 +77,18 @@ class EtaEmbedding(nn.Module):
         # Apply method-specific feature selection
         elif method == 'default':
             # Default: eta, eta/||eta||, eta/||eta||^2, norm features
-            features.append(nn.softplus(eta))
+            features.append(nn.sigmoid(eta_norm)*eta_normalized)  # This feature captures the limit of large eta.
+            features.append(nn.softplus(eta))                     # These features show up alot in 1d distributions.
             features.append(nn.softplus(-eta))
-            features.append(nn.sigmoid(eta))
+            features.append(nn.sigmoid(eta))                      
             features.append(eta*jnp.exp(-jnp.abs(eta)))
             features.append(jnp.exp(-jnp.abs(eta)))
+            features.append(nn.tanh(eta)/eta_inverse_safe)
+            features.append(eta_inverse_safe*jnp.exp(-jnp.abs(eta_inverse_safe)))
             features.append(eta_normalized)  # eta/||eta||
             features.append(eta_normalized/eta_norm_safe)
-            eta_inverse = jnp.clip(1./eta,-1000.0,1000.0)
-            features.append(eta_inverse*jnp.exp(-jnp.abs(eta_inverse)))   
-            features.append(jnp.log(jnp.abs(eta)+0.001))
             features.append(eta_norm)  # ||eta||
-            features.append(1.0/eta_norm_safe)  # 1/||eta||
+            features.append(1.0/(eta_norm + 1e-6))  # 1/||eta||
             features.append(-jnp.log(1.0 + eta_norm))  # -log(1+||eta||)
             
         elif method == 'polynomial':

@@ -9,7 +9,7 @@ from dataclasses import dataclass, fields
 from typing import Dict, Any, Tuple
 
 
-@dataclass
+@dataclass(frozen=True)
 class BaseConfig:
     """
     Base model configuration containing common parameters used by most models.

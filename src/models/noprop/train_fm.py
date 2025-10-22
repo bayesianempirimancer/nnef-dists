@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-NoProp MLP Training Script
+NoProp Flow Matching Training Script
 
-This script provides a command-line interface for training NoProp MLP models.
-It uses the NoProp training protocol with a simplified MLP architecture instead
-of the Fisher flow field.
+This script provides a command-line interface for training NoProp Flow Matching models.
+It uses the NoProp training protocol with a simplified CRN-MLP architecture
 
 Usage:
-    python src/training/noprop_mlp_trainer.py --data data/training_data.pkl --epochs 100
-    python src/training/noprop_mlp_trainer.py --data data/my_data.pkl --hidden-sizes 64 64 64
+    python src/models/noprop/train_fm.py --data data/training_data.pkl --epochs 100
+    python src/models/noprop/train_fm.py --data data/my_data.pkl --hidden-sizes 64 64 64
 """
 
 import argparse
+import pickle
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import time
 
 # Handle imports for both module usage and direct script execution
@@ -26,14 +26,10 @@ if __name__ == "__main__":
     # Use absolute imports when running as script
     from src.models.base_training_config import BaseTrainingConfig
     from src.models.base_trainer import BaseETTrainer
-    from src.training.flow_model_trainer import FlowModelTrainer
-    from scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
 else:
     # Use relative imports when used as module
     from ..base_training_config import BaseTrainingConfig
     from ..base_trainer import BaseETTrainer
-    from ...training.flow_model_trainer import FlowModelTrainer
-    from ....scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
 
 import jax
 import jax.numpy as jnp
@@ -43,24 +39,24 @@ import optax
 # Model imports
 if __name__ == "__main__":
     # When run as script, use absolute imports
-    from src.models.noprop_mlp_et.model import Config, NoProp_MLP_ET_Network
+    from src.models.noprop.fm import Config, NoPropFM
 else:
     # When used as module, use relative imports
-    from .model import Config, NoProp_MLP_ET_Network
+    from .fm import Config, NoPropFM
 
 
-class NoPropMLPTrainer:
+class NoPropFMTrainer:
     """
-    Trainer for NoProp MLP models using the NoProp training protocol.
+    Trainer for NoProp Flow Matching models using the NoProp training protocol.
     
     This implements a custom training loop with:
     - Continuous-time sampling t ~ Uniform(0,1)
-    - NoProp training protocols (noprop, flow_matching)
+    - Flow Matching training protocols
     - No time integration during training (only during inference)
-    - Custom loss computation for NoProp training
+    - Custom loss computation for NoProp Flow Matching training
     """
     
-    def __init__(self, model: NoProp_MLP_Network, config: NoProp_MLP_Config, training_config: BaseTrainingConfig = None):
+    def __init__(self, model: NoPropFM, config: Config, training_config: BaseTrainingConfig = None):
         self.model = model
         self.config = config
         self.training_config = training_config
@@ -101,7 +97,7 @@ class NoPropMLPTrainer:
         else:
             effective_dropout_epochs = dropout_epochs  # Use specified dropout epochs
         
-        print(f"Starting NoProp MLP training for {num_epochs} epochs...")
+        print(f"Starting NoProp Flow Matching training for {num_epochs} epochs...")
         print(f"Training data: {train_eta.shape[0]} samples")
         print(f"Validation data: {val_eta.shape[0]} samples")
         print(f"Loss type: {self.config.loss_type}")
@@ -113,7 +109,7 @@ class NoPropMLPTrainer:
         self.rng, init_rng = jax.random.split(self.rng)
         # NoProp models need (z, eta, t) for initialization
         z_sample = jnp.zeros_like(train_mu_T[:1])
-        t_sample = jnp.array(0.0)
+        t_sample = jnp.array([0.0])  # Make it an array with batch dimension
         params = self.model.init(init_rng, z_sample, train_eta[:1], t_sample, training=True)
         
         # Initialize optimizer
@@ -146,12 +142,10 @@ class NoPropMLPTrainer:
             
             # Compute loss and gradients
             def loss_func(params):
-                # Split RNG for both noise and dropout
-                noise_rng, dropout_rng = jax.random.split(train_rng, 2)
-                rngs = {'noise': noise_rng, 'dropout': dropout_rng}
-                return self.model.loss(params, eta_batch, mu_T_batch, training=use_dropout, rngs=rngs)
+                # For FM model, use compute_loss method with (x, target, key) signature
+                return self.model.compute_loss(params, eta_batch, mu_T_batch, train_rng)
             
-            loss, grads = jax.value_and_grad(loss_func)(params)
+            (loss, metrics), grads = jax.value_and_grad(loss_func, has_aux=True)(params)
             
             # Update parameters
             updates, opt_state = self.optimizer.update(grads, opt_state, params)
@@ -161,9 +155,7 @@ class NoPropMLPTrainer:
             
             # Validation - compute every epoch
             val_rng = jax.random.PRNGKey(42)  # Fixed seed for validation
-            val_noise_rng, val_dropout_rng = jax.random.split(val_rng, 2)
-            val_rngs = {'noise': val_noise_rng, 'dropout': val_dropout_rng}
-            val_loss = self.model.loss(params, val_eta, val_mu_T, training=False, rngs=val_rngs)
+            val_loss, val_metrics = self.model.compute_loss(params, val_eta, val_mu_T, val_rng)
             val_losses.append(float(val_loss))
             
             if val_loss < best_val_loss:
@@ -177,7 +169,7 @@ class NoPropMLPTrainer:
         
         # Compute inference time
         start_time = time.time()
-        _ = self.model.predict(params, val_eta[:100], n_time_steps=20)
+        _ = self.model.predict(params, val_eta[:100], num_steps=20)
         inference_time = time.time() - start_time
         
         # Count parameters
@@ -207,14 +199,31 @@ class NoPropMLPTrainer:
 
 
 
-def create_configs_from_args(args, eta_dim: int, mu_dim: int) -> Tuple[NoProp_MLP_Config, BaseTrainingConfig]:
+def create_configs_from_args(args, eta_dim: int, mu_dim: int) -> Tuple[Config, BaseTrainingConfig]:
     """Create model and training configurations from command line arguments."""
     print("\nCreating configurations...")
     
-    # Create model config using the config class
-    model_config = NoProp_MLP_Config.create_from_args(args)
-    model_config.input_dim = eta_dim
-    model_config.output_dim = mu_dim
+    # Create model config with all required values
+    config_kwargs = {
+        'input_dim': eta_dim,
+        'output_dim': mu_dim,
+    }
+    
+    # Set hidden sizes from command line arguments
+    if hasattr(args, 'hidden_sizes'):
+        config_kwargs['hidden_sizes'] = tuple(args.hidden_sizes)
+    if hasattr(args, 'dropout_rate'):
+        config_kwargs['model_dropout_rate'] = args.dropout_rate
+    if hasattr(args, 'activation'):
+        config_kwargs['activation'] = args.activation
+    # Flow Matching doesn't use noise schedules
+    
+    # Add missing attributes for base config compatibility (only if they exist in Config)
+    # Note: Config class inherits from BaseConfig, so it should have these fields
+    # But we need to be careful about which fields actually exist
+    
+    # Create the model config with all values
+    model_config = Config(**config_kwargs)
 
     # Create training config using the centralized method
     training_config = BaseETTrainer.create_training_config_from_args(args)
@@ -222,7 +231,7 @@ def create_configs_from_args(args, eta_dim: int, mu_dim: int) -> Tuple[NoProp_ML
     return model_config, training_config
 
 
-def train_model(model_config: NoProp_MLP_Config, training_config: BaseTrainingConfig, 
+def train_model(model_config: Config, training_config: BaseTrainingConfig, 
                 data: Dict[str, Any], output_dir: Path,
                 epochs: int, dropout_epochs: Optional[int]) -> Dict[str, Any]:
     """
@@ -243,7 +252,7 @@ def train_model(model_config: NoProp_MLP_Config, training_config: BaseTrainingCo
     print("CONFIGURATION SUMMARY")
     print("="*60)
     print(f"Model Configuration:")
-    print(f"  Type: noprop_mlp")
+    print(f"  Type: noprop_fm")
     print(f"  Architecture: {model_config.get_architecture_summary()}")
     print(f"  Supports dropout: {model_config.supports_dropout}")
     print(f"  Dropout rate: {model_config.dropout_rate}")
@@ -266,9 +275,9 @@ def train_model(model_config: NoProp_MLP_Config, training_config: BaseTrainingCo
     else:
         print(f"\nStarting training for {epochs} epochs with {dropout_epochs} dropout epochs...")
     
-    # Create model and trainer
-    model = NoProp_MLP_Network(config=model_config)
-    trainer = NoPropMLPTrainer(model, model_config, training_config)
+    # Create Flow Matching model (no noise schedule needed for FM)
+    model = NoPropFM(config=model_config)
+    trainer = NoPropFMTrainer(model, model_config, training_config)
     
     print(f"Model will be saved to: {output_dir}")
     
@@ -287,23 +296,36 @@ def train_model(model_config: NoProp_MLP_Config, training_config: BaseTrainingCo
         output_dir=str(output_dir)
     )
     
-    return results
+    return results, model
+
+
+def add_noprop_fm_arguments(parser):
+    """Add NoProp Flow Matching specific arguments to parser."""
+    # Add model-specific arguments
+    parser.add_argument("--hidden-sizes", type=int, nargs="+", default=[64, 64, 64], 
+                       help="Hidden layer sizes (default: 64 64 64)")
+    parser.add_argument("--dropout-rate", type=float, default=0.0, 
+                       help="Dropout rate (default: 0.0)")
+    parser.add_argument("--activation", type=str, default="swish", 
+                       help="Activation function (default: swish)")
+    # Flow Matching doesn't use noise schedules, so remove that argument
+    return parser
 
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
     # Start with base parser
-    parser = BaseETTrainer.create_base_argument_parser("NoProp MLP Training Script")
+    parser = BaseETTrainer.create_base_argument_parser("NoProp Flow Matching Training Script")
     
-    # Add NoProp MLP specific arguments
-    parser = add_noprop_mlp_arguments(parser)
+    # Add NoProp Flow Matching specific arguments
+    parser = add_noprop_fm_arguments(parser)
     
     return parser.parse_args()
 
 
 def main():
     """Main training function."""
-    print("NoProp MLP Training Script")
+    print("NoProp Flow Matching Training Script")
     print("="*60)
     
     # Parse arguments
@@ -322,7 +344,7 @@ def main():
     if args.output_dir is None:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = f"artifacts/noprop_mlp_{timestamp}"
+        output_dir = f"artifacts/noprop_fm_{timestamp}"
     else:
         output_dir = args.output_dir
     print(f"Output directory: {output_dir}")
@@ -331,7 +353,7 @@ def main():
     print("4. Training model...")
     epochs = args.epochs if hasattr(args, 'epochs') and args.epochs is not None else 100
     dropout_epochs = args.dropout_epochs if hasattr(args, 'dropout_epochs') and args.dropout_epochs is not None else None
-    results = train_model(
+    results, model = train_model(
         model_config, 
         training_config, 
         data, 
@@ -363,18 +385,58 @@ def main():
     # Generate plots
     print("6. Generating training plots...")
     try:
-        # Generate enhanced learning curves plot
-        from scripts.load_model_and_data import load_model_and_data
-        from ....scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
-        config, results, data, model, params, metadata = load_model_and_data(str(output_dir), args.data)
-        save_path = Path(output_dir) / "learning_errors_enhanced.png"
-        create_enhanced_learning_plot(config, results, data, model, params, metadata, save_path)
-        print(f"Training plots saved to: {output_dir}")
+        # Use the specialized plotting function for diffusion models
+        from src.utils.plotting_fm import create_learning_plot_fm
+        
+        # Prepare data for plotting
+        plot_data = {
+            'train': {
+                'eta': data['train']['eta'],
+                'mu_T': data['train']['mu_T'],
+                'cov_TT': data['train']['cov_TT'],
+                'ess': data['train']['ess']
+            },
+            'val': {
+                'eta': data['val']['eta'],
+                'mu_T': data['val']['mu_T'],
+                'cov_TT': data['val']['cov_TT'],
+                'ess': data['val']['ess']
+            },
+            'test': {
+                'eta': data['test']['eta'],
+                'mu_T': data['test']['mu_T'],
+                'cov_TT': data['test']['cov_TT'],
+                'ess': data['test']['ess']
+            }
+        }
+        
+        # Create metadata
+        metadata = {
+            'total_expected_MSE_train': None,  # Will be calculated from cov_TT and ess
+            'total_expected_MSE_val': None
+        }
+        
+        # Create comprehensive learning plot for diffusion model
+        plot_path = Path(output_dir) / "learning_analysis.png"
+        create_learning_plot_fm(
+            config=model_config.__dict__,
+            results=results,
+            data=plot_data,
+            model=model,
+            params=results['params'],
+            metadata=metadata,
+            save_path=str(plot_path)
+        )
+        
+        print(f"Comprehensive learning analysis plot saved to: {plot_path}")
+        
     except Exception as e:
         print(f"Warning: Could not generate plots: {e}")
+        import traceback
+        traceback.print_exc()
     
     print("\n" + "="*60)
-    print("✅ SUCCESS! NoProp MLP training completed")
+    print("✅ SUCCESS! NoProp Flow Matching training completed")
     print(f"Results saved to: {output_dir}")
     print("="*60)
 
