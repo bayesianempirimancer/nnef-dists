@@ -116,7 +116,7 @@ class SinusoidalTimeEmbedding(nn.Module):
 
         half = self.embed_dim // 2
         log_freqs = -jnp.log(10000) * jnp.linspace(0, 1, half)        
-        freqs = 2*jnp.pi*jnp.exp(log_freqs)
+        freqs = 0.5*jnp.pi*jnp.exp(log_freqs)
         return jnp.concatenate([jnp.sin(t[..., None] * freqs), jnp.cos(t[..., None] * freqs)], axis=-1)
 
 class LogFreqTimeEmbedding(nn.Module):

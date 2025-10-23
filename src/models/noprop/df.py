@@ -1,9 +1,8 @@
 """
-NoProp-FM: Flow Matching NoProp implementation.
+NoProp-CT: Continuous-time NoProp implementation.
 
-This module implements the flow matching variant of NoProp.
-The key idea is to model the denoising process as a flow that transforms
-a base distribution to the target distribution.
+This module implements the continuous-time variant of NoProp using neural ODEs.
+The key idea is to model the denoising process as a continuous-time dynamical system.
 """
 
 from typing import Any, Dict, Tuple, Optional
@@ -18,6 +17,8 @@ import optax
 
 from ..base_model import BaseModel
 from ..base_config import BaseConfig
+from ...embeddings.noise_schedules import NoiseSchedule, LinearNoiseSchedule, CosineNoiseSchedule, SigmoidNoiseSchedule
+from ...embeddings.noise_schedules import SimpleLearnableNoiseSchedule, LearnableNoiseSchedule
 from ...utils.ode_integration import integrate_ode
 from ...utils.jacobian_utils import trace_jacobian
 from .crn import ConditionalResnet_MLP as ConditionalResnet
@@ -29,24 +30,24 @@ from .crn import ConditionalResnet_MLP as ConditionalResnet
 
 @dataclass(frozen=True)
 class Config(BaseConfig):
-    """Configuration for NoProp FM Network."""
+    """Configuration for NoProp CT Network."""
     
     # Set model_name from config_dict
-    model_name: str = "noprop_fm_net"
+    model_name: str = "simple_crn"
     output_dir_parent: str = "artifacts"
     
     # Properties for easy access
     
-    # Hierarchical configuration structure
+    # Hierarchical configuration structure loss_type: "snr_weighted_mse", "mse"
     config_dict = {
-        "model_name": "noprop_fm_net",
+        "model_name": "simple_crn",
         "loss_type": "mse",
         
         # NoProp specific parameters
+        "noise_schedule": "sigmoid",
         "num_timesteps": 20,
         "integration_method": "euler",
         "reg_weight": 0.0,
-        "sigma_t": 0.1,
         
         "model": {
             "type": "conditional_resnet",
@@ -54,8 +55,6 @@ class Config(BaseConfig):
             "dropout_rate": 0.1,
             "activation": "swish",
             "use_batch_norm": False,
-            "use_resnet": False,
-            "num_resnet_blocks": 0,
             "use_layer_norm": False,
         },
         
@@ -76,24 +75,23 @@ class Config(BaseConfig):
 # MODEL IMPLEMENTATION
 # ============================================================================
 
-class NoPropFM(BaseModel[Config]):
-    """Flow Matching NoProp implementation.
+class NoPropDF(BaseModel[Config]):
+    """Diffusion NoProp implementation.
     
-    This class implements the flow matching variant where the denoising
-    process is modeled as a flow that transforms a base distribution
-    to the target distribution over continuous time.
+    This class implements a standard diffusion model where the neural network
+    predicts noise instead of directly predicting the target or flow derivative.
     """
     
     config: Config
     z_shape: Tuple[int, ...]  # Shape of target z (excluding batch dimensions)
     x_ndims: int = 1  # Number of dimensions in input x
+    noise_schedule: NoiseSchedule = SimpleLearnableNoiseSchedule()
     
     @property
     def z_ndims(self) -> int:
         """Number of dimensions in z_shape."""
         return len(self.z_shape)
-    
-    
+        
     @property
     def z_dim(self) -> int:
         """Total flattened dimension of z."""
@@ -107,12 +105,6 @@ class NoPropFM(BaseModel[Config]):
         for dim in self.z_shape:
             z_dim *= dim
         return z_dim
-
-    # @nn.compact
-    # def _get_z_0(self) -> jnp.ndarray:
-    #     """Learnable initial z parameter."""
-    #     z_0 = self.param('z0', lambda rng, shape: jr.normal(rng, shape), self.z_shape)
-    #     return z_0
 
     def _flatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
         """Flatten the z tensor."""
@@ -131,7 +123,7 @@ class NoPropFM(BaseModel[Config]):
     @nn.compact
     def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> jnp.ndarray:
         """
-        Main forward pass to compute model output.
+        Main forward pass to compute dz_dt
         
         Args:
             z: Current state/trajectory of shape (batch_size, z_dim)
@@ -142,13 +134,13 @@ class NoPropFM(BaseModel[Config]):
             **kwargs: Additional arguments (for HF compatibility)
             
         Returns:
-            Model output [batch_shape + z_shape]
+            dz/dt [batch_shape + z_shape]
         """
-        # z_0 = self._get_z_0()
         z = self._unflatten_z(z)
-        model_output = self._get_model_output(z, x, t, training=training)
-        output = self._flatten_z(model_output)
-        return output
+        
+        # For diffusion, the neural network predicts noise
+        predicted_noise = self._get_model_output(z, x, t, training=training)
+        return predicted_noise
 
     @nn.compact
     def _get_model_output(
@@ -172,6 +164,11 @@ class NoPropFM(BaseModel[Config]):
         )
         return model(z, x, t, training=training)
 
+    @nn.compact
+    def get_gamma_gamma_prime_t(self, t: jnp.ndarray):
+        """Get noise schedule output using @nn.compact method."""
+        return self.noise_schedule(t)
+    
     def dz_dt(
         self,
         params: Dict[str, Any],
@@ -179,8 +176,10 @@ class NoPropFM(BaseModel[Config]):
         x: jnp.ndarray,
         t: jnp.ndarray
     ) -> jnp.ndarray:
-        """Wrapper for ode solver
-
+        """Compute dz/dt for the diffusion process.
+        
+        This is just a wrapper for the __call__ method.
+        
         Args:
             params: Model parameters
             z: Current state [batch_size + z_shape]
@@ -190,10 +189,10 @@ class NoPropFM(BaseModel[Config]):
         Returns:
             Vector field dz/dt [batch_size + z_shape]
         """
-        # Ensure t is always treated as an array for proper broadcasting
-        t = jnp.asarray(t)
-        
-        return self.apply(params, z, x, t, training=False)
+
+        predicted_noise = self.apply(params, z, x, t, training=False)
+        dz_dt = 0.5*z - predicted_noise 
+        return dz_dt
     
     @partial(jax.jit, static_argnums=(0,))  # self is static
     def compute_loss(
@@ -203,60 +202,74 @@ class NoPropFM(BaseModel[Config]):
         target: jnp.ndarray,
         key: jr.PRNGKey
     ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
-        """Compute the NoProp-FM loss.
+        """Compute the diffusion loss.
         
-        For flow matching, the loss is simply the MSE between model output and target:
-        L_FM = E[||model_output - (z_target - z_0)||²]  where z_0 is a random initial condition
+        For diffusion, the loss is MSE between predicted noise and actual noise:
+        L_diff = E[||model_output - noise||²]
         
         Args:
             params: Model parameters
             x: Input data [batch_shape, ...]
             target: Clean target [batch_shape + z_shape]
-            key: Random key for sampling t and z_t
+            key: Random key for sampling t and noise
             
         Returns:
             Tuple of (loss, metrics)
         """
-
         target = self._flatten_z(target)
         batch_shape = target.shape[:-1]
+        
         # Split keys for all random operations
-        key, t_key, z_0_key, z_t_noise_key = jr.split(key, 4)
+        key, t_key, noise_key = jr.split(key, 3)
         
+        # Sample random timesteps
         t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
-#        z_shift = self.apply(params, method=self._get_z_0)
-#        target = target - z_shift
-
-        z_0 = jr.normal(z_0_key, batch_shape + self.z_shape)
-        z_t = t[...,None] * target + self.config.sigma_t * jr.normal(z_t_noise_key, batch_shape + self.z_shape)
-
-        # Get model output
-        key, dropout_key = jr.split(key)
-        dz_dt = self.apply(params, z_t, x, t, rngs={'dropout': dropout_key})
-        # Construct estimated target 
-        z_1_est = z_t + dz_dt*(1.0-t[:,None])
-
-        # Compute MSE loss
-        squared_error = (z_1_est - target) ** 2
-        mse = jnp.mean(squared_error)
         
+        # Get noise schedule (linear: alpha_t = t)
+        alpha_t = t
+        alpha_t_sqrt = jnp.sqrt(alpha_t)
+        one_minus_alpha_t_sqrt = jnp.sqrt(1.0 - alpha_t)
+        
+        # Sample noise
+        noise = jr.normal(noise_key, target.shape)
+        
+        # Create noisy target: z_t = sqrt(alpha_t) * target + sqrt(1-alpha_t) * noise
+        z_t = alpha_t_sqrt[..., None] * target + one_minus_alpha_t_sqrt[..., None] * noise
+        
+        # Get model output (predicted noise)
+        key, dropout_key = jr.split(key)
+        predicted_noise = self.apply(params, z_t, x, t, rngs={'dropout': dropout_key})
+        
+        # Compute MSE loss between predicted and actual noise
+        squared_error = (predicted_noise*one_minus_alpha_t_sqrt[..., None] - noise) ** 2
+        
+
         # Regularization loss
-        reg_loss = jnp.mean(dz_dt ** 2)
-        fm_loss = jnp.mean((dz_dt - (target - z_0)) ** 2)
-#        no_prop_fm_loss = jnp.mean((dz_dt - (target - z_t)/(1.0-t[:,None])) ** 2)
-
-        total_loss = fm_loss + self.config.reg_weight * reg_loss
-
+        reg_loss = jnp.mean(predicted_noise ** 2)        
+        if self.config.loss_type == "snr_weighted_mse":
+            mse = None
+            snr_weight = 1.0/(1.0-alpha_t)
+            snr_weight_mean = jnp.mean(snr_weight)
+            snr_weight = snr_weight / snr_weight_mean
+            snr_weighted_loss = jnp.mean(snr_weight[..., None] * squared_error)
+            total_loss = snr_weighted_loss + self.config.reg_weight * reg_loss
+        else:
+            mse = jnp.mean(squared_error)
+            total_loss = mse + self.config.reg_weight * reg_loss
+            snr_weighted_loss = None
+            snr_weight_mean = None
+        
         # Compute additional metrics
         metrics = {
-            "fm_loss": fm_loss,
             "mse": mse,
             "reg_loss": reg_loss,
             "total_loss": total_loss,
+            "snr_weighted_loss": snr_weighted_loss,
+            "snr_weight_mean": snr_weight_mean,
         }
         
         return total_loss, metrics
-    
+        
     @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type, with_logp are static arguments    
     def predict(
         self,
@@ -269,7 +282,7 @@ class NoPropFM(BaseModel[Config]):
         key: jr.PRNGKey = None
     ) -> jnp.ndarray:
         """
-        Generate predictions using the trained NoProp-FM neural ODE.
+        Generate predictions using the trained NoProp-CT neural ODE.
         
         This integrates the learned vector field from zeros (t=0)
         to the final prediction (t=1), following the paper's approach.
@@ -295,9 +308,10 @@ class NoPropFM(BaseModel[Config]):
         # Infer batch shape from input tensor
         batch_shape = x.shape[:-self.x_ndims]
 
+        # For diffusion, always start from pure noise
         z0 = jnp.zeros(batch_shape + self.z_shape)
         if key is not None:
-            z0 = z0 +jr.normal(key, batch_shape + self.z_shape)  # check for sensitivity to initial conditions
+            z0 = z0 + jr.normal(key, batch_shape + self.z_shape)
         
         if with_logp:
             # Combined vector field for z and logp integration
@@ -307,8 +321,7 @@ class NoPropFM(BaseModel[Config]):
                 dz_dt = self.dz_dt(params, z, x, t)
                 # Compute Jacobian trace for logp evolution
                 # Broadcast t to match batch size
-                t_broadcast = jnp.broadcast_to(t, z.shape[:-1])
-                trace_jac = trace_jacobian(self.dz_dt, params, z, x, t_broadcast)
+                trace_jac = trace_jacobian(self.dz_dt, params, z, x, t)
                 dlogp_dt = -trace_jac
                 return jnp.concatenate([dz_dt, dlogp_dt[..., None]], axis=-1)
             
@@ -326,26 +339,26 @@ class NoPropFM(BaseModel[Config]):
                     method=integration_method,
                     output_type=output_type
                 )
-            # add the learned offset
-#            z_1 = z_1 + jnp.concatenate([self.apply(params_no_grad, method=self._get_z_0), jnp.zeros(batch_shape + (1,))], axis=-1)
-
+            # For diffusion, no learned offset needed
         else:
             # Standard vector field for z only
             def vector_field(params, z, x, t):
                 return self.dz_dt(params, z, x, t)
 
             z_1 = integrate_ode(
-                vector_field=vector_field,
-                params=params_no_grad,
-                z0=z0,
-                x=x,
-                time_span=(0.0, 1.0),
-                num_steps=num_steps,
-                method=integration_method,
-                output_type=output_type
-            )
-#            z_1 = z_1 + self.apply(params_no_grad, method=self._get_z_0)
+                    vector_field=vector_field,
+                    params=params_no_grad,
+                    z0=z0,
+                    x=x,
+                    time_span=(0.0, 1.0),
+                    num_steps=num_steps,
+                    method=integration_method,
+                    output_type=output_type
+                )
+
         return z_1
+
+
 
     @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
     def train_step(
@@ -358,7 +371,7 @@ class NoPropFM(BaseModel[Config]):
         key: jr.PRNGKey,
     ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
 
-        """Single training step for NoProp-FM.
+        """Single training step for NoProp-CT.
         
         Args:
             params: Model parameters
@@ -370,8 +383,9 @@ class NoPropFM(BaseModel[Config]):
             
         Returns:
             Tuple of (updated_params, updated_opt_state, loss, metrics)
-        """
-        # Compute loss and gradients first
+    """
+        # Compute loss and gradients (t and z_t are sampled inside compute_loss)
+        # compute_loss is already JIT-compiled, so this will be fast
         (loss, metrics), grads = jax.value_and_grad(
             self.compute_loss, has_aux=True)(params, x, target, key)
         
@@ -380,3 +394,4 @@ class NoPropFM(BaseModel[Config]):
         updated_params = optax.apply_updates(params, updates)
         
         return updated_params, updated_opt_state, loss, metrics
+    

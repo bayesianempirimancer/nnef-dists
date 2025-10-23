@@ -12,40 +12,17 @@ from typing import Dict, Any, Tuple
 @dataclass(frozen=True)
 class BaseConfig:
     """
-    Base model configuration containing common parameters used by most models.
+    Base model configuration containing only the essential model identification.
     
-    This configuration includes the most commonly used parameters across different
-    model types, with model-specific configs only adding unique parameters.
+    Specific model configs should define their own parameters in config_dict
+    for hierarchical organization and automatic namespace conversion.
     """
     
     # === MODEL IDENTIFICATION ===
     model_name: str = "base_model_network"
     
-    # === INPUT/OUTPUT DIMENSIONS ===
-    input_dim: int = 0
-    output_dim: int = 0
-    
-    # === COMMON ARCHITECTURE PARAMETERS ===
-    activation: str = "swish"
-    dropout_rate: float = 0.1
-    
-    # === COMMON REGULARIZATION ===
-    use_layer_norm: bool = False
-    use_batch_norm: bool = False
-        
-    # === MODEL INITIALIZATION ===
-    initialization_method: str = "lecun_normal"
-    initialization_scale: float = 1.0
-    
-    # === EMBEDDING PARAMETERS ===
-    embedding_type: str = "default"  # Type of eta embedding to use
-        
-    # === MODEL CAPABILITIES (for trainer compatibility) ===
-    supports_dropout: bool = True
-    supports_batch_norm: bool = True
-    supports_layer_norm: bool = True
-    supports_residual_connections: bool = True
-    supports_attention: bool = False
+    # === OUTPUT DIRECTORY ===
+    output_dir_parent: str = "artifacts"
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary using introspection."""
@@ -55,23 +32,56 @@ class BaseConfig:
         return result
     
     def get_architecture_summary(self) -> str:
-        """Get a summary of the architecture."""
-        layers = [str(self.input_dim)] + [str(size) for size in self.hidden_sizes] + [str(self.output_dim)]
-        arch_str = " -> ".join(layers)
+        """Get a summary of the entire configuration."""
+        if hasattr(self, 'config_dict'):
+            # Use the hierarchical config structure
+            return self._format_config_dict(self.config_dict)
+        else:
+            # Fallback to the old method for backward compatibility
+            return self._get_legacy_architecture_summary()
+    
+    def _format_config_dict(self, config_dict, indent=0) -> str:
+        """Format the config_dict as a readable string."""
+        lines = []
+        indent_str = "  " * indent
+        
+        for key, value in config_dict.items():
+            if isinstance(value, dict):
+                lines.append(f"{indent_str}{key}:")
+                lines.append(self._format_config_dict(value, indent + 1))
+            else:
+                # Format the value nicely
+                if isinstance(value, tuple):
+                    value_str = f"({', '.join(map(str, value))})"
+                elif isinstance(value, str):
+                    value_str = f'"{value}"'
+                else:
+                    value_str = str(value)
+                lines.append(f"{indent_str}{key}: {value_str}")
+        
+        return "\n".join(lines)
+    
+    def _get_legacy_architecture_summary(self) -> str:
+        """Legacy architecture summary for backward compatibility."""
+        try:
+            layers = [str(self.input_dim)] + [str(size) for size in self.hidden_sizes] + [str(self.output_dim)]
+            arch_str = " -> ".join(layers)
 
-        features = []
-        if self.use_resnet:
-            features.append(f"ResNet({self.num_resnet_blocks} blocks)")
-        if self.use_batch_norm:
-            features.append("BatchNorm")
-        if self.use_layer_norm:
-            features.append("LayerNorm")
-        if self.dropout_rate > 0:
-            features.append(f"Dropout({self.dropout_rate})")
+            features = []
+            if hasattr(self, 'use_resnet') and self.use_resnet:
+                features.append(f"ResNet({self.num_resnet_blocks} blocks)")
+            if hasattr(self, 'use_batch_norm') and self.use_batch_norm:
+                features.append("BatchNorm")
+            if hasattr(self, 'use_layer_norm') and self.use_layer_norm:
+                features.append("LayerNorm")
+            if hasattr(self, 'dropout_rate') and self.dropout_rate > 0:
+                features.append(f"Dropout({self.dropout_rate})")
 
-        feature_str = f" + {', '.join(features)}" if features else ""
-
-        return f"{self.model_name.upper()}: {arch_str} ({self.activation}){feature_str}"
+            feature_str = f" + {', '.join(features)}" if features else ""
+            return f"{self.model_name.upper()}: {arch_str} ({self.activation}){feature_str}"
+        except AttributeError:
+            # If attributes don't exist, just return basic info
+            return f"{self.model_name.upper()}: Configuration summary not available"
     
     @classmethod
     def from_pretrained(cls, model_name_or_path: str, **kwargs):
@@ -148,20 +158,50 @@ class BaseConfig:
         """
         Get the list of model-specific attributes that can be set via command line arguments.
         
-        Subclasses can override this to specify which parameters they support.
+        Subclasses should override this to specify which parameters they support.
         """
-        return [
-            'input_dim', 'output_dim', 'hidden_sizes', 'activation', 'dropout_rate', 
-            'num_resnet_blocks', 'initialization_method', 'embedding_type'
-        ]
+        return ['model_name', 'output_dir_parent']  # Base class attributes
     
     def __str__(self) -> str:
         """String representation of configuration."""
-        return f"{self.__class__.__name__}(name={self.model_name}, input_dim={self.input_dim}, output_dim={self.output_dim})"
+        return f"{self.__class__.__name__}(model_name={self.model_name}, output_dir_parent={self.output_dir_parent})"
     
     def __repr__(self) -> str:
         """Detailed string representation."""
-        return (f"{self.__class__.__name__}("
-                f"model_name='{self.model_name}', "
-                f"input_dim={self.input_dim}, "
-                f"output_dim={self.output_dim})")
+        return f"{self.__class__.__name__}(model_name='{self.model_name}', output_dir_parent='{self.output_dir_parent}')"
+    
+    def to_namespace(self):
+        """
+        Convert configuration to namespace with attribute access.
+        
+        This allows accessing config values as attributes instead of dictionary keys:
+        config.to_namespace().z_shape instead of config["z_shape"]
+        """
+        from argparse import Namespace
+        
+        def dict_to_namespace(d):
+            """Convert nested dictionary to Namespace with attribute access."""
+            if isinstance(d, dict):
+                return Namespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+            return d
+        
+        return dict_to_namespace(self.to_dict())
+    
+    def __post_init__(self):
+        """Flatten config_dict items directly into the config object if config_dict exists."""
+        if hasattr(self, 'config_dict'):
+            from argparse import Namespace
+            
+            def dict_to_namespace(d):
+                if isinstance(d, dict):
+                    return Namespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+                return d
+            
+            # Flatten config_dict items directly into the config object
+            for key, value in self.config_dict.items():
+                if isinstance(value, dict):
+                    # For nested dicts, create a namespace
+                    object.__setattr__(self, key, dict_to_namespace(value))
+                else:
+                    # For simple values, set directly
+                    object.__setattr__(self, key, value)

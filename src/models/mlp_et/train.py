@@ -26,12 +26,12 @@ if __name__ == "__main__":
     # Use absolute imports when running as script
     from src.models.base_training_config import BaseTrainingConfig
     from src.models.base_trainer import BaseETTrainer
-    from src.utils.plotting import create_learning_plot
+    from scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
 else:
     # Use relative imports when used as module
     from ..base_training_config import BaseTrainingConfig
     from ..base_trainer import BaseETTrainer
-    from ...utils.plotting import create_learning_plot
+    from ....scripts.plotting.plot_learning_curves import create_enhanced_learning_plot
 
 
 # Model imports
@@ -245,14 +245,40 @@ Examples:
         
         # Generate learning curves plot
         save_path = Path(output_dir) / "learning_plot.png"
-        create_learning_plot(
-            model_config.to_dict(),
-            results,
-            data,
-            model,
-            params,
-            data.get('metadata', {}),
-            str(save_path)
+        
+        # Generate predictions for plotting
+        import jax.numpy as jnp
+        import numpy as np
+        
+        def make_predictions_batch(model, params, eta_data, batch_size=100):
+            """Make predictions on data in batches."""
+            predictions = []
+            for i in range(0, len(eta_data), batch_size):
+                batch = eta_data[i:i + batch_size]
+                batch_jnp = jnp.array(batch)
+                pred = model.apply(params, batch_jnp, training=False)
+                # Handle tuple return (some models return (prediction, aux_loss))
+                if isinstance(pred, tuple):
+                    pred = pred[0]
+                predictions.append(np.array(pred))
+            return np.concatenate(predictions, axis=0)
+        
+        # Generate predictions for all datasets
+        train_pred = make_predictions_batch(model, params, data['train']['eta'])
+        val_pred = make_predictions_batch(model, params, data['val']['eta'])
+        test_pred = make_predictions_batch(model, params, data['test']['eta'])
+        
+        # Call the scripts plotting function
+        create_enhanced_learning_plot(
+            results=results,
+            train_pred=train_pred,
+            val_pred=val_pred,
+            test_pred=test_pred,
+            train_mu_T=data['train']['mu_T'],
+            val_mu_T=data['val']['mu_T'],
+            test_mu_T=data['test']['mu_T'],
+            output_path=str(save_path),
+            model_name=model_config.model_name
         )
     else:
         print("5. Skipping plot generation (explicitly disabled)")

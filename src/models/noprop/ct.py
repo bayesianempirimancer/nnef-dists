@@ -32,37 +32,42 @@ from .crn import ConditionalResnet_MLP as ConditionalResnet
 class Config(BaseConfig):
     """Configuration for NoProp CT Network."""
     
-    # === MODEL IDENTIFICATION ===
+    # Set model_name from config_dict.  loss_type: "snr_weighted_mse", "mse"
     model_name: str = "simple_crn"
+    loss_type: str = "snr_weighted_mse"
     
-    # === NOPROP CT SPECIFIC PARAMETERS ===
-    z_shape: Tuple[int, ...] = (9,)  # Shape of target z (excluding batch dimensions)
-    x_shape: Tuple[int, ...] = (9,)  # Shape of input x (excluding batch dimensions)
-    noise_schedule: str = "linear"  # Type of noise schedule to use
-    num_timesteps: int = 20
-    integration_method: str = "euler"  # "euler" or "heun"
-    reg_weight: float = 0.0  # Hyperparameter from the paper
+    # Properties for easy access
     
-    # === MODEL CONFIGURATION ===
-    model_type: str = "conditional_resnet"
-    hidden_sizes: Tuple[int, ...] = (128, 128, 128)
-    model_dropout_rate: float = 0.1
-    model_activation: str = "swish"
-    time_embed_dim: int = 64
-    time_embed_method: str = "sinusoidal"
-    time_embed_min_freq: float = 1.0
-    time_embed_max_freq: float = 1000.0
-    eta_embed_type: str = "default"
-    eta_embed_dim: Optional[int] = None
-    activation: str = "swish"
-    use_batch_norm: bool = False
-    dropout_rate: float = 0.1
+    # Hierarchical configuration structure loss_type: "snr_weighted_mse", "mse"
+    config_dict = {
+        "model_name": "simple_crn",
+        "loss_type": "snr_weighted_mse",
+        
+        # NoProp specific parameters
+        "noise_schedule": "learnable",
+        "num_timesteps": 20,
+        "integration_method": "euler",
+        "reg_weight": 0.0,
+        
+        "model": {
+            "type": "conditional_resnet",
+            "hidden_sizes": (128, 128, 128),
+            "dropout_rate": 0.1,
+            "activation": "swish",
+            "use_batch_norm": False,
+            "use_layer_norm": False,
+        },
+        
+        "embedding": {
+            "time_embed_dim": 64,
+            "time_embed_method": "sinusoidal",
+            "time_embed_min_freq": 1.0,
+            "time_embed_max_freq": 1000.0,
+            "eta_embed_type": "default",
+            "eta_embed_dim": None,
+        }
+    }
     
-    # Additional attributes needed for BaseConfig compatibility
-    use_resnet: bool = False
-    num_resnet_blocks: int = 0
-    use_layer_norm: bool = False
-    loss_type: str = "continuous_time"
 
 
 
@@ -79,35 +84,40 @@ class NoPropCT(BaseModel[Config]):
     """
     
     config: Config
+    z_shape: Tuple[int, ...]  # Shape of target z (excluding batch dimensions)
+    x_ndims: int = 1  # Number of dimensions in input x
     noise_schedule: NoiseSchedule = SimpleLearnableNoiseSchedule()
     
     @property
-    def z_shape(self):
-        return self.config.z_shape
-    
+    def z_ndims(self) -> int:
+        """Number of dimensions in z_shape."""
+        return len(self.z_shape)
+        
     @property
-    def x_shape(self):
-        return self.config.x_shape
+    def z_dim(self) -> int:
+        """Total flattened dimension of z."""
+        return self._get_z_dim
+    
     
     @cached_property
     def _get_z_dim(self) -> int:
         """Calculate the flattened dimension from z_shape."""
         z_dim = 1
-        for dim in self.config.z_shape:
+        for dim in self.z_shape:
             z_dim *= dim
         return z_dim
 
     def _flatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
         """Flatten the z tensor."""
-        if len(self.config.z_shape) > 1:
+        if len(self.z_shape) > 1:
             return z.reshape(z.shape[:-1] + (self._get_z_dim(),))
         else:
             return z
 
     def _unflatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
         """Unflatten the z tensor."""
-        if len(self.config.z_shape) > 1:
-            return z.reshape(z.shape[:-1] + self.config.z_shape)
+        if len(self.z_shape) > 1:
+            return z.reshape(z.shape[:-1] + self.z_shape)
         else:
             return z
 
@@ -132,16 +142,24 @@ class NoPropCT(BaseModel[Config]):
         model_output = self._flatten_z(model_output)
         
         # Get gamma values directly from noise schedule
+        t = jnp.asarray(t)
         gamma_t, gamma_prime_t = self.get_gamma_gamma_prime_t(t)
-        
+
+        z0 = self._get_z_0()
         # Compute alpha_t and tau_inverse from gamma values using static utility functions
-        alpha_t = NoiseSchedule.get_alpha_from_gamma(gamma_t)
-        tau_inverse = NoiseSchedule.get_tau_inverse_from_gamma(gamma_t, gamma_prime_t)
+        alpha_t = nn.sigmoid(gamma_t)
+        tau_inverse = gamma_prime_t
                         
         # Compute dz/dt = tau_inverse(t) * (sqrt(alpha(t))*model_output - (1+alpha(t))/2*z)
         # The model_output should predict the target, so we use it in place of target
         return tau_inverse[...,None] * (jnp.sqrt(alpha_t[...,None]) * model_output - 0.5*(1 + alpha_t[...,None]) * z)
     
+
+    @nn.compact
+    def _get_z_0(self) -> jnp.ndarray:
+        z_0 = self.param('z0', lambda rng, shape: jr.normal(rng, shape), self.z_shape)
+        return z_0
+
     @nn.compact
     def _get_model_output(
         self, 
@@ -152,15 +170,15 @@ class NoPropCT(BaseModel[Config]):
     ) -> jnp.ndarray:
         """Get model output - @nn.compact method for parameter initialization."""
         # Create the conditional ResNet model using config parameters
-        from .crn import get_act
+        from ...utils.activation_utils import get_activation_function
         model = ConditionalResnet(
-            hidden_dims=self.config.hidden_sizes,
-            time_embed_dim=self.config.time_embed_dim,
-            time_embed_method=self.config.time_embed_method,
-            eta_embed_type=self.config.eta_embed_type,
-            eta_embed_dim=self.config.eta_embed_dim,
-            activation_fn=get_act(self.config.model_activation),
-            dropout_rate=self.config.model_dropout_rate
+            hidden_dims=self.config.model.hidden_sizes,
+            time_embed_dim=self.config.embedding.time_embed_dim,
+            time_embed_method=self.config.embedding.time_embed_method,
+            eta_embed_type=self.config.embedding.eta_embed_type,
+            eta_embed_dim=self.config.embedding.eta_embed_dim,
+            activation_fn=get_activation_function(self.config.model.activation),
+            dropout_rate=self.config.model.dropout_rate
         )
         return model(z, x, t, training=training)
 
@@ -176,7 +194,7 @@ class NoPropCT(BaseModel[Config]):
         x: jnp.ndarray,
         t: jnp.ndarray
     ) -> jnp.ndarray:
-        """Wrapper for ode solver
+        """Wrapper for use with ode solver
 
         Args:
             params: Model parameters
@@ -187,6 +205,7 @@ class NoPropCT(BaseModel[Config]):
         Returns:
             Vector field dz/dt [batch_size + z_shape]
         """
+        # Ensure t is always treated as an array for proper broadcasting
         return self.apply(params, z, x, t, training=False)
     
     @partial(jax.jit, static_argnums=(0,))  # self is static
@@ -221,39 +240,42 @@ class NoPropCT(BaseModel[Config]):
 
         # Get alpha from noise schedule
         gamma_t, gamma_prime_t = self.apply(params, t, method=self.get_gamma_gamma_prime_t)
-        alpha_t = NoiseSchedule.get_alpha_from_gamma(gamma_t)
-        z_t = jnp.sqrt(alpha_t[...,None]) * target + jnp.sqrt(1.0 - alpha_t[...,None]) * jr.normal(key, target.shape)
+        alpha_t = nn.sigmoid(gamma_t)
+        
+        z_0 = self.apply(params, method=self._get_z_0)
+        target = target - z_0
+        z_t = jnp.sqrt(alpha_t[...,None]) * target + jnp.sqrt(1.0 - alpha_t[...,None]) * jr.normal(z_t_noise_key, target.shape)
+
         # Get model output
-        model_output = self.apply(params, z_t, x, t, training=True, method=self._get_model_output, rngs={'dropout': z_t_key})
+        model_output = self.apply(params, z_t, x, t, training=True, method=self._get_model_output, rngs={'dropout': key})
 
         squared_error = (model_output - target) ** 2
-        mse = jnp.mean(squared_error)
 
         # Regularization loss
         reg_loss = jnp.mean(model_output ** 2)
 
-        # Compute SNR-weighted loss
-        # Compute SNR and SNR derivative from gamma values
-        snr = jnp.exp(gamma_t)  # SNR = exp(γ(t))
-        snr_prime = gamma_prime_t * snr  # SNR' = γ'(t) * exp(γ(t))
-        snr_weighted_loss = jnp.mean(snr_prime[...,None] * squared_error)
-        
-        # Normalize by expected SNR_prime to stabilize learning rate
-        expected_snr_prime = jnp.mean(snr_prime)
-        ct_loss = snr_weighted_loss #/ expected_snr_prime
-#        ct_loss = snr_weighted_loss
-        
-        # total loss
-        total_loss = ct_loss + self.config.reg_weight * reg_loss
+        if self.config.loss_type == "snr_weighted_mse":
+            snr = jnp.exp(gamma_t)  # SNR = exp(γ(t))
+            snr_weight = gamma_prime_t * snr  # SNR' = γ'(t) * exp(γ(t))
+            snr_weight_mean = jnp.mean(snr_weight)
+            snr_weight = snr_weight / snr_weight_mean
+            snr_weighted_loss = jnp.mean(snr_weight[..., None] * squared_error)
+            mse = None
+            total_loss = snr_weighted_loss + self.config.reg_weight * reg_loss
+        else:
+            mse = jnp.mean(squared_error)
+            total_loss = mse + self.config.reg_weight * reg_loss
+            snr_weighted_loss = None
+            snr_weight_mean = None
+            total_loss = mse + self.config.reg_weight * reg_loss
 
         # Compute additional metrics
         metrics = {
-            "ct_loss": ct_loss,
             "mse": mse,
             "reg_loss": reg_loss,
             "total_loss": total_loss,
             "snr_weighted_loss": snr_weighted_loss,  # Before normalization
-            "snr_prime_mean": expected_snr_prime,  # SNR derivative
+            "snr_weight_mean": snr_weight_mean
         }
         
         return total_loss, metrics
@@ -288,18 +310,20 @@ class NoPropCT(BaseModel[Config]):
             If output_type="end_point": Final prediction [batch_shape + z_shape]
             If output_type="trajectory": Full trajectory [num_steps+1, batch_shape + z_shape]
             Note that in fully generative model you need to provide a key, and if x=None, then you need
-                to provide something that returns x.shape[:-len(self.x_shape)] = (number_of_samples,)
+                to provide something that returns x.shape[:-self.x_ndims] = (number_of_samples,)
         """
         # Disable gradient tracking through parameters for inference
         params_no_grad = jax.lax.stop_gradient(params)
         
         # Infer batch shape from input tensor
-        batch_shape = x.shape[:-len(self.x_shape)]
+        batch_shape = x.shape[:-self.x_ndims]
 
-        if key is None:
+        if key is not None:
+            z0 = jr.normal(key, batch_shape + self.z_shape)
+        else: 
             z0 = jnp.zeros(batch_shape + self.z_shape)
-        else:
-            z0 = jr.normal(key, batch_shape + self.z_shape)  # check for sensitivity to initial conditions
+#            z0 = self.apply(params, method=self._get_z_0)
+#            z0 = jnp.broadcast_to(z0, batch_shape + self.z_shape)
         
         if with_logp:
             # Combined vector field for z and logp integration
@@ -309,8 +333,7 @@ class NoPropCT(BaseModel[Config]):
                 dz_dt = self.dz_dt(params, z, x, t)
                 # Compute Jacobian trace for logp evolution
                 # Broadcast t to match batch size
-                t_broadcast = jnp.broadcast_to(t, z.shape[:-1])
-                trace_jac = trace_jacobian(self.dz_dt, params, z, x, t_broadcast)
+                trace_jac = trace_jacobian(self.dz_dt, params, z, x, t)
                 dlogp_dt = -trace_jac
                 return jnp.concatenate([dz_dt, dlogp_dt[..., None]], axis=-1)
             
@@ -318,31 +341,43 @@ class NoPropCT(BaseModel[Config]):
             logp0 = jnp.zeros(batch_shape)
             state0 = jnp.concatenate([z0, logp0[..., None]], axis=-1)
             
-            return integrate_ode(
-                vector_field=vector_field,
-                params=params_no_grad,
-                z0=state0,
-                x=x,
-                time_span=(0.0, 1.0),
-                num_steps=num_steps,
-                method=integration_method,
-                output_type=output_type
-            )
+            z_1 = integrate_ode(
+                    vector_field=vector_field,
+                    params=params_no_grad,
+                    z0=state0,
+                    x=x,
+                    time_span=(0.0, 1.0),
+                    num_steps=num_steps,
+                    method=integration_method,
+                    output_type=output_type
+                )
+            # add the learned offset
+            z_1 = z_1 + jnp.concatenate([self.apply(params_no_grad, method=self._get_z_0), jnp.zeros(batch_shape + (1,))], axis=-1)
         else:
             # Standard vector field for z only
             def vector_field(params, z, x, t):
                 return self.dz_dt(params, z, x, t)
 
-            return integrate_ode(
-                vector_field=vector_field,
-                params=params_no_grad,
-                z0=z0,
-                x=x,
-                time_span=(0.0, 1.0),
-                num_steps=num_steps,
-                method=integration_method,
-                output_type=output_type
-            )
+            z_1 = integrate_ode(
+                    vector_field=vector_field,
+                    params=params_no_grad,
+                    z0=z0,
+                    x=x,
+                    time_span=(0.0, 1.0),
+                    num_steps=num_steps,
+                    method=integration_method,
+                    output_type=output_type
+                )
+            # if output_type == "end_point":
+            #     z_1 = self.apply(params, z_1, x, jnp.ones(batch_shape), training=False, method=self._get_model_output)
+            # else:
+            #     z_final = self.apply(params, z_1[-1,...], x, jnp.ones(batch_shape), training=False, method=self._get_model_output)
+            #     z_1 = jnp.concatenate([z_1, z_final[None,...]], axis=0)
+            z_1 = z_1 + self.apply(params_no_grad, method=self._get_z_0)
+
+        return z_1
+
+
 
     @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
     def train_step(

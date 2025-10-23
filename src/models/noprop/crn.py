@@ -13,21 +13,7 @@ import flax.linen as nn
 from ...embeddings.time_embeddings import create_time_embedding
 from ...embeddings.eta_embedding import create_eta_embedding
 from ...layers.concatsquash import ConcatSquash
-
-def get_act(activation_name: str):
-    """Get activation function by name."""
-    if activation_name == "swish":
-        return nn.swish
-    elif activation_name == "relu":
-        return nn.relu
-    elif activation_name == "gelu":
-        return nn.gelu
-    elif activation_name == "tanh":
-        return nn.tanh
-    elif activation_name == "swiglu":
-        return nn.swish  # SwiGLU is implemented as Swish in Flax
-    else:
-        return nn.swish  # Default
+from ...utils.activation_utils import get_activation_function
 
 class ConditionalResNet_CNNx(nn.Module):
     """Simple CNN Conditional ResNet for smaller datasets like MNIST."""
@@ -102,12 +88,12 @@ class ConditionalResnet_MLP(nn.Module):
         dropout_rate: Dropout rate for regularization
     """
     
-    hidden_dims: Tuple[int, ...] = (256, 256, 128)
+    hidden_dims: Tuple[int, ...] = (128, 128, 128)
     time_embed_dim: int = 64
     time_embed_method: str = "sinusoidal"
     eta_embed_type: Optional[str] = "default"
     eta_embed_dim: Optional[int] = None
-    activation_fn: Callable = get_act("swish")
+    activation_fn: Callable = get_activation_function("swish")
     use_batch_norm: bool = False
     dropout_rate: float = 0.1
         
@@ -126,10 +112,17 @@ class ConditionalResnet_MLP(nn.Module):
 
         output_dim = z.shape[-1]
         
-        # 1. eta embedding (if specified)
+        # 1. eta embedding and preprocessing
         if self.eta_embed_type is not None:
             eta_embedding = create_eta_embedding(embedding_type=self.eta_embed_type, eta_dim=x.shape[-1])
             x = eta_embedding(x)
+        for hidden_dim in self.hidden_dims:
+            x = nn.Dense(hidden_dim)(x)
+            if self.use_batch_norm:
+                x = nn.BatchNorm(use_running_average=True)(x)
+            x = self.activation_fn(x)
+            if self.dropout_rate > 0:
+                x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
         if self.eta_embed_dim is not None:
             x = nn.Dense(self.eta_embed_dim)(x)
         
@@ -139,6 +132,7 @@ class ConditionalResnet_MLP(nn.Module):
             method=self.time_embed_method
         )
         t = t_embedding(t)
+        
         # 3. fusion - broadcast t to match batch shape of z
         t_broadcast = jnp.broadcast_to(t, z.shape[:-1] + t.shape[-1:])
         z = ConcatSquash(self.hidden_dims[0])(z, x, t_broadcast)

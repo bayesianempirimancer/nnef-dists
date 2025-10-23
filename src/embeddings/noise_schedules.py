@@ -199,13 +199,14 @@ class LinearNoiseSchedule(NoiseSchedule):
         that stays away from the boundaries: ᾱ(t) = 0.05 + 0.9*t
         """
         # Modified linear schedule to avoid boundary singularities
-        # ᾱ(t) = 0.05 + 0.9*t ranges from 0.05 to 0.95
+        # ᾱ(t) = 0.01 + 0.98*t ranges from 0.01 to 0.99
         alpha_t = 0.01 + 0.98 * t
         alpha_prime_t = 0.98
         
         # Clip to avoid numerical issues
+        alpha_t = jnp.clip(alpha_t, 0.001, 0.999)
         
-        # gamma_t = jnp.log(alpha_t/(1.0 - alpha_t))
+        # gamma_t = logit(alpha_t) so that alpha_t = sigmoid(gamma_t)
         gamma_t = jax.scipy.special.logit(alpha_t)
         gamma_prime_t = alpha_prime_t / (alpha_t * (1.0 - alpha_t))
         
@@ -299,7 +300,9 @@ class SimpleLearnableNoiseSchedule(NoiseSchedule):
         
         For sigmoid schedule: ᾱ(t) = σ(γ(t - 0.5)), so γ(t) = γ(t - 0.5)
         This ensures ᾱ(t) = sigmoid(γ(t)) = σ(γ(t - 0.5))
-        γ'(t) = γ
+        γ'(t) = γ (constant for linear schedule)
+        
+        But for better dynamics, let's use a quadratic schedule where γ'(t) varies with time.
         """
         gamma_rate = self.param('gamma_rate', nn.initializers.constant(4.0), ())
         gamma_offset = self.param('gamma_offset', nn.initializers.constant(0.5), ())
