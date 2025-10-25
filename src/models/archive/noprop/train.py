@@ -19,7 +19,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent.parent))
 
 from src.models.base_trainer import BaseETTrainer
 from src.models.base_training_config import BaseTrainingConfig
-from src.models.noprop.trainer import NoPropTrainer, create_unified_config
+from src.models.noprop.trainer import NoPropTrainer, create_config
 from src.models.noprop.ct import NoPropCT
 from src.models.noprop.fm import NoPropFM
 from src.models.noprop.df import NoPropDF
@@ -40,6 +40,9 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     parser.add_argument("--model-type", type=str, required=True,
                        choices=["CT", "FM", "DF"],
                        help="Model type to train (CT, FM, or DF)")
+    parser.add_argument("--model", type=str, default="ConditionalResnet_MLP",
+                       choices=["ConditionalResnet_MLP", "NaturalFlow", "GeometricFlow", "PotentialFlow"],
+                       help="Model architecture to use (default: ConditionalResnet_MLP)")
     
     # Training arguments
     parser.add_argument("--epochs", type=int, default=400,
@@ -48,8 +51,8 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
                        help="Number of epochs with dropout (default: 300)")
     parser.add_argument("--learning-rate", type=float, default=0.001,
                        help="Learning rate (default: 0.001)")
-    parser.add_argument("--batch-size", type=int, default=256,
-                       help="Batch size (default: 256)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                       help="Batch size (default: None, uses full dataset)")
     parser.add_argument("--eval-steps", type=int, default=10,
                        help="Steps between detailed evaluation (default: 10)")
     
@@ -72,31 +75,20 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     return parser
 
 
-def create_model(model_type: str, config, z_shape: Tuple[int, ...], x_ndims: int = 1):
+def create_model(model_type: str, model: str, config, z_shape: Tuple[int, ...], x_ndims: int = 1):
     """Create the specified model type."""
     
     if model_type.upper() == "CT":
-        # Create noise schedule for CT
-        if config.noise_schedule == "linear":
-            noise_schedule = LinearNoiseSchedule()
-        elif config.noise_schedule == "sigmoid":
-            noise_schedule = SigmoidNoiseSchedule()
-        elif config.noise_schedule == "cosine":
-            noise_schedule = CosineNoiseSchedule()
-        elif config.noise_schedule == "simple_learnable":
-            noise_schedule = SimpleLearnableNoiseSchedule()
-        elif config.noise_schedule == "learnable":
-            noise_schedule = LearnableNoiseSchedule()
-        else:
-            raise ValueError(f"Unknown noise schedule: {config.noise_schedule}")
-        
-        return NoPropCT(config=config, z_shape=z_shape, x_ndims=x_ndims, noise_schedule=noise_schedule)
+        # Use specified model architecture for CT
+        return NoPropCT(config=config, z_shape=z_shape, x_ndims=x_ndims, model=model, noise_schedule=config.noise_schedule)
     
     elif model_type.upper() == "FM":
-        return NoPropFM(config=config, z_shape=z_shape, x_ndims=x_ndims)
+        # Use specified model architecture for FM
+        return NoPropFM(config=config, z_shape=z_shape, x_ndims=x_ndims, model=model)
     
     elif model_type.upper() == "DF":
-        return NoPropDF(config=config, z_shape=z_shape, x_ndims=x_ndims)
+        # Use specified model architecture for DF
+        return NoPropDF(config=config, z_shape=z_shape, x_ndims=x_ndims, model=model)
     
     else:
         raise ValueError(f"Unknown model type: {model_type}")
@@ -121,18 +113,31 @@ def main():
     print("\n1. Loading training data...")
     data, eta_dim, mu_dim = BaseETTrainer.load_training_data(args.data)
     
-    # Standardize targets (mu_T) to help with the undershooting problem
+    # Set batch size to full dataset if not specified (disable minibatching by default)
+    if args.batch_size is None:
+        args.batch_size = len(data['train']['eta'])
+        print(f"Batch size set to full dataset size: {args.batch_size}")
+    
+    # Standardize targets (mu_T) to help with training
     print("Standardizing targets...")
+    
+    # Standardize targets (mu_T)
     train_mu_T_mean = jnp.mean(data['train']['mu_T'], axis=0)
     train_mu_T_std = jnp.std(data['train']['mu_T'], axis=0)
     
-    # Apply standardization to all splits
+    # Apply target standardization to all splits
     data['train']['mu_T'] = (data['train']['mu_T'] - train_mu_T_mean) / train_mu_T_std
     data['val']['mu_T'] = (data['val']['mu_T'] - train_mu_T_mean) / train_mu_T_std
     if 'test' in data:
         data['test']['mu_T'] = (data['test']['mu_T'] - train_mu_T_mean) / train_mu_T_std
     
     print(f"Target standardization: mean={train_mu_T_mean}, std={train_mu_T_std}")
+    
+    # Store standardization parameters for later use
+    standardization_params = {
+        'mu_T_mean': train_mu_T_mean,
+        'mu_T_std': train_mu_T_std
+    }
     
     # Create model configuration
     print("\n2. Creating model configuration...")
@@ -145,7 +150,7 @@ def main():
         'batch_size': args.batch_size,
     }
     
-    config = create_unified_config(args.model_type, **config_kwargs)
+    config = create_config(args.model_type, **config_kwargs)
     print(f"Configuration: {config}")
     
     # Set up output directory
@@ -166,7 +171,7 @@ def main():
     z_shape = (eta_dim,)
     x_ndims = 1  # x_ndims = 1 for the cases we're considering
     
-    model = create_model(args.model_type, config, z_shape, x_ndims)
+    model = create_model(args.model_type, args.model, config, z_shape, x_ndims)
     print(f"Model created: {type(model).__name__}")
     
     # Create trainer
@@ -189,6 +194,9 @@ def main():
         eval_steps=args.eval_steps,
         output_dir=output_dir
     )
+    
+    # Add standardization parameters to results
+    results['standardization_params'] = standardization_params
     
     # Save results and generate plots
     print("\n7. Saving results and generating plots...")

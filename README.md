@@ -2,6 +2,16 @@
 
 Fast variational inference with non‑named exponential-family distributions using neural networks to learn the mapping between natural parameters and expected sufficient statistics. Features both direct ET networks and geometric-flow approaches, plus a unified data-generation and training pipeline.
 
+## Recent Updates
+
+- **NEW**: `flow_models` directory with unified flow-based training framework
+- **NEW**: 3 training protocols (FM, CT, DF) × 7 model architectures = 21 combinations
+- **NEW**: Flow wrappers for potential, geometric, natural, and convex flows
+- **NEW**: Direct ResNet models (MLP, Convex, Bilinear) with conditional inputs
+- **NEW**: `layers/gradnet_utils.py` with efficient gradient computation utilities  
+- **IMPROVED**: Automatic broadcasting and parameter scoping for flow models
+- **IMPROVED**: Unified training script supporting all protocol-architecture combinations
+
 ## Overview
 
 For an exponential family with natural parameters $\eta$ and sufficient statistics $T(x)$, inference by message passing requires the mapping $\mu_T(\eta) = \langle T(x) \mid \eta \rangle$. Named exponential-family distributions are easy because they have closed-form, invertible expressions for $\mu_T(\eta)$. In general,
@@ -21,6 +31,9 @@ src/
 │   ├── ef.py                  # Distribution implementations
 │   ├── data_generator.py      # BlackJAX-based sampling and expectations
 │   └── generate_data.py       # CLI/script to generate datasets
+├── layers/                     # Neural network layers and utilities
+│   ├── gradnet_utils.py      # Gradient computation utilities for flow models
+│   └── archive/               # Archived layer implementations
 └── models/
     ├── __init__.py             # Model registry/imports
     ├── base_config.py          # BaseConfig
@@ -32,12 +45,208 @@ src/
     ├── quadratic_et/           # Quadratic ET model + train.py
     ├── glow_et/                # Glow ET model + train.py
     ├── geometric_flow_et/      # Geometric Flow ET model + train.py
-    └── noprop_*                # NoProp variants
+    ├── flow_models/            # Flow-based models (NEW)
+    │   ├── crn.py             # Conditional ResNet architectures + flow wrappers
+    │   ├── fm.py              # Flow Matching protocol (NoPropFM)
+    │   ├── ct.py              # Continuous-Time protocol (NoPropCT)
+    │   ├── df.py              # Diffusion protocol (NoPropDF)
+    │   ├── train.py           # Unified training script (21 combinations)
+    │   └── trainer.py         # Unified trainer (NoPropTrainer)
+    ├── noprop/                # NoProp variants
+    └── archive/               # Archived/legacy code (IGNORE)
 
 ```
 
 - Data configs for sampling are in `data/configs/*.yaml`.
 - Archive/legacy directories under `src/models/archive/` and `src/training/` should be ignored for new development.
+
+## Flow Models (NEW)
+
+The `flow_models` directory contains a unified framework for flow-based neural networks that learn the mapping between natural parameters and expected sufficient statistics. This framework supports **three training protocols** and **seven model architectures**, providing maximum flexibility for different learning scenarios.
+
+### Training Protocols
+
+The framework supports three distinct training protocols, each with different mathematical foundations:
+
+1. **Flow Matching (FM)**: Direct learning of the flow field `dz/dt = v_θ(z,t)` where the model learns to match the true flow field
+2. **Continuous-Time (CT)**: Continuous-time dynamics with learned drift `dz/dt = f_θ(z,t)` using neural ODEs
+3. **Diffusion (DF)**: Diffusion-based learning with noise schedules, learning to reverse a diffusion process
+
+### Model Architectures
+
+The framework supports seven different model architectures, each with different mathematical properties:
+
+#### Flow Wrapper Models (4 types)
+1. **Potential Flow**: `dz/dt = -∇_z V(z,x,t)` where V is a learned convex potential function
+2. **Geometric Flow**: `dz/dt = Σ @ x` where Σ is a learned matrix (often Hessian of a potential)
+3. **Natural Flow**: `dz/dt = Σ @ Σ^T @ x` where Σ is learned and symmetric
+4. **Convex Potential Flow**: Like potential flow but with guaranteed convexity using ICNN
+
+#### Direct ResNet Models (3 types)
+5. **Conditional ResNet MLP**: Direct neural network `dz/dt = f(z,x,t)` with standard MLP architecture
+6. **Convex Conditional ResNet**: ResNet with guaranteed convexity using ICNN layers
+7. **Bilinear Conditional ResNet**: ResNet with bilinear interactions between z and processed x
+
+### Usage
+
+The unified training script supports all combinations of training protocols and model architectures:
+
+```bash
+# Flow Matching (FM) examples
+conda activate numpyro
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model potential_flow --epochs 200 --learning-rate 0.00001
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model geometric_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model natural_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model convex_potential_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model conditional_resnet_mlp --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model convex_conditional_resnet --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model bilinear_conditional_resnet --epochs 200
+
+# Continuous-Time (CT) examples
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol ct --model potential_flow --epochs 200 --learning-rate 0.00001
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol ct --model geometric_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol ct --model natural_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol ct --model convex_potential_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol ct --model conditional_resnet_mlp --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol ct --model convex_conditional_resnet --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol ct --model bilinear_conditional_resnet --epochs 200
+
+# Diffusion (DF) examples
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol df --model potential_flow --epochs 200 --learning-rate 0.00001
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol df --model geometric_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol df --model natural_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol df --model convex_potential_flow --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol df --model conditional_resnet_mlp --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol df --model convex_conditional_resnet --epochs 200
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol df --model bilinear_conditional_resnet --epochs 200
+```
+
+**Total combinations: 3 protocols × 7 architectures = 21 different training configurations!**
+
+### Key Features
+
+- **Unified Training**: Single script supports all protocols and architectures
+- **Gradient Utilities**: Efficient computation of gradients and Hessians
+- **Broadcasting Support**: Handles batch dimensions automatically
+- **Flow Wrappers**: Clean interface for different flow types
+- **Automatic Plotting**: Learning curves, trajectory diagnostics, and flow visualizations
+
+## API Reference
+
+### Training Script Arguments
+
+The unified training script `src/models/flow_models/train.py` accepts the following arguments:
+
+#### Required Arguments
+- `--data`: Path to training data file (.pkl format)
+
+#### Training Protocol Selection
+- `--training-protocol {fm,ct,df}`: Choose the training protocol
+  - `fm`: Flow Matching - Direct learning of flow field
+  - `ct`: Continuous-Time - Neural ODE-based dynamics
+  - `df`: Diffusion - Diffusion-based learning with noise schedules
+
+#### Model Architecture Selection
+- `--model {potential_flow,geometric_flow,natural_flow,convex_potential_flow,conditional_resnet_mlp,convex_conditional_resnet,bilinear_conditional_resnet}`: Choose the model architecture
+
+#### Training Parameters
+- `--epochs`: Number of training epochs (default: 400)
+- `--dropout-epochs`: Number of epochs with dropout (default: 300)
+- `--learning-rate`: Learning rate (default: 0.001)
+- `--batch-size`: Batch size (default: 256)
+- `--eval-steps`: Steps between detailed evaluation (default: 10)
+
+#### Loss and Regularization
+- `--loss-type {mse,snr_weighted_mse}`: Loss function type (default: mse)
+- `--reg-weight`: Regularization weight (default: 0.0)
+
+#### Noise Schedule (for FM/DF protocols)
+- `--noise-schedule {linear,sigmoid,cosine,simple_learnable,learnable}`: Noise schedule type (default: linear)
+- `--sigma-t`: Noise level for FM/DF models (default: 0.1)
+
+#### Output
+- `--output-dir`: Output directory (default: auto-generated)
+
+### Model Architecture Details
+
+#### Flow Wrapper Models
+These models use mathematical flow equations with learned components:
+
+1. **`potential_flow`**: `dz/dt = -∇_z V(z,x,t)`
+   - Uses a learned potential function V(z,x,t)
+   - Suitable for conservative flows
+   - Requires gradient computation of the potential
+   - **⚠️ Learning Rate**: Requires lower learning rate (0.00001) for numerical stability
+
+2. **`geometric_flow`**: `dz/dt = Σ @ x`
+   - Uses a learned matrix Σ (often Hessian of a potential)
+   - Suitable for geometric transformations
+   - Efficient for linear-like flows
+
+3. **`natural_flow`**: `dz/dt = Σ @ Σ^T @ x`
+   - Uses a learned symmetric matrix Σ
+   - Ensures positive definiteness through Σ @ Σ^T
+   - Suitable for natural gradient flows
+
+4. **`convex_potential_flow`**: Like potential flow but with guaranteed convexity
+   - Uses ICNN (Input Convex Neural Networks) for the potential
+   - Ensures the potential function is convex
+   - Suitable for optimization-based flows
+
+#### Direct ResNet Models
+These models use direct neural network architectures:
+
+5. **`conditional_resnet_mlp`**: Standard MLP with conditional inputs
+   - Direct neural network: `dz/dt = f(z,x,t)`
+   - Most flexible architecture
+   - Standard MLP with residual connections
+
+6. **`convex_conditional_resnet`**: ResNet with guaranteed convexity
+   - Uses ICNN layers for convexity
+   - Ensures output is convex in z
+   - Suitable for optimization-based learning
+
+7. **`bilinear_conditional_resnet`**: ResNet with bilinear interactions
+   - Processes x with MLP, then combines with z via bilinear interaction
+   - Uses ConcatSquash for time integration
+   - Suitable for multiplicative interactions
+
+### Training Protocol Details
+
+#### Flow Matching (FM)
+- **Mathematical Foundation**: Learns to match the true flow field `v_θ(z,t) ≈ v_true(z,t)`
+- **Loss Function**: MSE between predicted and true flow fields
+- **Advantages**: Direct, interpretable, stable training
+- **Best For**: Most flow-based applications, especially with potential flows
+- **Note**: `potential_flow` models require lower learning rates (0.00001) for numerical stability
+
+#### Continuous-Time (CT)
+- **Mathematical Foundation**: Neural ODEs with learned drift `dz/dt = f_θ(z,t)`
+- **Loss Function**: ODE integration loss
+- **Advantages**: Continuous dynamics, flexible time stepping
+- **Best For**: Time-dependent problems, continuous optimization
+
+#### Diffusion (DF)
+- **Mathematical Foundation**: Learns to reverse a diffusion process
+- **Loss Function**: Denoising loss with noise schedules
+- **Advantages**: Robust to noise, good for generative modeling
+- **Best For**: Noisy data, generative tasks, robust learning
+
+### Command Line Examples
+
+```bash
+# Quick start with Flow Matching + Potential Flow (requires lower learning rate)
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model potential_flow --epochs 100 --learning-rate 0.00001
+
+# High-performance training with Continuous-Time + Geometric Flow
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol ct --model geometric_flow --epochs 300 --learning-rate 0.0005 --batch-size 512
+
+# Robust training with Diffusion + Bilinear ResNet
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol df --model bilinear_conditional_resnet --epochs 250 --dropout-epochs 200 --learning-rate 0.0005
+
+# Convex optimization with Flow Matching + Convex Potential Flow
+python -m src.models.flow_models.train --data data/laplace_product_data_10000.pkl --training-protocol fm --model convex_potential_flow --epochs 200 --learning-rate 0.001
+```
 
 ## End-to-End Pipeline
 
@@ -200,6 +409,8 @@ if __name__ == "__main__":
 
 ### Step 5: Train Your Model
 
+#### Traditional ET Models
+
 Run the training script:
 
 ```bash
@@ -207,11 +418,70 @@ conda activate numpyro
 python src/models/your_model/train.py --data data/your_distribution_data_10000.pkl --epochs 200
 ```
 
+#### Flow Models (NEW)
+
+For flow-based models, use the unified training script:
+
+```bash
+conda activate numpyro
+python -m src.models.flow_models.train --data data/your_distribution_data_10000.pkl --training-protocol fm --model potential_flow --epochs 200 --learning-rate 0.00001
+```
+
 **Training features:**
 - Automatic data loading and validation
 - Train-val-test split (80-10-10)
 - Learning curves and model saving
 - Configurable hyperparameters via command line
+- **Flow Models**: Support for multiple training protocols (FM, CT, DF) and architectures
+
+## Gradient Utilities and Flow Wrappers
+
+The `src/layers/gradnet_utils.py` module provides efficient gradient computation utilities for flow models:
+
+### Gradient Utilities
+
+- **`GradNetUtility`**: Computes gradients using `jax.grad`
+- **`ValueAndGradNetUtility`**: Computes both values and gradients
+- **`HessNetUtility`**: Computes Hessians using `jax.hessian`
+- **`GradAndHessNetUtility`**: Computes both gradients and Hessians
+- **`ValueAndGradAndHessNetUtility`**: Computes values, gradients, and Hessians
+
+### Flow Wrappers
+
+The `src/models/flow_models/crn.py` module provides flow wrapper classes:
+
+- **`PotentialFlowWrapper`**: Implements `dz/dt = -∇_z V(z,x,t)`
+- **`GeometricFlowWrapper`**: Implements `dz/dt = Σ @ x` where Σ is the Hessian
+- **`NaturalFlowWrapper`**: Implements `dz/dt = Σ @ Σ^T @ x` where Σ is learned
+
+### Key Features
+
+- **Automatic Broadcasting**: Handles batch dimensions and scalar inputs
+- **Parameter Scoping**: Proper Flax parameter management
+- **Efficient Computation**: Optimized gradient and Hessian computation
+- **Unified Interface**: Consistent API across all flow types
+
+## Recent Changes to Models Directory
+
+### Directory Structure Changes
+
+1. **New `flow_models` Directory**: Added unified framework for flow-based models
+2. **New `layers` Directory**: Added gradient computation utilities
+3. **Archive Directory**: Moved legacy code to `src/models/archive/`
+
+### Model Usage Changes
+
+1. **Unified Training Script**: Single script supports all training protocols and model architectures
+2. **Flow Wrappers**: Clean interface for different flow types (potential, geometric, natural)
+3. **Gradient Utilities**: Efficient computation of gradients and Hessians for flow models
+4. **Broadcasting Support**: Automatic handling of batch dimensions and scalar inputs
+
+### Migration Guide
+
+- **Old**: Individual training scripts for each model type
+- **New**: Unified training script with protocol and model selection
+- **Old**: Direct gradient computation in model classes
+- **New**: Gradient utilities with automatic broadcasting and parameter scoping
 
 ### Step 6: Use Your Model for Coordinate Ascent Variational Inference
 

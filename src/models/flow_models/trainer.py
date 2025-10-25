@@ -1,11 +1,11 @@
 """
-Unified trainer for NoProp models (CT, FM, DF).
+Unified trainer for NoProp models (FM, CT, DF).
 
-This trainer can handle all three model types with identical training protocols
+This trainer can handle all three training protocols with identical training procedures
 to ensure fair comparison.
 """
 
-from typing import Any, Dict, Tuple, Optional, Union
+from typing import Any, Dict, Tuple, Optional
 import time
 import os
 from pathlib import Path
@@ -15,42 +15,50 @@ import jax.numpy as jnp
 import jax.random as jr
 import optax
 
-from ..base_trainer import BaseETTrainer
-from ..base_training_config import BaseTrainingConfig
-from .ct import NoPropCT, Config as CTConfig
-from .fm import NoPropFM, Config as FMConfig  
-from .df import NoPropDF, Config as DFConfig
+try:
+    from ..base_trainer import BaseETTrainer
+    from ..base_training_config import BaseTrainingConfig
+    from .fm import NoPropFM, Config as FMConfig
+    from .ct import NoPropCT, Config as CTConfig
+    from .df import NoPropDF, Config as DFConfig
+except ImportError:
+    from src.models.base_trainer import BaseETTrainer
+    from src.models.base_training_config import BaseTrainingConfig
+    from fm import NoPropFM, Config as FMConfig
+    from ct import NoPropCT, Config as CTConfig
+    from df import NoPropDF, Config as DFConfig  
 # Trajectory plotting functions are imported in save_results method
 
 
 class NoPropTrainer:
     """
-    Trainer for NoProp models (CT, FM, DF).
+    Unified trainer for NoProp models (FM, CT, DF) with CRN architectures.
     
-    This trainer ensures identical training protocols across all model types
-    for fair comparison.
+    This trainer supports all training protocols (FM, CT, DF) and all model architectures
+    (potential_flow, geometric_flow, natural_flow, conditional_resnet_mlp).
     """
     
-    def __init__(self, model: Union[NoPropCT, NoPropFM, NoPropDF]):
+    def __init__(self, model):
         """
         Initialize the trainer.
         
         Args:
-            model: The NoProp model to train (CT, FM, or DF)
+            model: The NoProp model to train (NoPropFM, NoPropCT, or NoPropDF)
         """
         self.model = model
-        self.model_type = self._get_model_type()
+        # Determine model type from the model instance
+        if isinstance(model, NoPropFM):
+            self.model_type = "FM"
+        elif isinstance(model, NoPropCT):
+            self.model_type = "CT"
+        elif isinstance(model, NoPropDF):
+            self.model_type = "DF"
+        else:
+            raise ValueError(f"Unsupported model type: {type(model)}")
         
     def _get_model_type(self) -> str:
-        """Determine the model type from the model instance."""
-        if isinstance(self.model, NoPropCT):
-            return "CT"
-        elif isinstance(self.model, NoPropFM):
-            return "FM"
-        elif isinstance(self.model, NoPropDF):
-            return "DF"
-        else:
-            raise ValueError(f"Unknown model type: {type(self.model)}")
+        """Return model type."""
+        return self.model_type
     
     def train(self, 
               train_eta: jnp.ndarray, 
@@ -100,7 +108,11 @@ class NoPropTrainer:
         if dropout_epochs is None:
             dropout_epochs = num_epochs
         
-        print(f"Model type: {self.model_type}")
+        # Print model-specific information
+        if hasattr(self.model, 'model'):
+            print(f"{self.model_type} Model: {self.model.model}")
+        else:
+            print(f"{self.model_type} Model: {type(self.model).__name__}")
         print(f"Epochs: {num_epochs}")
         print(f"Dropout epochs: {dropout_epochs}")
         print(f"Learning rate: {learning_rate}")
@@ -288,7 +300,8 @@ class NoPropTrainer:
                 val_mu_T=results['val_mu_T'],
                 test_mu_T=results['test_mu_T'],
                 output_path=str(learning_plot_path),
-                model_name=f"NoProp {self.model_type} Model"
+                model_name=f"NoProp {self.model_type} Model",
+                skip_epochs=4
             )
             print(f"Learning curve plot saved to: {learning_plot_path}")
         except Exception as e:
@@ -365,22 +378,4 @@ class NoPropTrainer:
         print(f"Results and plots saved to: {output_path}")
 
 
-def create_unified_config(model_type: str, **kwargs) -> Union[CTConfig, FMConfig, DFConfig]:
-    """
-    Create a unified configuration for the specified model type.
-    
-    Args:
-        model_type: "CT", "FM", or "DF"
-        **kwargs: Additional configuration parameters
-        
-    Returns:
-        Configuration object for the specified model type
-    """
-    if model_type.upper() == "CT":
-        return CTConfig.create_from_args(type('Args', (), kwargs)())
-    elif model_type.upper() == "FM":
-        return FMConfig.create_from_args(type('Args', (), kwargs)())
-    elif model_type.upper() == "DF":
-        return DFConfig.create_from_args(type('Args', (), kwargs)())
-    else:
-        raise ValueError(f"Unknown model type: {model_type}. Must be 'CT', 'FM', or 'DF'")
+# create_unified_config function removed - flow_models directory only uses FM models

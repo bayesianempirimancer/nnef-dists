@@ -12,13 +12,14 @@ import flax.linen as nn
 class BilinearLayer(nn.Module):
     """Bilinear layer that computes x^T W y for input tensors x and y."""
     features: int
+    dropout_rate: float = 0.0
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, y: jnp.ndarray, training: bool = True) -> jnp.ndarray:
         # Initialize bilinear weight matrix
-        Wxy = self.param('W', nn.initializers.lecun_normal(), use_bias=False, shape=(x.shape[-1], y.shape[-1], self.features))
-        Wx = self.param('Wx', nn.initializers.lecun_normal(), use_bias=False, shape=(x.shape[-1], self.features))
-        Wy = self.param('Wy', nn.initializers.lecun_normal(), use_bias=False, shape=(y.shape[-1], self.features))
+        Wxy = self.param('W', nn.initializers.lecun_normal(), (x.shape[-1], y.shape[-1], self.features))
+        Wx = self.param('Wx', nn.initializers.lecun_normal(), (x.shape[-1], self.features))
+        Wy = self.param('Wy', nn.initializers.lecun_normal(), (y.shape[-1], self.features))
         bias = self.param('bias', nn.initializers.zeros, (self.features,))
         
         x_broadcast = x
@@ -28,9 +29,10 @@ class BilinearLayer(nn.Module):
         linear_x = x @ Wx
         linear_y = y @ Wy
 
-        bilinear_term = nn.Dropout(rate=self.dropout_rate)(bilinear_term, deterministic=not training)
-        linear_x = nn.Dropout(rate=self.dropout_rate)(linear_x, deterministic=not training)
-        linear_y = nn.Dropout(rate=self.dropout_rate)(linear_y, deterministic=not training)
+        if self.dropout_rate > 0:
+            bilinear_term = nn.Dropout(rate=self.dropout_rate)(bilinear_term, deterministic=not training)
+            linear_x = nn.Dropout(rate=self.dropout_rate)(linear_x, deterministic=not training)
+            linear_y = nn.Dropout(rate=self.dropout_rate)(linear_y, deterministic=not training)
 
         return bilinear_term + linear_x + linear_y + bias
 

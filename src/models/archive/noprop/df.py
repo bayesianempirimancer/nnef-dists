@@ -21,7 +21,7 @@ from ...embeddings.noise_schedules import NoiseSchedule, LinearNoiseSchedule, Co
 from ...embeddings.noise_schedules import SimpleLearnableNoiseSchedule, LearnableNoiseSchedule
 from ...utils.ode_integration import integrate_ode
 from ...utils.jacobian_utils import trace_jacobian
-from .crn import ConditionalResnet_MLP as ConditionalResnet
+from .crn import create_cond_resnet
 
 
 # ============================================================================
@@ -30,41 +30,35 @@ from .crn import ConditionalResnet_MLP as ConditionalResnet
 
 @dataclass(frozen=True)
 class Config(BaseConfig):
-    """Configuration for NoProp CT Network."""
+    """Configuration for NoProp DF Network."""
     
     # Set model_name from config_dict
-    model_name: str = "simple_crn"
+    model_name: str = "noprop_df_net"
     output_dir_parent: str = "artifacts"
     
     # Properties for easy access
     
-    # Hierarchical configuration structure loss_type: "snr_weighted_mse", "mse"
+    # Hierarchical configuration structure
     config_dict = {
-        "model_name": "simple_crn",
+        "model_name": "noprop_df_net",
         "loss_type": "mse",
         
-        # NoProp specific parameters
-        "noise_schedule": "sigmoid",
+        # NoProp specific parameters (note that noise schedule is fixed for DF)
+        "noise_schedule": "linear",
         "num_timesteps": 20,
         "integration_method": "euler",
         "reg_weight": 0.0,
         
-        "model": {
-            "type": "conditional_resnet",
-            "hidden_sizes": (128, 128, 128),
-            "dropout_rate": 0.1,
-            "activation": "swish",
-            "use_batch_norm": False,
-            "use_layer_norm": False,
-        },
-        
-        "embedding": {
+        "model_config": {
+            "output_dim": None,
+            "hidden_dims": (128, 128, 128),
             "time_embed_dim": 64,
             "time_embed_method": "sinusoidal",
-            "time_embed_min_freq": 1.0,
-            "time_embed_max_freq": 1000.0,
+            "dropout_rate": 0.1,
             "eta_embed_type": "default",
             "eta_embed_dim": None,
+            "activation_fn": "swish",
+            "use_batch_norm": False,
         }
     }
     
@@ -84,6 +78,8 @@ class NoPropDF(BaseModel[Config]):
     
     config: Config
     z_shape: Tuple[int, ...]  # Shape of target z (excluding batch dimensions)
+    model: nn.Module
+    model_config: Optional[Config] = None
     x_ndims: int = 1  # Number of dimensions in input x
     noise_schedule: NoiseSchedule = SimpleLearnableNoiseSchedule()
     
@@ -151,18 +147,14 @@ class NoPropDF(BaseModel[Config]):
         training: bool = True
     ) -> jnp.ndarray:
         """Get model output - @nn.compact method for parameter initialization."""
-        # Create the conditional ResNet model using config parameters
-        from ...utils.activation_utils import get_activation_function
-        model = ConditionalResnet(
-            hidden_dims=self.config.model.hidden_sizes,
-            time_embed_dim=self.config.embedding.time_embed_dim,
-            time_embed_method=self.config.embedding.time_embed_method,
-            eta_embed_type=self.config.embedding.eta_embed_type,
-            eta_embed_dim=self.config.embedding.eta_embed_dim,
-            activation_fn=get_activation_function(self.config.model.activation),
-            dropout_rate=self.config.model.dropout_rate
+        # Use factory function to create model instance
+        model_config_dict = self.config.config_dict.get('model_config', {})
+        model_instance = create_cond_resnet(
+            model_type=self.model,
+            model_config=model_config_dict
         )
-        return model(z, x, t, training=training)
+
+        return model_instance(z, x, t, training=training)
 
     @nn.compact
     def get_gamma_gamma_prime_t(self, t: jnp.ndarray):

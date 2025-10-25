@@ -1,11 +1,12 @@
 """
-NoProp-CT: Continuous-time NoProp implementation.
+NoProp-FM: Flow Matching NoProp implementation.
 
-This module implements the continuous-time variant of NoProp using neural ODEs.
-The key idea is to model the denoising process as a continuous-time dynamical system.
+This module implements the flow matching variant of NoProp.
+The key idea is to model the denoising process as a flow that transforms
+a base distribution to the target distribution.
 """
 
-from typing import Any, Dict, Optional, Tuple, Callable
+from typing import Any, Dict, Tuple, Optional
 from functools import partial, cached_property
 from dataclasses import dataclass
 
@@ -17,115 +18,149 @@ import optax
 
 from ..base_model import BaseModel
 from ..base_config import BaseConfig
-from ...embeddings.noise_schedules import NoiseSchedule, LearnableNoiseSchedule, CosineNoiseSchedule, LinearNoiseSchedule
+from ...utils.activation_utils import get_activation_function
 from ...utils.ode_integration import integrate_ode
 from ...utils.jacobian_utils import trace_jacobian
+from .crn import create_cond_resnet
 
 
 # ============================================================================
 # CONFIGURATION CLASS
 # ============================================================================
 
-@dataclass
+@dataclass(frozen=True)
 class Config(BaseConfig):
-    """Configuration for NoProp CT Network."""
+    """Configuration for NoProp FM Network."""
     
-    # === MODEL IDENTIFICATION ===
-    model_name: str = "noprop_ct_net"
+    # Set model_name from config_dict
+    model_name: str = "noprop_fm_net"
+    output_dir_parent: str = "artifacts"
     
-    # === NOPROP CT SPECIFIC PARAMETERS ===
-    z_shape: Tuple[int, ...] = (9,)  # Shape of target z (excluding batch dimensions)
-    x_shape: Tuple[int, ...] = (9,)  # Shape of input x (excluding batch dimensions)
-    num_timesteps: int = 20
-    integration_method: str = "euler"  # "euler" or "heun"
-    reg_weight: float = 0.0  # Hyperparameter from the paper
-    noise_schedule_type: str = "linear"  # Type of noise schedule to use
+    # Properties for easy access
+    
+    # Hierarchical configuration structure
+    config_dict = {
+        "model_name": "noprop_fm_net",
+        "loss_type": "mse",
+        
+        # NoProp specific parameters
+        "num_timesteps": 20,
+        "integration_method": "euler",
+        "reg_weight": 0.0,
+        "sigma_t": 0.1,
+        
+        "model_config": {
+            "output_dim": None,
+            "hidden_dims": (128, 128, 128),
+            "time_embed_dim": 64,
+            "time_embed_method": "sinusoidal",
+            "dropout_rate": 0.1,
+            "eta_embed_type": "default",
+            "eta_embed_dim": None,
+            "activation_fn": "swish",
+            "use_batch_norm": False,
+        }
+    }
+    
+
 
 
 # ============================================================================
 # MODEL IMPLEMENTATION
 # ============================================================================
 
-class NoPropCT(BaseModel[Config]):
-    """Continuous-time NoProp implementation.
+class NoPropFM(BaseModel[Config]):
+    """Flow Matching NoProp implementation.
     
-    This class implements the continuous-time variant where the denoising
-    process is modeled as a neural ODE. The model learns a vector field
-    that transforms noisy targets to clean ones over continuous time.
+    This class implements the flow matching variant where the denoising
+    process is modeled as a flow that transforms a base distribution
+    to the target distribution over continuous time.
     """
-    
     config: Config
-
+    z_shape: Tuple[int, ...]  # Shape of target z (excluding batch dimensions)
+    x_ndims: int = 1  # Number of dimensions in input x
+    model: str = "conditional_resnet_mlp" # Model class that will be instantiated
+    model_config: Optional[Config] = None
+    
+    @property
+    def z_ndims(self) -> int:
+        """Number of dimensions in z_shape."""
+        return len(self.z_shape)
+    
+    
+    @property
+    def z_dim(self) -> int:
+        """Total flattened dimension of z."""
+        return self._get_z_dim
+    
+    
     @cached_property
     def _get_z_dim(self) -> int:
         """Calculate the flattened dimension from z_shape."""
         z_dim = 1
-        for dim in self.config.z_shape:
+        for dim in self.z_shape:
             z_dim *= dim
         return z_dim
 
+    # @nn.compact
+    # def _get_z_0(self) -> jnp.ndarray:
+    #     """Learnable initial z parameter."""
+    #     z_0 = self.param('z0', lambda rng, shape: jr.normal(rng, shape), self.z_shape)
+    #     return z_0
+
     def _flatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
         """Flatten the z tensor."""
-        if len(self.config.z_shape) > 1:
+        if len(self.z_shape) > 1:
             return z.reshape(z.shape[:-1] + (self._get_z_dim(),))
         else:
             return z
 
     def _unflatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
         """Unflatten the z tensor."""
-        if len(self.config.z_shape) > 1:
-            return z.reshape(z.shape[:-1] + self.config.z_shape)
+        if len(self.z_shape) > 1:
+            return z.reshape(z.shape[:-1] + self.z_shape)
         else:
             return z
 
     @nn.compact
-    def __call__(self, eta: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> jnp.ndarray:
         """
-        Main forward pass through the NoProp CT network.
+        Main forward pass to compute model output.
         
         Args:
-            eta: Natural parameters of shape (batch_size, eta_dim)
+            z: Current state/trajectory of shape (batch_size, z_dim)
+            x: Input data (natural parameters eta) of shape (batch_size, x_dim)
+            t: Time step of shape (batch_size,)
             training: Whether in training mode (affects dropout)
             rngs: Random number generator keys
             **kwargs: Additional arguments (for HF compatibility)
             
         Returns:
-            Tuple of (predictions, internal_loss) where:
-            - predictions: Expected sufficient statistics E[T(X)|η] of shape (batch_size, output_dim)
-            - internal_loss: Internal regularization loss (scalar, usually 0.0)
+            Model output [batch_shape + z_shape]
         """
-        # Get model output
         z = self._unflatten_z(z)
-        model_output = self._get_model_output(z, x, t)
-        model_output = self._flatten_z(model_output)
-        gamma_t, gamma_prime_t = self._get_gamma_gamma_prime(t)
-        
-        # Compute alpha_t and tau_inverse from gamma values using utility functions
-        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
-        tau_inverse = self.noise_schedule.get_tau_inverse_from_gamma(gamma_t, gamma_prime_t)
-        
-        # Broadcast to the correct shape for tensor operations
-        batch_shape = z.shape[:-len(self.x_shape)]
-                
-        # Compute dz/dt = tau_inverse(t) * (sqrt(alpha(t))*model_output - (1+alpha(t))/2*z)
-        # The model_output should predict the target, so we use it in place of target
-        return tau_inverse[...,None] * (jnp.sqrt(alpha_t[...,None]) * model_output - 0.5*(1 + alpha_t[...,None]) * z)
-    
+        model_output = self._get_model_output(z, x, t, training=training)
+        output = self._flatten_z(model_output)
+        return output
+
     @nn.compact
     def _get_model_output(
         self, 
         z: jnp.ndarray, 
         x: jnp.ndarray, 
-        t: jnp.ndarray
+        t: jnp.ndarray,
+        training: bool = True
     ) -> jnp.ndarray:
         """Get model output - @nn.compact method for parameter initialization."""
-        return self.model(z, x, t)
-    
-    @nn.compact
-    def _get_gamma_gamma_prime(self, t: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Get gamma values - @nn.compact method for parameter initialization."""
-        return self.noise_schedule(t)
-    
+        # Use factory function to create model instance
+        model_config = self.config.config_dict.get('model_config', {})
+        model_instance = create_cond_resnet(
+            model_type=self.model,
+            model_config=model_config
+        )
+        
+        return model_instance(z, x, t, training=training)
+
     def dz_dt(
         self,
         params: Dict[str, Any],
@@ -133,18 +168,21 @@ class NoPropCT(BaseModel[Config]):
         x: jnp.ndarray,
         t: jnp.ndarray
     ) -> jnp.ndarray:
-        """Public interface for dz_dt computation.
-        
+        """Wrapper for ode solver
+
         Args:
             params: Model parameters
-            z: Current state [batch_size, num_classes]
-            x: Input data [batch_size, height, width, channels]
+            z: Current state [batch_size + z_shape]
+            x: Input data [batch_size, ...]
             t: Current time [batch_size]
             
         Returns:
-            Vector field dz/dt [batch_size, num_classes]
+            Vector field dz/dt [batch_size + z_shape]
         """
-        return self.apply(params, z, x, t)
+        # Ensure t is always treated as an array for proper broadcasting
+        t = jnp.asarray(t)
+        
+        return self.apply(params, z, x, t, training=False)
     
     @partial(jax.jit, static_argnums=(0,))  # self is static
     def compute_loss(
@@ -154,12 +192,10 @@ class NoPropCT(BaseModel[Config]):
         target: jnp.ndarray,
         key: jr.PRNGKey
     ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
-        """Compute the NoProp-CT loss according to the paper and PyTorch implementation.
+        """Compute the NoProp-FM loss.
         
-        Based on the PyTorch implementation, the loss should be:
-        L_CT = E[(1/SNR(t)) * ||model_output - z_t||²]
-        
-        where model_output is the predicted denoised target and SNR(t) is the signal-to-noise ratio.
+        For flow matching, the loss is simply the MSE between model output and target:
+        L_FM = E[||model_output - (z_target - z_0)||²]  where z_0 is a random initial condition
         
         Args:
             params: Model parameters
@@ -170,54 +206,46 @@ class NoPropCT(BaseModel[Config]):
         Returns:
             Tuple of (loss, metrics)
         """
-        # Infer batch size from input tensor
-        batch_shape = x.shape[:-len(self.x_shape)]
+
         target = self._flatten_z(target)
-
-        # Sample random timesteps
-        key, t_key, z_t_key = jr.split(key, 3)
+        batch_shape = target.shape[:-1]
+        # Split keys for all random operations
+        key, t_key, z_0_key, z_t_noise_key = jr.split(key, 4)
+        
         t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
+#        z_shift = self.apply(params, method=self._get_z_0)
+#        target = target - z_shift
 
-        gamma_t, gamma_prime_t = self.apply(params, t, method=self._get_gamma_gamma_prime)
-        alpha_t = self.noise_schedule.get_alpha_from_gamma(gamma_t)
-        z_t = jnp.sqrt(alpha_t[...,None]) * target + jnp.sqrt(1.0 - alpha_t[...,None]) * jr.normal(key, target.shape)
-        
-        # Sample z_t from backward process
-        model_output = self.apply(params, z_t, x, t, method=self._get_model_output)
+        z_0 = jr.normal(z_0_key, batch_shape + self.z_shape)
+        z_t = t[...,None] * target + self.config.sigma_t * jr.normal(z_t_noise_key, batch_shape + self.z_shape)
 
-        # Compute SNR and SNR derivative from gamma values
-        snr = jnp.exp(gamma_t)  # SNR = exp(γ(t))
-        snr_prime = gamma_prime_t * snr  # SNR' = γ'(t) * exp(γ(t))
+        # Get model output
+        key, dropout_key = jr.split(key)
+        dz_dt = self.apply(params, z_t, x, t, rngs={'dropout': dropout_key})
+        # Construct estimated target 
+        z_1_est = z_t + dz_dt*(1.0-t[:,None])
 
-        # Main loss: SNR-weighted MSE between model output and noisy input
-        # This follows the NoProp paper where loss is weighted by SNR derivative
-        reg_loss = jnp.mean(model_output ** 2)
-        squared_error = (model_output - target) ** 2
+        # Compute MSE loss
+        squared_error = (z_1_est - target) ** 2
         mse = jnp.mean(squared_error)
+        
+        # Regularization loss
+        reg_loss = jnp.mean(dz_dt ** 2)
+        fm_loss = jnp.mean((dz_dt - (target - z_0)) ** 2)
+#        no_prop_fm_loss = jnp.mean((dz_dt - (target - z_t)/(1.0-t[:,None])) ** 2)
 
-        # Compute SNR-weighted loss
-        snr_weighted_loss = jnp.mean(snr_prime[...,None] * squared_error)
-        
-        # Normalize by expected SNR_prime to stabilize learning rate
-        expected_snr_prime = jnp.mean(snr_prime)
-        ct_loss = snr_weighted_loss / expected_snr_prime
-#        ct_loss = snr_weighted_loss
-        
-        # total loss
-        total_loss = ct_loss + self.reg_weight * reg_loss
+        total_loss = fm_loss + self.config.reg_weight * reg_loss
 
         # Compute additional metrics
         metrics = {
-            "ct_loss": ct_loss,
+            "fm_loss": fm_loss,
+            "mse": mse,
             "reg_loss": reg_loss,
             "total_loss": total_loss,
-            "mse": mse,
-            "snr_weighted_loss": snr_weighted_loss,  # Before normalization
-            "snr_prime_mean": expected_snr_prime,  # SNR derivative
         }
         
         return total_loss, metrics
-        
+    
     @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type, with_logp are static arguments    
     def predict(
         self,
@@ -229,7 +257,8 @@ class NoPropCT(BaseModel[Config]):
         with_logp: bool = False,
         key: jr.PRNGKey = None
     ) -> jnp.ndarray:
-        """Generate predictions using the trained NoProp-CT neural ODE.
+        """
+        Generate predictions using the trained NoProp-FM neural ODE.
         
         This integrates the learned vector field from zeros (t=0)
         to the final prediction (t=1), following the paper's approach.
@@ -246,16 +275,18 @@ class NoPropCT(BaseModel[Config]):
         Returns:
             If output_type="end_point": Final prediction [batch_shape + z_shape]
             If output_type="trajectory": Full trajectory [num_steps+1, batch_shape + z_shape]
+            Note that in fully generative model you need to provide a key, and if x=None, then you need
+                to provide something that returns x.shape[:-self.x_ndims] = (number_of_samples,)
         """
         # Disable gradient tracking through parameters for inference
         params_no_grad = jax.lax.stop_gradient(params)
         
-        # Infer batch size from input tensor
-        batch_shape = x.shape[:-len(self.x_shape)]
-        if key is None:
-            z0 = jnp.zeros(batch_shape + self.z_shape)
-        else:
-            z0 = jr.normal(key, batch_shape + self.z_shape)  # check for sensitivity to initial conditions
+        # Infer batch shape from input tensor
+        batch_shape = x.shape[:-self.x_ndims]
+
+        z0 = jnp.zeros(batch_shape + self.z_shape)
+        if key is not None:
+            z0 = z0 +jr.normal(key, batch_shape + self.z_shape)  # check for sensitivity to initial conditions
         
         if with_logp:
             # Combined vector field for z and logp integration
@@ -267,29 +298,32 @@ class NoPropCT(BaseModel[Config]):
                 # Broadcast t to match batch size
                 t_broadcast = jnp.broadcast_to(t, z.shape[:-1])
                 trace_jac = trace_jacobian(self.dz_dt, params, z, x, t_broadcast)
-                dlogp_dt = trace_jac
+                dlogp_dt = -trace_jac
                 return jnp.concatenate([dz_dt, dlogp_dt[..., None]], axis=-1)
             
             # Initialize combined state
             logp0 = jnp.zeros(batch_shape)
             state0 = jnp.concatenate([z0, logp0[..., None]], axis=-1)
             
-            result = integrate_ode(
-                vector_field=vector_field,
-                params=params_no_grad,
-                z0=state0,
-                x=x,
-                time_span=(0.0, 1.0),
-                num_steps=num_steps,
-                method=integration_method,
-                output_type=output_type
-            )
+            z_1 = integrate_ode(
+                    vector_field=vector_field,
+                    params=params_no_grad,
+                    z0=state0,
+                    x=x,
+                    time_span=(0.0, 1.0),
+                    num_steps=num_steps,
+                    method=integration_method,
+                    output_type=output_type
+                )
+            # add the learned offset
+#            z_1 = z_1 + jnp.concatenate([self.apply(params_no_grad, method=self._get_z_0), jnp.zeros(batch_shape + (1,))], axis=-1)
+
         else:
             # Standard vector field for z only
             def vector_field(params, z, x, t):
                 return self.dz_dt(params, z, x, t)
 
-            result = integrate_ode(
+            z_1 = integrate_ode(
                 vector_field=vector_field,
                 params=params_no_grad,
                 z0=z0,
@@ -299,8 +333,8 @@ class NoPropCT(BaseModel[Config]):
                 method=integration_method,
                 output_type=output_type
             )
-        
-        return result
+#            z_1 = z_1 + self.apply(params_no_grad, method=self._get_z_0)
+        return z_1
 
     @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
     def train_step(
@@ -313,7 +347,7 @@ class NoPropCT(BaseModel[Config]):
         key: jr.PRNGKey,
     ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
 
-        """Single training step for NoProp-CT.
+        """Single training step for NoProp-FM.
         
         Args:
             params: Model parameters
@@ -325,9 +359,8 @@ class NoPropCT(BaseModel[Config]):
             
         Returns:
             Tuple of (updated_params, updated_opt_state, loss, metrics)
-    """
-        # Compute loss and gradients (t and z_t are sampled inside compute_loss)
-        # compute_loss is already JIT-compiled, so this will be fast
+        """
+        # Compute loss and gradients first
         (loss, metrics), grads = jax.value_and_grad(
             self.compute_loss, has_aux=True)(params, x, target, key)
         
@@ -336,4 +369,3 @@ class NoPropCT(BaseModel[Config]):
         updated_params = optax.apply_updates(params, updates)
         
         return updated_params, updated_opt_state, loss, metrics
-    

@@ -10,7 +10,7 @@ gradient computation for logZ networks.
 import jax.numpy as jnp
 import flax.linen as nn
 from typing import Optional, List
-
+from src.utils.math_utils import logsumexp
 
 class EtaEmbedding(nn.Module):
     """
@@ -141,11 +141,11 @@ class EtaEmbedding(nn.Module):
             # Convex-only features for convex neural networks
             features.append(eta)                
             features.append(eta_norm)  # ||eta|| is convex
-            features.append(1/eta_norm_safe)  # 1/||eta|| is convex
-            features.append(1/(eta_norm_safe ** 2))  # 1/||eta||^2 is convex
-            features.append(-jnp.log(1.0 + eta_norm))  # -log(1+||eta||) is convex
+            features.append(1.0/eta_norm_safe)  # -1/||eta|| is convex
+            features.append(-logsumexp(-jnp.abs(eta)), keepdims=True)
             features.append(jnp.abs(eta))  # |eta| is convex
-            features.append(eta ** 2)  # eta^2 is convex (only even degrees)
+            features.append(nn.softplus(eta))  # softplus is convex
+            features.append(nn.softplus(-eta))  # -softplus(-x) is convex
             
         else:
             raise ValueError(f"Unknown method: {method}. Use 'default', 'polynomial', 'advanced', 'minimal', or 'convex_only'")

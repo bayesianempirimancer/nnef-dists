@@ -20,7 +20,8 @@ def create_enhanced_learning_plot(
     val_mu_T: np.ndarray = None,
     test_mu_T: Optional[np.ndarray] = None,
     output_path: str = None,
-    model_name: str = "Model"
+    model_name: str = "Model",
+    skip_epochs: int = 4
 ) -> None:
     """
     Create a comprehensive learning analysis plot for any model type.
@@ -42,6 +43,7 @@ def create_enhanced_learning_plot(
         test_mu_T: Test targets [num_test_samples, output_dim] (optional)
         output_path: Path to save the plot
         model_name: Name of the model for the title
+        skip_epochs: Number of epochs to skip from the beginning (default: 4)
     """
     # Extract training history
     train_losses = results.get('train_losses', [])
@@ -84,14 +86,15 @@ def create_enhanced_learning_plot(
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     fig.suptitle(f'{model_name} - Learning Analysis', fontsize=16, fontweight='bold')
     
-    # Panel 1: Training and validation losses (skip first 20 epochs if available)
+    # Panel 1: Training and validation losses (skip first N epochs)
     ax1 = axes[0, 0]
-    skip_epochs = 20
-    if len(train_losses) > skip_epochs:
+    
+    # Skip first N epochs if requested
+    if skip_epochs > 0 and len(train_losses) > skip_epochs:
         epochs = range(skip_epochs + 1, len(train_losses) + 1)
         train_losses_plot = train_losses[skip_epochs:]
         val_losses_plot = val_losses[skip_epochs:]
-        title_suffix = " (after epoch 20)"
+        title_suffix = f" (after epoch {skip_epochs})"
     else:
         epochs = range(1, len(train_losses) + 1)
         train_losses_plot = train_losses

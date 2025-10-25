@@ -1,9 +1,8 @@
 """
-NoProp-FM: Flow Matching NoProp implementation.
+NoProp-CT: Continuous-time NoProp implementation.
 
-This module implements the flow matching variant of NoProp.
-The key idea is to model the denoising process as a flow that transforms
-a base distribution to the target distribution.
+This module implements the continuous-time variant of NoProp using neural ODEs.
+The key idea is to model the denoising process as a continuous-time dynamical system.
 """
 
 from typing import Any, Dict, Tuple, Optional
@@ -18,9 +17,11 @@ import optax
 
 from ..base_model import BaseModel
 from ..base_config import BaseConfig
+from ...embeddings.noise_schedules import NoiseSchedule, LinearNoiseSchedule, CosineNoiseSchedule, SigmoidNoiseSchedule
+from ...embeddings.noise_schedules import SimpleLearnableNoiseSchedule, LearnableNoiseSchedule
 from ...utils.ode_integration import integrate_ode
 from ...utils.jacobian_utils import trace_jacobian
-from .crn import ConditionalResnet_MLP as ConditionalResnet
+from .crn import create_cond_resnet
 
 
 # ============================================================================
@@ -29,43 +30,35 @@ from .crn import ConditionalResnet_MLP as ConditionalResnet
 
 @dataclass(frozen=True)
 class Config(BaseConfig):
-    """Configuration for NoProp FM Network."""
+    """Configuration for NoProp CT Network."""
     
     # Set model_name from config_dict
-    model_name: str = "noprop_fm_net"
+    model_name: str = "noprop_ct_net"
     output_dir_parent: str = "artifacts"
     
     # Properties for easy access
     
     # Hierarchical configuration structure
     config_dict = {
-        "model_name": "noprop_fm_net",
-        "loss_type": "mse",
+        "model_name": "noprop_ct_net",
+        "loss_type": "snr_weighted_mse",
         
         # NoProp specific parameters
+        "noise_schedule": "learnable",
         "num_timesteps": 20,
         "integration_method": "euler",
         "reg_weight": 0.0,
-        "sigma_t": 0.1,
         
-        "model": {
-            "type": "conditional_resnet",
-            "hidden_sizes": (128, 128, 128),
-            "dropout_rate": 0.1,
-            "activation": "swish",
-            "use_batch_norm": False,
-            "use_resnet": False,
-            "num_resnet_blocks": 0,
-            "use_layer_norm": False,
-        },
-        
-        "embedding": {
+        "model_config": {
+            "output_dim": None,
+            "hidden_dims": (128, 128, 128),
             "time_embed_dim": 64,
             "time_embed_method": "sinusoidal",
-            "time_embed_min_freq": 1.0,
-            "time_embed_max_freq": 1000.0,
+            "dropout_rate": 0.1,
             "eta_embed_type": "default",
             "eta_embed_dim": None,
+            "activation_fn": "swish",
+            "use_batch_norm": False,
         }
     }
     
@@ -76,24 +69,26 @@ class Config(BaseConfig):
 # MODEL IMPLEMENTATION
 # ============================================================================
 
-class NoPropFM(BaseModel[Config]):
-    """Flow Matching NoProp implementation.
+class NoPropCT(BaseModel[Config]):
+    """Continuous-time NoProp implementation.
     
-    This class implements the flow matching variant where the denoising
-    process is modeled as a flow that transforms a base distribution
-    to the target distribution over continuous time.
+    This class implements the continuous-time variant where the denoising
+    process is modeled as a neural ODE. The model learns a vector field
+    that transforms noisy targets to clean ones over continuous time.
     """
     
     config: Config
     z_shape: Tuple[int, ...]  # Shape of target z (excluding batch dimensions)
+    model: str = "conditional_resnet_mlp"  # Model type string
+    model_config: Optional[Config] = None
     x_ndims: int = 1  # Number of dimensions in input x
+    noise_schedule: str = "learnable"
     
     @property
     def z_ndims(self) -> int:
         """Number of dimensions in z_shape."""
         return len(self.z_shape)
-    
-    
+        
     @property
     def z_dim(self) -> int:
         """Total flattened dimension of z."""
@@ -107,12 +102,6 @@ class NoPropFM(BaseModel[Config]):
         for dim in self.z_shape:
             z_dim *= dim
         return z_dim
-
-    # @nn.compact
-    # def _get_z_0(self) -> jnp.ndarray:
-    #     """Learnable initial z parameter."""
-    #     z_0 = self.param('z0', lambda rng, shape: jr.normal(rng, shape), self.z_shape)
-    #     return z_0
 
     def _flatten_z(self, z: jnp.ndarray) -> jnp.ndarray:
         """Flatten the z tensor."""
@@ -131,7 +120,7 @@ class NoPropFM(BaseModel[Config]):
     @nn.compact
     def __call__(self, z: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray, training: bool = True, rngs: dict = None, **kwargs) -> jnp.ndarray:
         """
-        Main forward pass to compute model output.
+        Main forward pass to compute dz_dt
         
         Args:
             z: Current state/trajectory of shape (batch_size, z_dim)
@@ -142,13 +131,30 @@ class NoPropFM(BaseModel[Config]):
             **kwargs: Additional arguments (for HF compatibility)
             
         Returns:
-            Model output [batch_shape + z_shape]
+            dz/dt [batch_shape + z_shape]
         """
-        # z_0 = self._get_z_0()
         z = self._unflatten_z(z)
         model_output = self._get_model_output(z, x, t, training=training)
-        output = self._flatten_z(model_output)
-        return output
+        model_output = self._flatten_z(model_output)
+        
+        # Get gamma values directly from noise schedule
+        t = jnp.asarray(t)
+        gamma_t, gamma_prime_t = self.get_gamma_gamma_prime_t(t)
+
+        z0 = self._get_z_0()
+        # Compute alpha_t and tau_inverse from gamma values using static utility functions
+        alpha_t = nn.sigmoid(gamma_t)
+        tau_inverse = gamma_prime_t
+                        
+        # Compute dz/dt = tau_inverse(t) * (sqrt(alpha(t))*model_output - (1+alpha(t))/2*z)
+        # The model_output should predict the target, so we use it in place of target
+        return tau_inverse[...,None] * (jnp.sqrt(alpha_t[...,None]) * model_output - 0.5*(1 + alpha_t[...,None]) * z)
+    
+
+    @nn.compact
+    def _get_z_0(self) -> jnp.ndarray:
+        z_0 = self.param('z0', lambda rng, shape: jr.normal(rng, shape), self.z_shape)
+        return z_0
 
     @nn.compact
     def _get_model_output(
@@ -159,19 +165,35 @@ class NoPropFM(BaseModel[Config]):
         training: bool = True
     ) -> jnp.ndarray:
         """Get model output - @nn.compact method for parameter initialization."""
-        # Create the conditional ResNet model using config parameters
-        from ...utils.activation_utils import get_activation_function
-        model = ConditionalResnet(
-            hidden_dims=self.config.model.hidden_sizes,
-            time_embed_dim=self.config.embedding.time_embed_dim,
-            time_embed_method=self.config.embedding.time_embed_method,
-            eta_embed_type=self.config.embedding.eta_embed_type,
-            eta_embed_dim=self.config.embedding.eta_embed_dim,
-            activation_fn=get_activation_function(self.config.model.activation),
-            dropout_rate=self.config.model.dropout_rate
+        # Use the provided model class - no fallback, require explicit model
+        # Use factory function to create model instance
+        model_config_dict = self.config.config_dict.get('model_config', {})
+        model_instance = create_cond_resnet(
+            model_type=self.model,
+            model_config=model_config_dict
         )
-        return model(z, x, t, training=training)
 
+        return model_instance(z, x, t, training=training)
+
+    @nn.compact
+    def get_gamma_gamma_prime_t(self, t: jnp.ndarray):
+        """Get noise schedule output using @nn.compact method."""
+        # Create noise schedule object from string
+        if self.noise_schedule == "linear":
+            noise_schedule_obj = LinearNoiseSchedule()
+        elif self.noise_schedule == "cosine":
+            noise_schedule_obj = CosineNoiseSchedule()
+        elif self.noise_schedule == "sigmoid":
+            noise_schedule_obj = SigmoidNoiseSchedule()
+        elif self.noise_schedule == "learnable":
+            noise_schedule_obj = LearnableNoiseSchedule()
+        elif self.noise_schedule == "simple_learnable":
+            noise_schedule_obj = SimpleLearnableNoiseSchedule()
+        else:
+            raise ValueError(f"Unknown noise schedule: {self.noise_schedule}")
+        
+        return noise_schedule_obj(t)
+    
     def dz_dt(
         self,
         params: Dict[str, Any],
@@ -179,7 +201,7 @@ class NoPropFM(BaseModel[Config]):
         x: jnp.ndarray,
         t: jnp.ndarray
     ) -> jnp.ndarray:
-        """Wrapper for ode solver
+        """Wrapper for use with ode solver
 
         Args:
             params: Model parameters
@@ -191,8 +213,6 @@ class NoPropFM(BaseModel[Config]):
             Vector field dz/dt [batch_size + z_shape]
         """
         # Ensure t is always treated as an array for proper broadcasting
-        t = jnp.asarray(t)
-        
         return self.apply(params, z, x, t, training=False)
     
     @partial(jax.jit, static_argnums=(0,))  # self is static
@@ -203,10 +223,12 @@ class NoPropFM(BaseModel[Config]):
         target: jnp.ndarray,
         key: jr.PRNGKey
     ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
-        """Compute the NoProp-FM loss.
+        """Compute the NoProp-CT loss.
         
-        For flow matching, the loss is simply the MSE between model output and target:
-        L_FM = E[||model_output - (z_target - z_0)||²]  where z_0 is a random initial condition
+       For NoProp, the loss is weighted by the rate of change of the SNR:
+        L_CT = E[SNR'(t) * ||model_output - z_target||²]
+        
+        where model_output is the is related to but not equal to dz/dt.
         
         Args:
             params: Model parameters
@@ -217,46 +239,54 @@ class NoPropFM(BaseModel[Config]):
         Returns:
             Tuple of (loss, metrics)
         """
-
         target = self._flatten_z(target)
         batch_shape = target.shape[:-1]
         # Split keys for all random operations
-        key, t_key, z_0_key, z_t_noise_key = jr.split(key, 4)
-        
+        key, t_key, z0_key, z_t_noise_key = jr.split(key, 4)
         t = jr.uniform(t_key, batch_shape, minval=0.0, maxval=1.0)
-#        z_shift = self.apply(params, method=self._get_z_0)
-#        target = target - z_shift
 
-        z_0 = jr.normal(z_0_key, batch_shape + self.z_shape)
-        z_t = t[...,None] * target + self.config.sigma_t * jr.normal(z_t_noise_key, batch_shape + self.z_shape)
+        # Get alpha from noise schedule
+        gamma_t, gamma_prime_t = self.apply(params, t, method=self.get_gamma_gamma_prime_t)
+        alpha_t = nn.sigmoid(gamma_t)
+        
+        z_0 = self.apply(params, method=self._get_z_0)
+        target = target - z_0
+        z_t = jnp.sqrt(alpha_t[...,None]) * target + jnp.sqrt(1.0 - alpha_t[...,None]) * jr.normal(z_t_noise_key, target.shape)
 
         # Get model output
-        key, dropout_key = jr.split(key)
-        dz_dt = self.apply(params, z_t, x, t, rngs={'dropout': dropout_key})
-        # Construct estimated target 
-        z_1_est = z_t + dz_dt*(1.0-t[:,None])
+        model_output = self.apply(params, z_t, x, t, training=True, method=self._get_model_output, rngs={'dropout': key})
 
-        # Compute MSE loss
-        squared_error = (z_1_est - target) ** 2
-        mse = jnp.mean(squared_error)
-        
+        squared_error = (model_output - target) ** 2
+
         # Regularization loss
-        reg_loss = jnp.mean(dz_dt ** 2)
-        fm_loss = jnp.mean((dz_dt - (target - z_0)) ** 2)
-#        no_prop_fm_loss = jnp.mean((dz_dt - (target - z_t)/(1.0-t[:,None])) ** 2)
+        reg_loss = jnp.mean(model_output ** 2)
 
-        total_loss = fm_loss + self.config.reg_weight * reg_loss
+        if self.config.loss_type == "snr_weighted_mse":
+            snr = jnp.exp(gamma_t)  # SNR = exp(γ(t))
+            snr_weight = gamma_prime_t * snr  # SNR' = γ'(t) * exp(γ(t))
+            snr_weight_mean = jnp.mean(snr_weight)
+            snr_weight = snr_weight / snr_weight_mean
+            snr_weighted_loss = jnp.mean(snr_weight[..., None] * squared_error)
+            mse = None
+            total_loss = snr_weighted_loss + self.config.reg_weight * reg_loss
+        else:
+            mse = jnp.mean(squared_error)
+            total_loss = mse + self.config.reg_weight * reg_loss
+            snr_weighted_loss = None
+            snr_weight_mean = None
+            total_loss = mse + self.config.reg_weight * reg_loss
 
         # Compute additional metrics
         metrics = {
-            "fm_loss": fm_loss,
             "mse": mse,
             "reg_loss": reg_loss,
             "total_loss": total_loss,
+            "snr_weighted_loss": snr_weighted_loss,  # Before normalization
+            "snr_weight_mean": snr_weight_mean
         }
         
         return total_loss, metrics
-    
+        
     @partial(jax.jit, static_argnums=(0, 3, 4, 5, 6))  # self, num_steps, integration_method, output_type, with_logp are static arguments    
     def predict(
         self,
@@ -269,7 +299,7 @@ class NoPropFM(BaseModel[Config]):
         key: jr.PRNGKey = None
     ) -> jnp.ndarray:
         """
-        Generate predictions using the trained NoProp-FM neural ODE.
+        Generate predictions using the trained NoProp-CT neural ODE.
         
         This integrates the learned vector field from zeros (t=0)
         to the final prediction (t=1), following the paper's approach.
@@ -295,9 +325,12 @@ class NoPropFM(BaseModel[Config]):
         # Infer batch shape from input tensor
         batch_shape = x.shape[:-self.x_ndims]
 
-        z0 = jnp.zeros(batch_shape + self.z_shape)
         if key is not None:
-            z0 = z0 +jr.normal(key, batch_shape + self.z_shape)  # check for sensitivity to initial conditions
+            z0 = jr.normal(key, batch_shape + self.z_shape)
+        else: 
+            z0 = jnp.zeros(batch_shape + self.z_shape)
+#            z0 = self.apply(params, method=self._get_z_0)
+#            z0 = jnp.broadcast_to(z0, batch_shape + self.z_shape)
         
         if with_logp:
             # Combined vector field for z and logp integration
@@ -307,8 +340,7 @@ class NoPropFM(BaseModel[Config]):
                 dz_dt = self.dz_dt(params, z, x, t)
                 # Compute Jacobian trace for logp evolution
                 # Broadcast t to match batch size
-                t_broadcast = jnp.broadcast_to(t, z.shape[:-1])
-                trace_jac = trace_jacobian(self.dz_dt, params, z, x, t_broadcast)
+                trace_jac = trace_jacobian(self.dz_dt, params, z, x, t)
                 dlogp_dt = -trace_jac
                 return jnp.concatenate([dz_dt, dlogp_dt[..., None]], axis=-1)
             
@@ -327,25 +359,32 @@ class NoPropFM(BaseModel[Config]):
                     output_type=output_type
                 )
             # add the learned offset
-#            z_1 = z_1 + jnp.concatenate([self.apply(params_no_grad, method=self._get_z_0), jnp.zeros(batch_shape + (1,))], axis=-1)
-
+            z_1 = z_1 + jnp.concatenate([self.apply(params_no_grad, method=self._get_z_0), jnp.zeros(batch_shape + (1,))], axis=-1)
         else:
             # Standard vector field for z only
             def vector_field(params, z, x, t):
                 return self.dz_dt(params, z, x, t)
 
             z_1 = integrate_ode(
-                vector_field=vector_field,
-                params=params_no_grad,
-                z0=z0,
-                x=x,
-                time_span=(0.0, 1.0),
-                num_steps=num_steps,
-                method=integration_method,
-                output_type=output_type
-            )
-#            z_1 = z_1 + self.apply(params_no_grad, method=self._get_z_0)
+                    vector_field=vector_field,
+                    params=params_no_grad,
+                    z0=z0,
+                    x=x,
+                    time_span=(0.0, 1.0),
+                    num_steps=num_steps,
+                    method=integration_method,
+                    output_type=output_type
+                )
+            # if output_type == "end_point":
+            #     z_1 = self.apply(params, z_1, x, jnp.ones(batch_shape), training=False, method=self._get_model_output)
+            # else:
+            #     z_final = self.apply(params, z_1[-1,...], x, jnp.ones(batch_shape), training=False, method=self._get_model_output)
+            #     z_1 = jnp.concatenate([z_1, z_final[None,...]], axis=0)
+            z_1 = z_1 + self.apply(params_no_grad, method=self._get_z_0)
+
         return z_1
+
+
 
     @partial(jax.jit, static_argnums=(0, 5))  # self and optimizer are static arguments
     def train_step(
@@ -358,7 +397,7 @@ class NoPropFM(BaseModel[Config]):
         key: jr.PRNGKey,
     ) -> Tuple[Dict[str, Any], optax.OptState, jnp.ndarray, Dict[str, jnp.ndarray]]:
 
-        """Single training step for NoProp-FM.
+        """Single training step for NoProp-CT.
         
         Args:
             params: Model parameters
@@ -370,8 +409,9 @@ class NoPropFM(BaseModel[Config]):
             
         Returns:
             Tuple of (updated_params, updated_opt_state, loss, metrics)
-        """
-        # Compute loss and gradients first
+    """
+        # Compute loss and gradients (t and z_t are sampled inside compute_loss)
+        # compute_loss is already JIT-compiled, so this will be fast
         (loss, metrics), grads = jax.value_and_grad(
             self.compute_loss, has_aux=True)(params, x, target, key)
         
@@ -380,3 +420,4 @@ class NoPropFM(BaseModel[Config]):
         updated_params = optax.apply_updates(params, updates)
         
         return updated_params, updated_opt_state, loss, metrics
+    

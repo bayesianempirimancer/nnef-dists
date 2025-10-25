@@ -43,6 +43,10 @@ class Config(BaseConfig):
     residual_weight: float = 1.0
     weight_residual: bool = False
     share_parameters: bool = False
+    supports_dropout: bool = True  # MLP supports dropout
+    dropout_rate: float = 0.1  # Default dropout rate
+    use_layer_norm: bool = True  # Use layer normalization
+    output_dim: int = 2  # Output dimension (will be set from data)
     
 
 # ============================================================================

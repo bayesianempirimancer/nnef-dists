@@ -162,7 +162,7 @@ class ICNNBlock(nn.Module):
         return z_prev
 
 
-class ConvexResNetWrapper(nn.Module):
+class ConvexResNet(nn.Module):
     """
     ResNet wrapper specifically designed for convex blocks (SimpleConvexBlock, ICNNBlock).
     
@@ -209,26 +209,13 @@ class ConvexResNetWrapper(nn.Module):
         # Apply each convex block
         for i in range(self.num_blocks):
             # Create convex block for each iteration (avoids parameter sharing)
-            if self.block_type == "simple":
-                convex_block = SimpleConvexBlock(
-                    features=self.features,
-                    hidden_sizes=self.hidden_sizes,
-                    activation=self.activation,
-                    use_bias=self.use_bias,
-                    weight_scale=self.weight_scale,
-                    name=f'convex_block_{i}'
-                )
-            elif self.block_type == "icnn":
-                convex_block = ICNNBlock(
-                    features=self.features,
-                    hidden_sizes=self.hidden_sizes,
-                    activation=self.activation,
-                    use_bias=self.use_bias,
-                    name=f'icnn_block_{i}'
-                )
-            else:
-                raise ValueError(f"Unknown block_type: {self.block_type}")
-            
+            convex_block = ICNNBlock(
+                features=self.features,
+                hidden_sizes=self.hidden_sizes,
+                activation=self.activation,
+                use_bias=self.use_bias,
+                name=f'icnn_block_{i}'
+            )
             # Apply the convex block
             output = convex_block(current_input, training=training)
             
@@ -244,7 +231,7 @@ class ConvexResNetWrapper(nn.Module):
         return current_input
 
 
-class ConvexResNetWrapperBivariate(nn.Module):
+class ConvexResNetBivariate(nn.Module):
     """
     ResNet wrapper for convex blocks that take two inputs (x, y).
     
@@ -302,7 +289,6 @@ class ConvexResNetWrapperBivariate(nn.Module):
                 name=f'icnn_block_{i}'
             )
 
-            
             # Apply the convex block (note: convex blocks only take x input, not (x, y))
             # For bivariate case, we need to handle this differently
             # We'll use a simple approach: apply the block to x and add a linear transformation of y
@@ -325,14 +311,14 @@ class ConvexResNetWrapperBivariate(nn.Module):
 
 
 # Convenience functions for creating convex ResNet wrappers
-def create_convex_resnet_wrapper(features: int,
+def create_convex_resnet(features: int,
                                 hidden_sizes: tuple[int, ...],
                                 num_blocks: int = 3,
                                 activation: str = "softplus",
                                 use_bias: bool = True,
                                 weight_scale: float = 1.0,
                                 use_projection: bool = True,
-                                block_type: str = "simple") -> ConvexResNetWrapper:
+                                block_type: str = "simple") -> ConvexResNet:
     """
     Create a convex ResNet wrapper.
     
@@ -349,7 +335,7 @@ def create_convex_resnet_wrapper(features: int,
     Returns:
         ConvexResNetWrapper instance
     """
-    return ConvexResNetWrapper(
+    return ConvexResNet(
         features=features,
         hidden_sizes=hidden_sizes,
         num_blocks=num_blocks,
@@ -361,14 +347,14 @@ def create_convex_resnet_wrapper(features: int,
     )
 
 
-def create_convex_resnet_wrapper_bivariate(features: int,
+def create_convex_resnet_bivariate(features: int,
                                           hidden_sizes: tuple[int, ...],
                                           num_blocks: int = 3,
                                           activation: str = "softplus",
                                           use_bias: bool = True,
                                           weight_scale: float = 1.0,
                                           use_projection: bool = True,
-                                          block_type: str = "simple") -> ConvexResNetWrapperBivariate:
+                                          block_type: str = "simple") -> ConvexResNetBivariate:
     """
     Create a bivariate convex ResNet wrapper.
     
@@ -385,7 +371,7 @@ def create_convex_resnet_wrapper_bivariate(features: int,
     Returns:
         ConvexResNetWrapperBivariate instance
     """
-    return ConvexResNetWrapperBivariate(
+    return ConvexResNetBivariate(
         features=features,
         hidden_sizes=hidden_sizes,
         num_blocks=num_blocks,
